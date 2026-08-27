@@ -318,7 +318,7 @@ goes red — so this page cannot quietly become aspirational.
 
 | Claim | Artifact |
 | --- | --- |
-| Apache-2.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md), [ADR-0063](adr/0063-relicence-to-apache-2-0.md) |
+| Apache-2.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md), [ADR-0063](adr/0063-relicence-to-apache-2-0.md) |
 | Single maintainer, every path | `.github/CODEOWNERS` |
 | CLA required on every contribution | `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement* |
 | Docs-as-handover discipline | `CONTEXT.md`, [`docs/adr/`](adr/index.md), `CONTRIBUTING.md` → *ADR + CONTEXT discipline* |

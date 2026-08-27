@@ -30,7 +30,7 @@ nvidia-smi                     # optional — a CUDA device accelerates but is n
 
 ```bash
 # from a clone of the repo on the pod:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 # The provider declares gliner2[local] (torch/transformers live only in that extra — the
 # base gliner2 dist ships neither), so an editable install pulls the full local-inference stack.

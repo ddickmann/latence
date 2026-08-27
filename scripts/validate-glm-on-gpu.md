@@ -30,7 +30,7 @@ python --version               # 3.11+
 
 ```bash
 # from a clone of the repo on the pod:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 pip install -e packages/latence-parser-glm     # pulls transformers + torch + pillow + pypdfium2
 

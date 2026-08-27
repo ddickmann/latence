@@ -32,11 +32,11 @@ dependencies = ["latence-core"]
 # package makes 'parser.plaintext' available to any Pipeline with no core change —
 # the proof of dynamic, cross-package Provider discovery (ADR-0004).
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 [project.entry-points."latence.providers"]
 "parser.plaintext" = "latence_parser_plaintext.provider:PlaintextParser"

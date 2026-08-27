@@ -6,7 +6,7 @@ data — a RAG corpus and a knowledge graph — consumed by downstream AI system
 shape is the threat model: hostile bytes in, trustworthy data out, with the LLM/OCR/
 embedding machinery in between.
 
-This document is the detailed companion to [`SECURITY.md`](https://github.com/ddickmann/latence-framework/blob/main/SECURITY.md). It maps
+This document is the detailed companion to [`SECURITY.md`](https://github.com/ddickmann/latence/blob/main/SECURITY.md). It maps
 the trust boundaries, the mitigations **that exist in the code today** (with file
 references so a reader can verify each claim against the source, not the prose), and
 the residual risks that are honestly out of scope or deferred to Phase-2 hardening.

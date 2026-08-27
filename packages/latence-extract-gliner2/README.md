@@ -1,7 +1,7 @@
 # latence-extract-gliner2
 
 Fused zero-shot **Entity + Relation Extraction** Provider for the
-[Latence framework](https://github.com/ddickmann/latence-framework), over the
+[Latence framework](https://github.com/ddickmann/latence), over the
 [fastino GLiNER2](https://github.com/fastino-ai/GLiNER2) framework
 (`fastino/gliner2-multi-v1`, mdeberta-v3 encoder).
 

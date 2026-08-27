@@ -67,7 +67,7 @@ Download all the assets of a release into one directory, then:
 # 1. Verify the signature over SHA256SUMS (uvx = uv tool run; `pipx run sigstore` also works)
 uvx sigstore verify identity \
   --bundle SHA256SUMS.sigstore.json \
-  --cert-identity 'https://github.com/ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --cert-identity 'https://github.com/ddickmann/latence/.github/workflows/release.yml@refs/tags/v0.1.0' \
   --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
   SHA256SUMS
 

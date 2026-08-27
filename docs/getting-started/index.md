@@ -11,8 +11,8 @@ so you can run a full pipeline on a laptop with no GPU and no network:
 
 ```bash
 # Install from a clone — nothing is published to PyPI (see the note below).
-git clone https://github.com/ddickmann/latence-framework
-cd latence-framework
+git clone https://github.com/ddickmann/latence
+cd latence
 uv sync
 
 # 1. A guided wizard emits ONE opinionated, quality-baked stack config (ADR-0041).

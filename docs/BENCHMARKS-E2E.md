@@ -4,7 +4,7 @@
 >
 > Every value below is a placeholder. They are filled from a real GPU run, and this repository is
 > **not published publicly until they are**. See
-> [`RELEASE-GATES.md`](https://github.com/ddickmann/latence-framework/blob/main/RELEASE-GATES.md).
+> [`RELEASE-GATES.md`](https://github.com/ddickmann/latence/blob/main/RELEASE-GATES.md).
 >
 > The placeholders are **machine-checked**. `test_public_release_gate.py` inventories every
 > `PENDING:` token on this page; under `LATENCE_RELEASE_CHECK=1` it **fails the build** while any

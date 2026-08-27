@@ -485,7 +485,7 @@ _JOB_TYPE_FACET_URL = (
 )
 
 #: ``producer`` stamped on every event + facet — who generated this lineage.
-LINEAGE_PRODUCER = "https://github.com/ddickmann/latence-framework"
+LINEAGE_PRODUCER = "https://github.com/ddickmann/latence"
 _LATENCE_FACET_URL = f"{LINEAGE_PRODUCER}#/facets/LatenceRunFacet"
 
 #: The default OpenLineage *namespace* a run's jobs live in when the operator names none.

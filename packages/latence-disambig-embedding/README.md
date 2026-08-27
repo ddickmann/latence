@@ -1,7 +1,7 @@
 # latence-disambig-embedding
 
 The learned (embedding-based) **Disambiguation** Provider for the
-[Latence framework](https://github.com/ddickmann/latence-framework) — semantic entity
+[Latence framework](https://github.com/ddickmann/latence) — semantic entity
 resolution that merges cross-surface duplicates the algorithmic `disambiguation.cascade`
 misses ("IBM" ↔ "International Business Machines"), while keeping distinct entities apart.
 

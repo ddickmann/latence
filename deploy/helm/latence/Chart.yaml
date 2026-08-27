@@ -17,8 +17,8 @@ keywords:
   - ocr
   - vllm
   - on-prem
-home: https://github.com/ddickmann/latence-framework
+home: https://github.com/ddickmann/latence
 sources:
-  - https://github.com/ddickmann/latence-framework
+  - https://github.com/ddickmann/latence
 maintainers:
   - name: ddickmann

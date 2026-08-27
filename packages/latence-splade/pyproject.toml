@@ -41,11 +41,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 # Registers this Provider under the framework's index-time discovery group (ADR-0004/0049). A
 # SparseEmbedder is an index-time signal generator — the SPLADE-family sibling of the dense

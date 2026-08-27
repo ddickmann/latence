@@ -38,7 +38,7 @@ python --version               # 3.11+
 ## 1. Install the framework + the learned embedder WITH its heavy deps
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework && cd latence-framework
+git clone https://github.com/ddickmann/latence && cd latence
 uv sync
 # The disambiguator itself is pure-Python (installed by `uv sync`); the learned embedder it resolves
 # ships the torch/sentence-transformers stack — install it WITH deps on the pod:

@@ -62,14 +62,14 @@ SYNTHETIC_PII = register_dataset(
         # recomputes and compares it on every run.
         revision="74c22ebeb6a98e7c8c057b065c1cb4fe31d69ef0",
         revision_kind="content-digest",
-        homepage="https://github.com/ddickmann/latence-framework",
+        homepage="https://github.com/ddickmann/latence",
         license=DatasetLicense(
             dataset_license="Apache-2.0",
             code_license="Apache-2.0",
             commercial_use=True,
             attribution_required=True,
             verified_on="2026-07-18",
-            source_url="https://github.com/ddickmann/latence-framework/blob/main/LICENSE",
+            source_url="https://github.com/ddickmann/latence/blob/main/LICENSE",
             notes=(
                 "Corpus and generator are both original work in this repository and carry this "
                 "repository's own Apache-2.0 license — the one case where corpus and toolkit "

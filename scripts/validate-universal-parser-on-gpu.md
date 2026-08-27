@@ -33,7 +33,7 @@ which soffice || echo "no soffice — office files will use the MIT text-extract
 
 ```bash
 # from a clone of the repo on the pod:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 pip install -e packages/latence-parser-render    # pulls pypdfium2 + pillow + python-docx + openpyxl + python-pptx
 pip install -e packages/latence-parser-lighton   # the OCR sub-provider (transformers + torch); or latence-parser-glm

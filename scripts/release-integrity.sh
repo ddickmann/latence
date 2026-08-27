@@ -38,7 +38,7 @@
 #                       skip: an unsigned release must be an explicit choice, never an accident
 #                       caused by a missing OIDC permission.
 #   --identity-token T  Pass an explicit OIDC token to sigstore (otherwise ambient detection).
-#   --repo OWNER/NAME   Repo slug used in the verification identity (default: ddickmann/latence-framework).
+#   --repo OWNER/NAME   Repo slug used in the verification identity (default: ddickmann/latence).
 #   --workflow-ref REF  The workflow ref this run signs under, in GitHub's `github.workflow_ref`
 #                       form: OWNER/REPO/.github/workflows/FILE.yml@REF. Fulcio stamps exactly
 #                       this string into the certificate SAN, so VERIFY.md must quote it rather
@@ -52,7 +52,7 @@ OUT="release-integrity"
 SBOM_IN=""
 SIGN=""
 IDENTITY_TOKEN=""
-REPO_SLUG="${GITHUB_REPOSITORY:-ddickmann/latence-framework}"
+REPO_SLUG="${GITHUB_REPOSITORY:-ddickmann/latence}"
 WORKFLOW_REF=""
 
 die() {

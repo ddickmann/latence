@@ -108,13 +108,13 @@ _Measured 2026-07-19._
 
 | Field | Value |
 | --- | --- |
-| Dataset | [`latence-framework/latence_benchmark.corpora`](https://github.com/ddickmann/latence-framework) |
+| Dataset | [`latence-framework/latence_benchmark.corpora`](https://github.com/ddickmann/latence) |
 | Pinned revision (content-digest) | `74c22ebeb6a98e7c8c057b065c1cb4fe31d69ef0` |
 | Corpus license | **Apache-2.0** |
 | Evaluation-toolkit license | **Apache-2.0** |
 | Commercial use permitted | yes |
 | Attribution required | yes |
-| Verified on / at | 2026-07-18 — <https://github.com/ddickmann/latence-framework/blob/main/LICENSE> |
+| Verified on / at | 2026-07-18 — <https://github.com/ddickmann/latence/blob/main/LICENSE> |
 
 > Corpus and generator are both original work in this repository and carry this repository's own Apache-2.0 license — the one case where corpus and toolkit licenses coincide, verified rather than assumed (ADR-0012). The corpus contains NO real personal data: every value is a reserved or published example (RFC 2606 example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, the 4111... test card, AWS's AKIAIOSFODNN7EXAMPLE docs key, published example IBANs, and fictional names). It is inspectable in full in the repository.
 

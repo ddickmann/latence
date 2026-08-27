@@ -29,7 +29,7 @@ export OPENAI_API_KEY=sk-...           # OpenAI; OR an OpenRouter key with base_
 
 ```bash
 # from a clone of the repo:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 pip install -e packages/latence-schema-inducer   # pulls the openai client
 python -c "import openai; print('openai', openai.__version__)"

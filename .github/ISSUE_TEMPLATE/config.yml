@@ -10,25 +10,25 @@ contact_links:
   # in SUPPORT.md says the same thing in prose; the two must never disagree, and neither may
   # disagree with the actual setting. That is exactly what broke before.
   - name: Ask a question / discuss an idea (GitHub Discussions)
-    url: https://github.com/ddickmann/latence-framework/discussions
+    url: https://github.com/ddickmann/latence/discussions
     about: >
       The front door for usage questions, design sanity-checks and "is this the right shape"
       conversations. Blank issues are disabled on purpose: start here, and a discussion that
       turns out to be a real bug or a concrete proposal gets moved into the right issue
       template. Read SUPPORT.md first for what makes a question answerable.
   - name: Getting help — where to ask what
-    url: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md
+    url: https://github.com/ddickmann/latence/blob/main/SUPPORT.md
     about: >
       The routing table behind the choice above: which channel takes what, what makes a
       question answerable, and what this project explicitly does not offer (no SLA, no paid
       support). Read this before filing a bug for a how-do-I question.
   - name: Report a security vulnerability (private)
-    url: https://github.com/ddickmann/latence-framework/security/advisories/new
+    url: https://github.com/ddickmann/latence/security/advisories/new
     about: >
       Do NOT open a public issue for a suspected vulnerability. Report it privately via
       GitHub Security Advisories (or email per SECURITY.md) for coordinated disclosure.
   - name: Contributing guide — read this before writing code
-    url: https://github.com/ddickmann/latence-framework/blob/main/CONTRIBUTING.md
+    url: https://github.com/ddickmann/latence/blob/main/CONTRIBUTING.md
     about: >
       Dev setup, the gates, the test-first rule, the ADR process, how to add a Provider
       without touching core — and the CLA requirement that applies to every merged

@@ -1,6 +1,6 @@
 # latence-disambig-glinker
 
-**Enterprise GLinker Disambiguation Provider** for the [Latence framework](https://github.com/ddickmann/latence-framework) — registers `disambiguation.glinker` under the `latence.providers` entry-point group (ADR-0004), a drop-in for the in-core `disambiguation.cascade` / `disambiguation.embedding` behind the same [`Disambiguator`](../latence-core/src/latence_core/capability.py) seam and the identical `DisambiguationRecord` contract.
+**Enterprise GLinker Disambiguation Provider** for the [Latence framework](https://github.com/ddickmann/latence) — registers `disambiguation.glinker` under the `latence.providers` entry-point group (ADR-0004), a drop-in for the in-core `disambiguation.cascade` / `disambiguation.embedding` behind the same [`Disambiguator`](../latence-core/src/latence_core/capability.py) seam and the identical `DisambiguationRecord` contract.
 
 This is the **enterprise entity-linking + resolution engine** ported (PORT-AS-IS) from the private `latenceai-dataset-intelligence` repo (ADR-0046), fusing two halves into one Stage:
 

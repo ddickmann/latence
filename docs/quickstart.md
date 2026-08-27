@@ -23,8 +23,8 @@ The framework is a workspace of small packages: a thin core plus one package per
 ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). From a clone:
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework
-cd latence-framework
+git clone https://github.com/ddickmann/latence
+cd latence
 uv sync
 ```
 

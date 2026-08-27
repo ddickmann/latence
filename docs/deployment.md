@@ -190,7 +190,7 @@ recall parity with brute force is **measured on full query sets**, not assumed. 
 settings (`--distance dot` at load, `search_params: {hnsw_ef: 512}` at query) and the parity
 tables live in **[Serving with Qdrant](guides/serving-qdrant.md)**; the loader's idempotency,
 GDPR reconciliation and multi-tenancy contract are in
-[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence-framework/blob/main/packages/latence-sink-qdrant/README.md).
+[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence/blob/main/packages/latence-sink-qdrant/README.md).
 
 ## Orchestrators — the Airflow adapter
 
@@ -288,7 +288,7 @@ s/chunk, the GPU idle, no warning) can no longer pass a green build.
 The pins are **enforced constraints**, not documentation: `latence env verify` cross-checks the
 generated `requirements.in` / `constraints.txt`, the solved `requirements.lock`, the Provider
 packages' real dependency declarations and the smoke stack, and `scripts/verify-local.sh` runs it
-for every environment on every commit. See **[`deploy/env/README.md`](https://github.com/ddickmann/latence-framework/blob/main/deploy/env/README.md)**
+for every environment on every commit. See **[`deploy/env/README.md`](https://github.com/ddickmann/latence/blob/main/deploy/env/README.md)**
 for the full shape and for how to add one.
 
 ## Blackwell / CUDA-13: the compatibility matrix

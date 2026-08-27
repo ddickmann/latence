@@ -44,11 +44,11 @@ dependencies = [
 # 'parser.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
 # in-core CPU 'parser.document' by one config line (ADR-0007).
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 [project.entry-points."latence.providers"]
 "parser.endpoint" = "latence_parser_endpoint.provider:EndpointDocumentParser"

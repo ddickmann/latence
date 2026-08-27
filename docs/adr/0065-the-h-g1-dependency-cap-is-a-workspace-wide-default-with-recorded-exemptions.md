@@ -5,7 +5,7 @@
 Every third-party requirement declared by a package under `packages/` carries an **upper bound** —
 in `[project].dependencies` and in every `[project.optional-dependencies]` extra alike — unless the
 pair `(package, distribution)` appears in the exemption table of
-[`packages/latence-core/tests/test_dependency_caps.py`](https://github.com/ddickmann/latence-framework/blob/main/packages/latence-core/tests/test_dependency_caps.py)
+[`packages/latence-core/tests/test_dependency_caps.py`](https://github.com/ddickmann/latence/blob/main/packages/latence-core/tests/test_dependency_caps.py)
 with a reason. That test is the rule; the manifest comments are commentary on it.
 
 The scope question this decision settles is the one the convention had left open: the cap is **not**

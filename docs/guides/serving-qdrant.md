@@ -74,7 +74,7 @@ lose gold — but there is no reason to accept it.)
 The sink is idempotent and reconciling — re-loads upsert nothing for unchanged records and sweep
 stale points, and `verify-absent` is the GDPR erasure audit. The full loader contract (sparse
 vectors, `id_namespace` multi-tenancy, failure containment, the offline fake):
-[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence-framework/blob/main/packages/latence-sink-qdrant/README.md).
+[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence/blob/main/packages/latence-sink-qdrant/README.md).
 
 ## 3 · Serve queries through the production composition
 

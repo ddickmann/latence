@@ -116,13 +116,13 @@
     {
       "dataset": {
         "citation": "Latence synthetic PII corpus (Apache-2.0) \u2014 part of the latence-framework repo.",
-        "homepage": "https://github.com/ddickmann/latence-framework",
+        "homepage": "https://github.com/ddickmann/latence",
         "license": {
           "attribution_required": true,
           "code_license": "Apache-2.0",
           "commercial_use": true,
           "dataset_license": "Apache-2.0",
-          "source_url": "https://github.com/ddickmann/latence-framework/blob/main/LICENSE",
+          "source_url": "https://github.com/ddickmann/latence/blob/main/LICENSE",
           "verified_on": "2026-07-18"
         },
         "name": "synthetic-pii",

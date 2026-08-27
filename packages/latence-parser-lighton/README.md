@@ -1,7 +1,7 @@
 # latence-parser-lighton
 
 A **GPU, image→markdown OCR Parser** Provider (`parser.lighton`) for the
-[Latence framework](https://github.com/ddickmann/latence-framework), over
+[Latence framework](https://github.com/ddickmann/latence), over
 [**LightOn-OCR**](https://huggingface.co/lightonai/LightOnOCR-1B-1025) (`lightonai/LightOnOCR-1B-1025`)
 — a compact 1B vision-language OCR model, **Apache-2.0 weights AND code** — built through
 `AdapterBase` (H-A1), exactly like `parser.pdfplumber`.

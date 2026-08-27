@@ -1,7 +1,7 @@
 # latence-parser-lighton-vllm
 
 The **production OCR path**: a `image→markdown` OCR Parser Provider (`parser.lighton_vllm`) for the
-[Latence framework](https://github.com/ddickmann/latence-framework) that hits a **running vLLM
+[Latence framework](https://github.com/ddickmann/latence) that hits a **running vLLM
 OpenAI-compatible endpoint** serving
 [**LightOn-OCR-2**](https://huggingface.co/lightonai/LightOnOCR-2-1B) (`lightonai/LightOnOCR-2-1B`) —
 a compact vision-language OCR model, **Apache-2.0 weights AND code**.

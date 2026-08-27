@@ -30,9 +30,9 @@ authors:
   - family-names: Dickmann
     given-names: Dennis
     email: ddickmann81@gmail.com
-repository-code: "https://github.com/ddickmann/latence-framework"
-url: "https://ddickmann.github.io/latence-framework/"
-license-url: "https://github.com/ddickmann/latence-framework/blob/main/LICENSE"
+repository-code: "https://github.com/ddickmann/latence"
+url: "https://ddickmann.github.io/latence/"
+license-url: "https://github.com/ddickmann/latence/blob/main/LICENSE"
 keywords:
   - ai-ready-data
   - knowledge-graph

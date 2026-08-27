@@ -30,7 +30,7 @@ python --version               # 3.11+
 
 ```bash
 # from a clone of the repo on the pod:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 pip install -e packages/latence-relation-gliner   # pulls gliner (transformers/torch)
 python -c "from gliner import GLiNER; print('gliner ok')"

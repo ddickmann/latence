@@ -29,7 +29,7 @@ python --version               # 3.11+
 ## 1. Install the framework + the learned scorer WITH its heavy deps
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework && cd latence-framework
+git clone https://github.com/ddickmann/latence && cd latence
 uv sync
 # graph_completion.ultra ships the torch/torch-geometric/torch-scatter/easydict stack (the vendored
 # MIT ULTRA inference subset) — install it WITH the [ultra] extra on the pod. torch-geometric and

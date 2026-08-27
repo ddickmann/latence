@@ -1,13 +1,22 @@
-# Latence Framework
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/logo-light.svg">
+    <img alt="Latence" src="./docs/assets/logo-light.svg" width="380">
+  </picture>
+</p>
 
-**Point it at a folder of messy enterprise documents. Get back a PII-handled, embedded,
-provenance-carrying RAG corpus and an evidence-linked knowledge graph — as plain Parquet files
-you own.**
+<p align="center">
+  <strong>Point it at a folder of messy enterprise documents. Get back a PII-handled, embedded,<br>
+  provenance-carrying RAG corpus and an evidence-linked knowledge graph — as plain Parquet files you own.</strong>
+</p>
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](./pyproject.toml)
-[![CI](https://github.com/ddickmann/latence-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/ddickmann/latence-framework/actions/workflows/ci.yml)
-[![status pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange)](#status)
+<p align="center">
+  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-4F46E5"></a>
+  <a href="./pyproject.toml"><img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-4F46E5"></a>
+  <a href="https://github.com/ddickmann/latence/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ddickmann/latence/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="#status"><img alt="status pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-orange"></a>
+</p>
 
 > ### 🤖 Using a coding agent?
 > Point it at **[`llms.txt`](./llms.txt)**, or hand it
@@ -39,7 +48,7 @@ offset and source page.
 CPU-only. No GPU, no cloud, no credentials, no network calls at run time.
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework && cd latence-framework
+git clone https://github.com/ddickmann/latence && cd latence
 uv sync
 uv run latence-demo
 open /tmp/latence-demo/_latence/runs/demo/export/index.html
@@ -196,7 +205,7 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down ra
 **From a clone** — the path the quickstart uses, exercised end-to-end on every CI run. Python ≥ 3.11.
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework && cd latence-framework
+git clone https://github.com/ddickmann/latence && cd latence
 uv sync                                          # CPU-first env: core, demo, console, retrieval
 uv run latence --help
 uv pip install -e packages/latence-embedder-st   # add any opt-in Provider package by path

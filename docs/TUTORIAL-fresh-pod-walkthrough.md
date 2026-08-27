@@ -59,7 +59,7 @@ The full field reference for consumers lives in
 ```bash
 cd /workspace
 git clone <your-remote-url> latence-framework
-cd latence-framework
+cd latence
 ```
 
 ### 1.2 Install the packages the enterprise-SOTA stack uses — editable, **letting deps resolve**

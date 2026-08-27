@@ -35,11 +35,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py): the

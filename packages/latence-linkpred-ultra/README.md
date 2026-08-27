@@ -1,6 +1,6 @@
 # latence-linkpred-ultra
 
-Learned **graph-completion** Provider for the [Latence Framework](https://github.com/ddickmann/latence-framework):
+Learned **graph-completion** Provider for the [Latence Framework](https://github.com/ddickmann/latence):
 registers `graph_completion.ultra` on the Slice-1 `GraphCompleter` seam (ADR-0037). It predicts
 missing knowledge-graph edges with an **inductive ULTRA scorer** (ICLR'24, MIT) zero-shot from a
 pretrained checkpoint, with a **PyKEEN** (MIT) graceful fallback, behind a `Scorer` abstraction.

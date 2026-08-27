@@ -40,11 +40,11 @@ dependencies = [
 # package makes 'parser.document' available to any Pipeline with no core change
 # (ADR-0004), alongside the S1 'parser.plaintext'.
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 [project.entry-points."latence.providers"]
 "parser.document" = "latence_parser_document.provider:DocumentParser"

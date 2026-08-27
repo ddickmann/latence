@@ -1,6 +1,6 @@
 # latence-gliner25
 
-**GLiNER 2.5** Providers for the [Latence framework](https://github.com/ddickmann/latence-framework),
+**GLiNER 2.5** Providers for the [Latence framework](https://github.com/ddickmann/latence),
 over the [fastino GLiNER2](https://github.com/fastino-ai/GLiNER2) library at its **2.x** major
 (`gliner2>=2.0,<3`, released 2026-08-24).
 
@@ -50,7 +50,7 @@ gate and the loader across two distributions — and make it possible to install
 the two halves free to drift onto different `gliner2` minors. The sibling 1.x Providers are two
 packages for a historical reason (they were built a release apart, against two different
 checkpoints); that is not a precedent to copy. Recorded in
-[ADR-0064](https://ddickmann.github.io/latence-framework/adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary/).
+[ADR-0064](https://ddickmann.github.io/latence/adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary/).
 
 ## Same record contract, different engine — measured
 

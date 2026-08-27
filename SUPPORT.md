@@ -10,7 +10,7 @@ Pick the right channel and you will get a faster, better answer.
 
 | You want to… | Go here |
 | --- | --- |
-| Ask how to do something, or sanity-check a design | **`docs/` first** (see below), then **[GitHub Discussions](https://github.com/ddickmann/latence-framework/discussions)** — that is the front door for questions |
+| Ask how to do something, or sanity-check a design | **`docs/` first** (see below), then **[GitHub Discussions](https://github.com/ddickmann/latence/discussions)** — that is the front door for questions |
 | Report something that behaves incorrectly | **Bug report** issue template |
 | Propose a feature, a Stage behaviour, or a contract change | **Feature request** issue template |
 | Propose a new Provider (a model, endpoint, or cloud service) | **Provider request** issue template — it carries the licence-verification fields that gate a Provider |

@@ -140,7 +140,7 @@ def _run(
             "--out",
             str(out),
             "--repo",
-            "ddickmann/latence-framework",
+            "ddickmann/latence",
             *extra,
         ],
         cwd=_REPO_ROOT,
@@ -261,7 +261,7 @@ def test_sbom_is_stamped_with_the_release_identity(tmp_path: Path) -> None:
     assert component["version"] == "9.9.9"
     properties = {p["name"]: p["value"] for p in doc["metadata"]["properties"]}
     assert properties["latence:release:tag"] == "v9.9.9"
-    assert properties["latence:release:repository"] == "ddickmann/latence-framework"
+    assert properties["latence:release:repository"] == "ddickmann/latence"
     # The resolved dependency set survives stamping — that is the whole point of the SBOM.
     assert {"pydantic", "fsspec"} <= {c["name"] for c in doc["components"]}
     # ...and so does the coverage of every distribution the release publishes. Stamping a
@@ -287,7 +287,7 @@ def test_verify_instructions_pin_the_tag_and_link_the_cvd_policy(tmp_path: Path)
     # The identity an adopter pins must name the exact workflow AND the exact tag ref;
     # a generic identity would verify any signature this repo ever produced.
     assert (
-        "https://github.com/ddickmann/latence-framework/.github/workflows/release.yml"
+        "https://github.com/ddickmann/latence/.github/workflows/release.yml"
         "@refs/tags/v9.9.9" in text
     )
     assert "--cert-oidc-issuer 'https://token.actions.githubusercontent.com'" in text
@@ -296,7 +296,7 @@ def test_verify_instructions_pin_the_tag_and_link_the_cvd_policy(tmp_path: Path)
 
 
 _TAG_IDENTITY = (
-    "https://github.com/ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v9.9.9"
+    "https://github.com/ddickmann/latence/.github/workflows/release.yml@refs/tags/v9.9.9"
 )
 
 
@@ -309,7 +309,7 @@ def test_verify_identity_is_the_ref_the_run_actually_signs_under(tmp_path: Path)
     VERIFY.md whose own ``sigstore verify identity`` command fails on a perfectly good bundle —
     which an adopter cannot distinguish from tampering.
     """
-    branch_ref = "ddickmann/latence-framework/.github/workflows/release.yml@refs/heads/main"
+    branch_ref = "ddickmann/latence/.github/workflows/release.yml@refs/heads/main"
     _, out = _run(tmp_path, tag="v9.9.9", extra=("--no-sign", "--workflow-ref", branch_ref))
     text = (out / "VERIFY.md").read_text()
 
@@ -344,7 +344,7 @@ def test_tag_path_identity_is_unchanged_without_a_workflow_ref(tmp_path: Path) -
         extra=(
             "--no-sign",
             "--workflow-ref",
-            "ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v9.9.9",
+            "ddickmann/latence/.github/workflows/release.yml@refs/tags/v9.9.9",
         ),
     )
     assert (tag_run / "VERIFY.md").read_text() == text

@@ -53,7 +53,7 @@ curl -s http://localhost:8000/v1/models | python -m json.tool   # lists lightona
 ## 2. Install the framework + this provider (light client deps only)
 
 ```bash
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 pip install -e packages/latence-parser-lighton          # for the shared rasteriser (pypdfium2/pillow)
 pip install -e packages/latence-parser-lighton-vllm     # the served-vLLM provider + openai client

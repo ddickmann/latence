@@ -1,7 +1,7 @@
 # latence-parser-glm
 
 A **GPU, image→markdown OCR Parser** Provider (`parser.glm`) for the
-[Latence framework](https://github.com/ddickmann/latence-framework), over
+[Latence framework](https://github.com/ddickmann/latence), over
 [**GLM-OCR**](https://huggingface.co/zai-org/GLM-OCR) (`zai-org/GLM-OCR`, Zhipu/Z.ai) — a compact
 **0.9B** vision-language OCR model, **MIT weights AND code** — built through `AdapterBase` (H-A1) as
 the **near-twin** of the pod-validated `parser.lighton`.

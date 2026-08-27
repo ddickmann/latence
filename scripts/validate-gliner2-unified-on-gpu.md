@@ -37,7 +37,7 @@ nvidia-smi                     # a CUDA device is needed for the quantize+compil
 
 ```bash
 # from a clone of the repo on the pod:
-cd latence-framework
+cd latence
 pip install -e packages/latence-core
 # Both providers declare gliner2[local] (torch/transformers live only in that extra — the base
 # gliner2 dist ships neither) PLUS peft (gliner2's relation inference engine imports it and the

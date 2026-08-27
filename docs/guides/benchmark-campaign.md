@@ -80,7 +80,7 @@ scheduling as a quality change. Because the campaign stage calls the harness in-
 pins have to be in the environment you launch `latence-campaign` from.
 
 Every dataset's corpus/toolkit licenses and lanes are recorded in one place —
-[`THIRD-PARTY-LICENSES.md`](https://github.com/ddickmann/latence-framework/blob/main/THIRD-PARTY-LICENSES.md)
+[`THIRD-PARTY-LICENSES.md`](https://github.com/ddickmann/latence/blob/main/THIRD-PARTY-LICENSES.md)
 — and corpus-derived artifacts (raw acquisitions, OCR output, exports, reports) stay local by
 `.gitignore` discipline; only aggregate metrics and stage reports are committed.
 

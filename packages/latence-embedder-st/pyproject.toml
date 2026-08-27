@@ -46,11 +46,11 @@ dependencies = [
 # (ADR-0004), alongside the in-core deterministic 'embedding.hashing' reference and the
 # 'embedding.endpoint' performance path — swappable by one config line (ADR-0007).
 [project.urls]
-Homepage = "https://github.com/ddickmann/latence-framework"
-Repository = "https://github.com/ddickmann/latence-framework"
-Documentation = "https://ddickmann.github.io/latence-framework/"
-Issues = "https://github.com/ddickmann/latence-framework/issues"
-Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 
 [project.entry-points."latence.providers"]
 "embedding.sentence_transformers" = "latence_embedder_st.provider:SentenceTransformersEmbedder"

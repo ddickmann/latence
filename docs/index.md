@@ -175,8 +175,8 @@ whose rationale is superseded and whose decision is reopened, not reversed, by
 [ADR-0063](adr/0063-relicence-to-apache-2-0.md)). You install from a clone:
 
 ```bash
-git clone https://github.com/ddickmann/latence-framework
-cd latence-framework
+git clone https://github.com/ddickmann/latence
+cd latence
 uv sync
 
 # Providers are separate packages — add only what a stack needs, by path, e.g.:
@@ -195,8 +195,8 @@ Provider packages, so the core stays lean. Step-by-step: the
     Latence is a personally-owned, open-source framework licensed under the
     [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0); commercial use is
     granted by the licence and needs no agreement
-    ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)).
+    ([`COMMERCIAL.md`](https://github.com/ddickmann/latence/blob/main/COMMERCIAL.md)).
     Ownership and the personally-owned posture are unchanged
     ([ADR-0001](adr/0001-open-source-core-owned-personally.md)). See the
-    [README](https://github.com/ddickmann/latence-framework) for the marketing overview,
+    [README](https://github.com/ddickmann/latence) for the marketing overview,
     and the [Decision Log](adr/index.md) for the reasoning behind every seam.

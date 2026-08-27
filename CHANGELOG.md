@@ -17,6 +17,22 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **The repository moved to `ddickmann/latence`, and 200 references to the old slug moved with
+  it.** Publication is from a repository created clean rather than from one whose history had been
+  rewritten, so no unreachable-but-uncollected objects survive anywhere. Two of the 71 files
+  carrying the old slug were not cosmetic: `README.md`'s clone command pointed at a repository the
+  reader cannot see (`git clone …/latence-framework` 404s for everyone but the maintainer) and the
+  CI badge pointed at a private repository's Actions, which renders permanently broken on a public
+  page. **`scripts/release-integrity.sh` was the serious one** — it defaulted the Sigstore
+  verification identity to the old slug, so a release cut from the new repository would sign under
+  one identity and be verified against another, failing the one workflow whose entire job is
+  proving a release is authentic. Only URL-shaped occurrences and `cd` targets were rewritten: the
+  product is still the Latence Framework and the 34 distributions are still `latence-*`, because
+  what changed is the repository slug, not the name.
+- **A logo.** `docs/assets/logo-{light,dark}.svg` and `mark.svg` — three ragged document rules
+  resolving into a canonical graph, which is the pipeline in one glyph. The README serves the
+  right variant per colour scheme via `<picture>`; the mark alone is the docs-site logo and
+  favicon.
 - **Publication and release are separate gates
   ([ADR-0066](docs/adr/0066-publication-and-release-are-separate-gates.md), amending
   `RELEASE-GATES.md`).** That page previously opened "This repository is **private**. It is not

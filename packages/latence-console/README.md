@@ -1,6 +1,6 @@
 # latence-console
 
-The read-only run console for the [Latence framework](https://github.com/ddickmann/latence-framework).
+The read-only run console for the [Latence framework](https://github.com/ddickmann/latence).
 
 One command turns the files a pipeline run already left on Storage into a page a **non-engineer**
 can read:
