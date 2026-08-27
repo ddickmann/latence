@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/logo-light.svg">
-    <img alt="Latence" src="./docs/assets/logo-light.svg" width="380">
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/logo-light.png">
+    <img alt="Latence" src="./docs/assets/logo-light.png" width="360">
   </picture>
 </p>
 
@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-4F46E5"></a>
-  <a href="./pyproject.toml"><img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-4F46E5"></a>
+  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-00CFD1"></a>
+  <a href="./pyproject.toml"><img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-00CFD1"></a>
   <a href="https://github.com/ddickmann/latence/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ddickmann/latence/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#status"><img alt="status pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-orange"></a>
 </p>
