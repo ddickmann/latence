@@ -12,23 +12,12 @@ is a live observation from Metis ticket 203 (6–7 Nov 2026) on one workspace.
 
 ## Summary
 
-- **Reading:** almost everything the engine needs comes without `system` tables: the UC REST
-  listing, `information_schema` and `DESCRIBE … AS JSON`. That covers metric view YAML, comments,
-  tags, keys, filter and mask bindings, the certification tag and stable table ids.
-- **Metric views are GA** (announced spring 2026). Several sub-features are not: semantic metadata
-  (display names, synonyms, formats), parameters, relationships between views and materialization
-  are still preview. UC stores a metric view *normalised*: the YAML keeps names and expressions, and
-  display names, synonyms and formats move into column metadata.
-- **Open-source Spark** runs only YAML 0.1 so far. It is a portability target, not a richer source.
-- **Write-back** is plain SQL or REST, gated by MODIFY, APPLY TAG + ASSIGN, or ownership.
-  **Databricks has no native "proposal" state.** The engine must stage proposals itself.
-- **Identity:** tables and metric views have a `table_id`. Columns and metric-view fields have
-  none, so the overlay keys on `table_id` plus the field name.
-- **Genie Agent configuration** can be read as JSON. **Genie Ontology** is Public Preview, has no
-  export or inspection API that this research found, and has no GA date.
-- **System tables:** the engine does not *need* them. Without them it loses usage evidence and
-  query-text mining, which are the strongest signals for ranking and alias discovery. Make them an
-  optional harvester.
+- **Read** without any `system` table: UC REST, `information_schema` and `DESCRIBE … AS JSON` give metric view YAML, comments, tags, keys, filters, masks, certification and table ids.
+- **Metric views are GA** (spring 2026); their synonyms, parameters, relationships and materialization are still preview. Open-source Spark reads only YAML 0.1.
+- **Write** is SQL or REST behind MODIFY, APPLY TAG + ASSIGN, or ownership. Databricks has no proposal state, so the engine stages proposals itself.
+- **Identity:** `table_id` for tables and metric views; columns and fields have none.
+- **Genie:** Agent configuration reads as JSON. Ontology is Public Preview, with no export API found and no GA date.
+- **System tables are optional;** without them the engine loses usage evidence and query-text mining.
 
 ## 1. Metric views
 
@@ -286,21 +275,17 @@ per-table lineage over REST. A deployment like Metis's, with no `system` access,
 *structural* layer.
 
 **What it loses:**
-1. **Usage evidence:**
-   - which tables, columns and metric views are actually queried, by whom and how often;
-   - this is the input Genie's own authority scores use;
-   - without it the engine cannot rank competing definitions by use, only by declared trust.
-2. **Query-text mining:**
-   - joins, filters and measure expressions people really write, and aliases from column
-     aliases;
-   - even with access, `statement_text` is redacted for anyone who is not an account admin or in
-     `databricks_pii_access`. The miner needs that membership, which is a sensitive grant.
-3. **Bulk, historical lineage:** the REST lineage is per object and many calls. The system tables
-   give region-wide history (365 or 395 days).
-4. **Actor history of UC edits** (`system.access.audit`): who changed a comment or a tag, and
-   when. Without it, a human edit made directly in UC has no actor in the evidence chain; the
-   engine sees only that the value changed between runs.
-5. **The governed-tag registry** (`system.tags.governed_tags`, Beta). Minor: assignments are still
+1. **Usage evidence:** which tables, columns and metric views are queried, by whom, how often. Genie's
+   own authority scores use it; without it the engine ranks competing definitions by declared trust
+   only.
+2. **Query-text mining:** the joins, filters, measure expressions and column aliases people really
+   write. Even with access, `statement_text` is redacted unless the reader is an account admin or in
+   `databricks_pii_access`, a sensitive grant.
+3. **Bulk, historical lineage:** REST lineage is one call per object; the tables hold region-wide
+   history (365 or 395 days).
+4. **Actor history of UC edits** (`system.access.audit`): without it a human edit made directly in
+   UC has no actor in the evidence chain, only a value that changed between runs.
+5. **The governed-tag registry** (`system.tags.governed_tags`, Beta): minor, since assignments stay
    in `information_schema`.
 
 **Substitutes:** exported query logs, Genie example SQL and benchmarks (curated, higher trust),
