@@ -36,10 +36,12 @@ licences, which rules out REBEL and WebNLG. Run it on:
 - throughput and cost at 10⁵ and 10⁶ records;
 - a side-by-side against the current cascade as a baseline.
 
-**Go/no-go bars**, proposed here and set with the owner before the run:
+**Go/no-go bars** (set by the owner, 2026-11-08):
 
-- auto-accept precision ≥ 0.98, with its confidence stated;
-- the review band small enough for the expected expert capacity;
+- **auto-accept precision ≥ 0.95**, set by Learn-then-Test with its confidence stated;
+- **no expert-capacity bar during development.** The owner judged it too vague to set now, and
+  an obstacle the dev phase doesn't need. The review-band rate and the estimated expert minutes
+  are still *reported*, but they gate nothing yet;
 - 10⁶ records within an agreed time and cost budget.
 
 The spike also produces the realistic review-band items that *the expert resolution workbench*

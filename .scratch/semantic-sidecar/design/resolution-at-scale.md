@@ -66,7 +66,7 @@ Resolution is first a linking problem, and only for what remains a clustering pr
 
 - **Calibration:** Platt or isotonic, per (modality, type), fitted on reviewed pairs.
 - **Thresholds:** Learn-then-Test sets the accept and reject thresholds with a guarantee, for
-  example "auto-accept precision ≥ 0.98 with 95% confidence".
+  example "auto-accept precision ≥ 0.95 with 95% confidence" (the owner's v1 bar, 2026-11-08).
 - **No labels, no accept band:** a (modality, type) without enough labels gets no accept band.
   Unknown stays unknown, which keeps the no-silent-over-merge rule.
 - **Why the old cutoffs go:** this replaces the hand-set 0.82, 0.84 and 0.93. ADR-0046 measured why
