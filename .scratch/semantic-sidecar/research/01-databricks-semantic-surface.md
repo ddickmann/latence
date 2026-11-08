@@ -64,9 +64,8 @@ plus `parameters` on DBR 18.2+.
 - Joins have `name`, `source`, `on` or `using`, nested joins, and `cardinality` (spec 1.1, DBR 18.1+).
 - Each dimension and measure has `name`, `expr`, `comment`, `display_name` (≤ 255 chars),
   `synonyms` (≤ 10, each ≤ 255 chars) and `format`.
-- `format` types include number, currency (`currency_code`), percentage, byte, date and date_time.
-- Measures can have a `window` with `semiadditive`.
-- In 1.1, `#` comments are stripped on save.
+- `format` types include number, currency, percentage, byte, date and date_time. Measures can have
+  a `window` with `semiadditive`. In 1.1, `#` comments are stripped on save.
 
 Sources: [semantic metadata](https://docs.databricks.com/gcp/en/metric-views/data-modeling/semantic-metadata),
 [YAML reference](https://docs.databricks.com/gcp/en/business-semantics/metric-views/yaml-reference).
