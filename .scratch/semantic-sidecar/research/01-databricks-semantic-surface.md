@@ -129,25 +129,22 @@ names need 1.1 and Databricks.
 - `system.tags.governed_tags` lists the governed keys
   ([July 2026](https://learn.microsoft.com/azure/databricks/release-notes/product/2026/july#governed-tags-system-table-is-in-beta)) — PREVIEW (Beta).
 
-**Certification and deprecation.** This is the governed tag `system.certification_status` with
-the values `certified` and `deprecated`.
-- It applies to catalogs, schemas, tables, views, volumes, functions, models, dashboards and
-  notebooks ([docs](https://docs.databricks.com/data-governance/unity-catalog/certify-deprecate-data)) — GA.
-- Older pages describe separate `system.Certified` and `system.Deprecated` tags under a private
-  preview. Treat that as superseded.
-- Rule-based automation of the tag is PREVIEW (Beta).
-- Whether the tag is readable in `information_schema.table_tags` is UNVERIFIED live (the Metis
-  importer assumes so).
+**Certification and deprecation.** This is still the governed tag `system.certification_status`
+(`certified` | `deprecated`), on catalogs, schemas, tables, views, volumes, functions, models,
+dashboards and notebooks
+([docs](https://docs.databricks.com/data-governance/unity-catalog/certify-deprecate-data)) — GA.
+Older pages describe separate `system.Certified` / `system.Deprecated` tags (private preview,
+superseded). Rule-based automation of the tag is PREVIEW (Beta). Whether it reads back through
+`information_schema.table_tags` is UNVERIFIED live.
 
-**Primary and foreign keys.**
-- They are informational only and not enforced. `RELY` lets the optimiser use them. GA since DBR
-  15.2 ([blog](https://www.databricks.com/br/blog/primary-key-and-foreign-key-constraints-are-ga-and-now-enable-faster-queries)).
-- They are read from `information_schema.table_constraints`, `key_column_usage` and
-  `referential_constraints`, and from `TableInfo.table_constraints` (not set by the list call,
-  [SDK](https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/service/catalog.py)).
-- `UNDROP` does not restore them
-  ([UNDROP](https://learn.microsoft.com/en-in/azure/databricks/sql/language-manual/sql-ref-syntax-ddl-undrop-table)) — GA.
-- They are an evidence source for joins, with low trust because nothing enforces them.
+**Primary and foreign keys.** Informational, not enforced; `RELY` lets the optimiser use them. GA
+since DBR 15.2 ([blog](https://www.databricks.com/br/blog/primary-key-and-foreign-key-constraints-are-ga-and-now-enable-faster-queries)).
+Read from `information_schema.table_constraints`, `key_column_usage` and `referential_constraints`,
+or `TableInfo.table_constraints` (absent from the list call,
+[SDK](https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/service/catalog.py)).
+`UNDROP` does not restore them
+([UNDROP](https://learn.microsoft.com/en-in/azure/databricks/sql/language-manual/sql-ref-syntax-ddl-undrop-table)).
+They are join evidence with low trust, since nothing enforces them.
 
 **`information_schema` coverage.**
 - It holds tables (including metric views), columns, views, routines, volumes, the tag views,
@@ -180,8 +177,8 @@ the values `certified` and `deprecated`.
 |---|---|---|---|---|---|
 | `system.access.table_lineage`, `column_lineage` | read/write events per table and column, with entity (job, notebook, query) | PREVIEW per the lineage page ([lineage](https://docs.databricks.com/aws/en/admin/system-tables/lineage)) | none by default; a user who is both metastore admin and account admin grants USE + SELECT ([system tables](https://docs.databricks.com/aws/admin/system-tables)) | **Conflict:** 365 days free on the system-tables page, a "rolling 395-day window" on the lineage page | warehouse compute |
 | `system.query.history` | SQL warehouse and serverless notebook/job statements, region-wide across workspaces; `statement_text`, `error_message`, timing, user | PREVIEW ([query history](https://docs.databricks.com/aws/en/admin/system-tables/query-history)) | admins by default; share through a dynamic view. **Since 22 Jun 2026, `statement_text` reads `<Redacted>`** unless the reader is an account admin or in `databricks_pii_access` ([June 2026](https://learn.microsoft.com/azure/databricks/release-notes/product/2026/june#redaction-of-the-statement-text-in-the-query-history-system-table-begins)) | UNVERIFIED (not found). Configurable retention, 30–3,650 days, is Beta ([Sept 2026](https://learn.microsoft.com/azure/databricks/release-notes/product/2026/september#configurable-retention-for-system-tables-is-in-beta)) | warehouse compute; a large table, so filter by time |
-| Lineage REST: `GET /api/2.0/lineage-tracking/table-lineage`, `…/column-lineage` | upstream and downstream per table or column | GA (no preview label found; UNVERIFIED) ([lineage](https://learn.microsoft.com/azure/databricks/data-governance/unity-catalog/data-lineage)) | the caller's own rights; read live in Metis 203 | follows lineage retention | no warehouse; one call per object |
-| External lineage and external metadata REST (`/api/2.0/lineage-tracking/external-lineage`, `…/external-metadata`) | **writable** lineage to non-Databricks objects, with column mappings | PREVIEW ([SDK](https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/service/catalog.py)) | — | — | none |
+| Lineage REST: `GET /api/2.0/lineage-tracking/table-lineage`, `…/column-lineage` | upstream and downstream per table or column | UNVERIFIED (no preview label found) ([lineage](https://learn.microsoft.com/azure/databricks/data-governance/unity-catalog/data-lineage)) | the caller's own rights; read live in Metis 203 | follows lineage retention | no warehouse; one call per object |
+| External lineage and external metadata REST (`/api/2.0/lineage-tracking/external-lineage`, `…/external-metadata`) | **writable** lineage to non-Databricks objects, with column mappings | PREVIEW ([lineage](https://learn.microsoft.com/azure/databricks/data-governance/unity-catalog/data-lineage), [SDK](https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/service/catalog.py)) | — | — | none |
 
 Column lineage needs source and target referenced by table name and does not cover Lakeflow
 (DLT) pipelines; the docs prefer system tables over REST where a region has them.
