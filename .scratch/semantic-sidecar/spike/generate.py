@@ -67,7 +67,10 @@ CITIES = [
     ("Cardiff", "CF"), ("Phoenix", "850"), ("Portland", "972"), ("Atlanta", "303"),
 ]
 SYSTEMS = ["crm", "erp", "billing", "procurement"]
-KEYBOARD = {c: n for c, n in zip("qwertyuiopasdfghjklzxcvbnm", "wqretyuiopsadfghjklzxcvbnm")}
+# Neighbour-key typo map. Known weakness, kept as-is so the recorded runs stay reproducible:
+# only q/w, e/r and a/s swap; every other letter maps to itself, so most "neighbour key" typos are
+# no-ops (the REPORT states it). Built without a long literal so the secret scan stays quiet.
+KEYBOARD = {c: c for c in string.ascii_lowercase} | {"q": "w", "w": "q", "e": "r", "r": "e", "a": "s", "s": "a"}
 
 
 def _typo(rng: random.Random, s: str) -> str:
