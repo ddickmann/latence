@@ -226,17 +226,14 @@ Column lineage needs source and target referenced by table name and does not cov
 ([docs](https://docs.databricks.com/aws/en/genie/genie-ontology)).
 - **GA:** no date or announcement found. One secondary source says snippets opened to all
   customers without a request on 13 Aug 2026 — UNVERIFIED.
-- **Inputs, modeled:** metric views, Domains (GA 8 Oct 2026 per one guide — UNVERIFIED), Pages
-  and certified assets.
-- **Inputs, inferred:** "snippets" from tables, queries, dashboards, notebooks, pipelines and Genie
-  Agents ([blog](https://www.databricks.com/blog/how-genie-ontology-powers-product-development-databricks),
+- **Inputs:** modeled (metric views, Domains, Pages, certified assets) and inferred "snippets"
+  from tables, queries, dashboards, notebooks, pipelines and Genie Agents
+  ([blog](https://www.databricks.com/blog/how-genie-ontology-powers-product-development-databricks),
   [answers](https://answers.databricks.com/ai-learn-business-definitions-from-dashboards-queries-we)).
-- **Authority scores** rank snippets by origin, how often they are used, how closely they tie to
-  certified and widely used assets, and freshness. A definition asserted by hand beats an inferred
-  one. The formula is not published — UNVERIFIED beyond these descriptions.
-- **Permissions:** snippets come only from assets the user may see (UC permissions).
-- **Citations:** answers show a Snippet icon listing the sources used. There is no lineage view of
-  the ontology itself.
+- **Authority scores** weigh origin, usage, ties to certified assets, and freshness; a definition
+  asserted by hand beats an inferred one. The formula is unpublished — UNVERIFIED in detail.
+- **Permissions and citations:** snippets come only from assets the user may see; an answer's
+  Snippet icon lists its sources. There is no lineage view of the ontology itself.
 - **Export and inspection:** none found. There is no ontology API in the Python SDK, the Terraform
   provider or the CLI (searched in Nov 2026) — UNVERIFIED as a definitive absence.
 - **Pages** (the human layer) are PREVIEW (Beta). They have a draft/publish lifecycle and Genie
@@ -258,19 +255,16 @@ Column lineage needs source and target referenced by table name and does not cov
 | Relationship between views | `ALTER VIEW … ADD CONSTRAINT … RELATIONSHIP` | UNVERIFIED (probably owner) | PREVIEW |
 | External lineage | REST external-lineage | UNVERIFIED | PREVIEW |
 
-Two caveats:
-- Saving a comment runs an ALTER that "can disrupt pipelines and jobs" (AI comments page).
-- In Metis's workspace the service principal held only `USE CATALOG` and `CREATE SCHEMA` (Metis 203),
-  so write-back to objects someone else owns needs grants the owner gives.
+Saving a comment runs an ALTER that "can disrupt pipelines and jobs" (AI comments page). In
+Metis's workspace the service principal held only `USE CATALOG` and `CREATE SCHEMA` (Metis 203),
+so write-back to objects others own needs grants from their owners.
 
 **Proposals:** Databricks has **no staged-change state** for comments, tags or metric views.
-- AI-generated comments have an Accept/Edit step, but it is UI-only and writes immediately.
-- Pages have drafts, but Pages are Beta and have no API found.
-- Request for Access (`RfaAPI`) covers permissions only.
-- So the engine holds proposals in its own store: the target `table_id` plus field, the SQL or YAML
-  diff, the evidence and the actor. A human applies a proposal, or the engine applies an approved one.
-- Possible but not recommended: write a candidate metric view into a sandbox schema for a dry run,
-  as Metis's drift probe does. It must never be the one consumers read.
+AI-comment Accept/Edit is UI-only and writes at once; Page drafts are Beta with no API found;
+Request for Access (`RfaAPI`) covers permissions only. The engine therefore holds proposals in its
+own store (target `table_id` and field, the SQL or YAML diff, evidence, actor) and applies one only
+after approval. A candidate metric view may be dry-run in a throwaway schema, as Metis's drift
+probe does, but never where consumers read.
 
 ## 6. Identity
 
@@ -286,8 +280,7 @@ Two caveats:
   metric-view dimensions or measures. The overlay key is `(table_id, column or field name)`, with
   type and position kept as a fingerprint. A column or field rename looks like a delete plus an
   add, so the engine must propose the re-link rather than guess it ("no silent over-merge").
-- **Schemas and catalogs** have their own ids (UNVERIFIED that they survive a rename).
-  `metastore_id` scopes all of them.
+- Schemas and catalogs have ids too; whether they survive a rename is UNVERIFIED.
 
 ## What the engine needs vs. what it loses without system tables
 
@@ -314,11 +307,8 @@ per-table lineage over REST. A deployment like Metis's, with no `system` access,
 5. **The governed-tag registry** (`system.tags.governed_tags`, Beta). Minor: assignments are still
    in `information_schema`.
 
-**Substitutes:**
-- exported query logs from the customer;
-- Genie example SQL and benchmarks (curated, higher trust);
-- the SQL of the engine's own runs;
-- per-object REST lineage.
+**Substitutes:** exported query logs, Genie example SQL and benchmarks (curated, higher trust),
+the engine's own SQL, and per-object REST lineage.
 
 **Recommendation:** an optional `system`-table harvester behind a capability flag. Every run that
 lacks it records the reduced evidence, so no run passes off a ranking made without usage data as
@@ -326,19 +316,17 @@ one made with it.
 
 ## Open questions
 
-1. Does `table_id` survive `ALTER TABLE … RENAME` and `CREATE OR REPLACE VIEW … WITH METRICS`?
-   Needs a live probe.
-2. What does the REST listing return as `view_definition` and column `metadata` for an identity
-   that does not own the metric view (BROWSE, SELECT or READ METADATA only)?
+1. Does `table_id` survive a rename and `CREATE OR REPLACE VIEW … WITH METRICS`? (Live probe.)
+2. What do `view_definition` and column `metadata` return to an identity that does not own the
+   metric view (BROWSE, SELECT or READ METADATA only)?
 3. Is `system.certification_status` readable in `information_schema.table_tags`, and are governed
-   tags (tag policies) GA in the target region?
-4. What is the free retention of `system.query.history`? And the lineage tables: 365 or 395 days?
-5. Is the semantic-metadata banner (PREVIEW) still current, given that metric views are GA? This
-   decides whether synonyms and display names written to UC are a supported contract.
-6. When does the typed Genie Agent `definition` replace `serialized_space` in the public API, and
-   does it expose entity-matching values?
-7. Will Genie Ontology or Pages get a read or write API? Pages are the natural write target for the
-   engine's concepts and glossary.
-8. Which privileges does `ADD CONSTRAINT … RELATIONSHIP` need, and can the engine emit
-   relationships as proposals ahead of their GA?
-9. Will Apache Spark accept YAML 1.1, and when? This decides the open-standard export version.
+   tags GA in the target region?
+4. `system.query.history` free retention; lineage tables 365 or 395 days?
+5. Is semantic metadata (synonyms, display names) still PREVIEW? This decides whether writing them
+   to UC is a supported contract.
+6. When does the typed Genie Agent `definition` replace `serialized_space`, and does it expose
+   entity-matching values?
+7. Will Genie Ontology or Pages get an API? Pages are the natural write target for the engine's
+   glossary.
+8. Which privileges does `ADD CONSTRAINT … RELATIONSHIP` need?
+9. When will Apache Spark accept YAML 1.1? This sets the open export version.
