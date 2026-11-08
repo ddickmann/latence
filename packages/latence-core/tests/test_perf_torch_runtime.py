@@ -276,7 +276,10 @@ _SKIPPED = DeviceDecision(device=None, skipped=True, reason="no CUDA device is a
 
 def _pin_cores(monkeypatch: pytest.MonkeyPatch, n: int) -> None:
     """Pin the core count so ``threads=8`` is about the cap, not this machine (see choreography)."""
+    # All three probes effective_cpu_count() reads, not just cpu_count (see the choreography pin).
     monkeypatch.setattr(os, "cpu_count", lambda: n)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(n)), raising=False)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: n, raising=False)
 
 
 def test_st_load_runs_the_whole_sequence_in_order(
