@@ -207,9 +207,9 @@ Column lineage needs source and target referenced by table name and does not cov
   - `sql_snippets.{filters, expressions, measures}` with synonyms;
   - `benchmarks.questions` with SQL answers.
 
-  The shape is real, but this repo is not an official API reference — UNVERIFIED as a contract.
-- **Benchmarks:** an eval-run API (`genie_create_eval_run`, `list_eval_results`) — GA per the
-  SDK, status not stated.
+  Not an official reference — UNVERIFIED as a contract.
+- **Benchmarks:** an eval-run API in the SDK (`genie_create_eval_run`, `list_eval_results`) —
+  status not stated, UNVERIFIED.
 - **Entity matching:** up to 120 columns × 1,024 values. The value lists are built by Genie, stored
   in the workspace bucket and not returned by the API
   ([community](https://community.databricks.com/t5/generative-ai/purpose-and-usage-of-entity-matching-in-genie-spaces/m-p/155861)) — UNVERIFIED.
