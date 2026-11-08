@@ -51,6 +51,7 @@ EXPAND = {
     "sys": "systems", "consult": "consulting", "hldgs": "holdings",
 }
 STOP = {"the"}
+DUCKDB_MEM = os.environ.get("SPIKE_DUCKDB_MEM", "4GB")  # DuckDB spills to disk above this
 BLOCK_CAP = 300  # a blocking key shared by more records than this is skipped (logged)
 
 
@@ -101,11 +102,14 @@ def normalise_person(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for c in ["first_name", "surname", "birth_place", "occupation", "postcode_fake"]:
         out[c] = [_norm(v) or None for v in out[c]]
-    out["first_meta"] = [jellyfish.metaphone(s) if s else None for s in out["surname"]]
-    out["dob_year"] = [str(d)[:4] if d is not None and str(d) != "None" else None for d in out["dob"]]
-    out["pc_out"] = [str(p).split()[0] if p else None for p in out["postcode_fake"]]
+    def s(v: object) -> str | None:  # missing values arrive as None or NaN
+        return v if isinstance(v, str) and v else None
+
+    out["first_meta"] = [jellyfish.metaphone(x) if s(x) else None for x in out["surname"]]
+    out["dob_year"] = [x[:4] if s(x) else None for x in out["dob"]]
+    out["pc_out"] = [x.split()[0] if s(x) else None for x in out["postcode_fake"]]
     out["initials"] = [
-        ((f or " ")[0] + (s or " ")[0]).strip() or None for f, s in zip(out["first_name"], out["surname"])
+        ((s(f) or " ")[0] + (s(g) or " ")[0]).strip() or None for f, g in zip(out["first_name"], out["surname"])
     ]
     return out
 
@@ -168,7 +172,7 @@ def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> pd.Da
 
 
 def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) -> tuple[pd.DataFrame, dict[str, Any]]:
-    con = duckdb.connect()
+    con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "threads": os.cpu_count() or 4})
     con.register("recs_df", df)
     con.execute("CREATE TABLE recs AS SELECT * FROM recs_df")
     allp: list[pd.DataFrame] = []
@@ -218,7 +222,8 @@ def score(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
         if kind == "org"
         else ["unique_id", "first_name", "surname", "dob", "birth_place", "postcode_fake", "occupation", "gender"]
     )
-    db = DuckDBAPI()
+    os.makedirs("out/duckdb_tmp", exist_ok=True)
+    db = DuckDBAPI(duckdb.connect(config={"memory_limit": DUCKDB_MEM, "temp_directory": "out/duckdb_tmp"}))
     sdf = db.register(df[cols].copy())
     if kind == "org":
         comparisons = [
@@ -307,6 +312,11 @@ def latence_cascade(df: pd.DataFrame, name_col: str, label_col: str | None, budg
 # --------------------------------------------------------------------------------------------
 
 
+def _stage(name: str, t0: float) -> None:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    print(f"[stage] {name:16s} t={time.time() - t0:7.1f}s peak_rss={rss} MB", file=sys.stderr, flush=True)
+
+
 def run(
     dataset: str, path: Path, n_cal: int, n_ltt: int, seed: int, baseline_max: int, reject_target: float = 0.99
 ) -> dict[str, Any]:
@@ -321,10 +331,12 @@ def run(
     t = time.time()
     cand, block_stats = block(df, ORG_PASSES if kind == "org" else PERSON_PASSES, gold)
     timings["block"] = time.time() - t
+    _stage("block", t0)
 
     t = time.time()
     p_raw = score(df, cand, kind)
     timings["score_splink"] = time.time() - t
+    _stage("score", t0)
     veto = vetoes(df, cand, kind)
     y = np.array([gold[a] == gold[b] for a, b in zip(cand.l, cand.r)], dtype=int)
 
@@ -337,6 +349,7 @@ def run(
     p[veto] = 0.0
     bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=0.05, reject_target=reject_target)
     band = np.array([bands.band(x) for x in p])
+    _stage("bands", t0)
     acc, rev, rej = band == "accept", band == "review", band == "reject"
 
     # Realised quality of the bands on ALL candidate pairs (full gold): does the guarantee hold?
@@ -365,6 +378,7 @@ def run(
     pred_expert, cs_e = cluster(True)
     pred_closure = plain_closure(ids, zip(cand.l[p_raw >= 0.95], cand.r[p_raw >= 0.95]))
     timings["cluster"] = time.time() - t
+    _stage("cluster", t0)
 
     # Review effort: pairs, and connected groups the workbench would show as one item.
     rev_groups = len({x for x in plain_closure(
