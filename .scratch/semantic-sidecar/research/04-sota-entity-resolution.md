@@ -44,13 +44,9 @@ The GPU Provider (ADR-0046) adds:
   leading-short-code check;
 - a Granite-STS embedding rung, off by default (≥0.93 when enabled).
 
-The surrounding pipeline:
-
-- type labels are canonicalised first, by a similar cascade (ADR-0054);
-- a delta recomputes the corpus-level phase exactly over the union of reused and fresh records
-  (ADR-0061);
-- the committed store is scoped to the affected set, a closure over blocking keys
-  (ADR-0018/0029).
+Type labels are canonicalised first by a similar cascade (ADR-0054). A delta recomputes the
+corpus-level phase exactly over the reused and fresh records (ADR-0061), and the committed store
+is scoped to the affected set (ADR-0018/0029).
 
 **What ADR-0046 learned.** Granite is a retrieval embedder. On short entity names, its cosine for
 genuinely distinct names (0.85–0.89) overlaps the cosine of correct merges (0.86–0.95). Turning
@@ -97,8 +93,6 @@ Other results:
 
 - AnyMatch, a small zero-shot model, comes within 4.4% of GPT-4 MatchGPT at much lower cost
   ([arXiv 2409.04073](https://arxiv.org/abs/2409.04073)).
-- Fine-tuning LLMs helps small models but hurts transfer across domains
-  ([arXiv 2409.08185](https://arxiv.org/abs/2409.08185)).
 - LinkTransformer is GPL ([arXiv 2309.00789](https://arxiv.org/html/2309.00789v2)), so it is a
   reference only.
 - A plausible German and English cross-encoder base is `BAAI/bge-reranker-v2-m3` (Apache-2.0,
@@ -126,11 +120,6 @@ The findings:
 - **Escalation can carry a guarantee.** "Trust or Escalate" (ICLR 2025) escalates from cheap to
   expensive judges with guaranteed agreement with humans
   ([paper](https://proceedings.iclr.cc/paper_files/paper/2025/file/08dabd5345b37fffcbe335bd578b15a0-Paper-Conference.pdf)).
-- **LLMs can cluster directly.** LLM-CER (SIGMOD 2026) clusters small record sets in one call
-  ([arXiv 2506.02509](https://arxiv.org/abs/2506.02509)).
-- **Prompts are not portable.** The best LLMs need few examples and generalise to unseen
-  entities, but each model and dataset needs its own prompt
-  ([EDBT 2025](https://www.sowi.uni-mannheim.de/media/Einrichtungen/dws/DWS_News/Documents/Peeters-Entity-Matching-using-LLMs-EDBT2025.pdf)).
 
 **For this engine:** use select over a shortlist in shuffled order, only inside the review band,
 and only after an explicit egress decision. For replay, key each answer on the pair content hash,
@@ -157,13 +146,10 @@ reviewed pairs". Calibrate per modality and per entity type.
 Splink ([repo](https://github.com/moj-analytical-services/splink), MIT) runs on DuckDB, Spark
 and Postgres. It claims about 1M records per minute on a laptop, and 100M+ records on Spark.
 
-**Strengths:**
-
-- EM estimation of the m and u probabilities without labels;
-- term-frequency adjustments, so a common name weighs less than a rare one
-  ([docs](https://moj-analytical-services.github.io/splink/topic_guides/comparisons/term-frequency.html));
-- Spark salting for skewed blocks;
-- explainable match weights.
+**Strengths:** EM estimation without labels; term-frequency adjustments, so a common name weighs
+less than a rare one
+([docs](https://moj-analytical-services.github.io/splink/topic_guides/comparisons/term-frequency.html));
+Spark salting for skewed blocks; explainable match weights.
 
 **Splink 5.0.0** (2026-09-28) is not fully backwards compatible. It adds `predict_within()` and
 `predict_between()`, which score only the new comparisons when records arrive
@@ -207,7 +193,6 @@ documentation. Zingg runs on Spark and supports active learning, but it is AGPL-
    passes: no cross pair in the reject band, and a minimum-linkage bar.
 4. Optionally refine each component with Pivot.
 
-Each union records its edge and its check.
 
 ## 6. Active learning from reviewer decisions
 
