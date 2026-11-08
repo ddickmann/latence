@@ -46,3 +46,20 @@ licences, which rules out REBEL and WebNLG. Run it on:
 
 The spike also produces the realistic review-band items that *the expert resolution workbench*
 prototypes against.
+
+## Model set (owner, 2026-11-08)
+
+Agreed before any model arm runs. Full table, reasons and run order are in
+[`../spike/NEXT.md`](../spike/NEXT.md).
+
+- Extraction: `knowledgator/gliner-relex-large-v1.0`.
+- Decisions: `fastino/GLiNER2.5-Decide` vs `fastino/GLiDE-*`, head to head. Fastino is a
+  partner, so its licence does not exclude GLiDE.
+- Retrieval: `google/embeddinggemma-2` together with char-ngram TF-IDF.
+- Reranking: `Qwen/Qwen3-Reranker-0.6B`, zero-shot vs LoRA fine-tuned.
+- Structured matching: Splink stays the backbone. Pairs it leaves uncertain are re-scored by the
+  reranker and by Decide/GLiDE, whose scores become features before calibration.
+- Generative model: hosted, behind a provider-neutral adapter. A deep tier writes definitions and
+  induction proposals; a fast tier writes review-item explanations. The spike sends only
+  synthetic or public data.
+- Runtime: the owner's Apple Silicon M3 (32 GB).
