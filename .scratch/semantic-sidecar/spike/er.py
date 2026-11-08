@@ -129,18 +129,25 @@ class Bands:
 
 
 def learn_then_test_bands(
-    cal_probs: np.ndarray, labels: np.ndarray, *, target: float = 0.95, delta: float = 0.05
+    cal_probs: np.ndarray,
+    labels: np.ndarray,
+    *,
+    target: float = 0.95,
+    delta: float = 0.05,
+    reject_target: float = 0.99,
 ) -> Bands:
     """Accept and reject thresholds with a finite-sample guarantee on a held-out labelled sample.
 
-    Accept: P(precision of the accepted set >= target) >= 1 - delta.
-    Reject: P(fraction of true matches among rejected pairs <= 1 - target) >= 1 - delta.
+    Accept: P(precision of the accepted set >= target) >= 1 - delta (the owner's bar, 0.95).
+    Reject: P(fraction of true matches among rejected pairs <= 1 - reject_target) >= 1 - delta.
+    The reject side needs its own, stricter target: rejected pairs are the large majority, so
+    letting 5% of them be true matches would silently drop many matches.
     """
     grid_hi = list(np.round(np.arange(1.0, 0.0, -0.005), 3))
     accept_at, a_trace = _ltt_threshold(cal_probs, 1 - labels, target, delta, grid_hi)
     # Reject band: mirror the problem. Score = 1 - p, "error" = a true match that gets rejected.
     neg_scores = 1.0 - cal_probs
-    reject_score_at, r_trace = _ltt_threshold(neg_scores, labels, target, delta, grid_hi)
+    reject_score_at, r_trace = _ltt_threshold(neg_scores, labels, reject_target, delta, grid_hi)
     reject_below = None if reject_score_at is None else 1.0 - reject_score_at + 1e-12
     if accept_at is not None and reject_below is not None and reject_below > accept_at:
         reject_below = accept_at  # bands never overlap
