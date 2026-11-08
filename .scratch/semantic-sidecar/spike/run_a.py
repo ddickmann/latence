@@ -52,6 +52,7 @@ EXPAND = {
 }
 STOP = {"the"}
 DUCKDB_MEM = os.environ.get("SPIKE_DUCKDB_MEM", "4GB")  # DuckDB spills to disk above this
+TRAIN_MAX = 150_000  # EM trains on at most this many records (seeded sample)
 BLOCK_CAP = 300  # a blocking key shared by more records than this is skipped (logged)
 
 
@@ -151,7 +152,7 @@ def _pairs_on(con: duckdb.DuckDBPyConnection, keys: list[str]) -> tuple[pd.DataF
     )
     skipped = con.execute(
         f"SELECT count(*) FROM (SELECT bk FROM kk GROUP BY bk HAVING count(*) > {BLOCK_CAP})"
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     p = con.execute(
         f"""WITH ok AS (SELECT bk FROM kk GROUP BY bk HAVING count(*) BETWEEN 2 AND {BLOCK_CAP})
         SELECT a.unique_id AS l, b.unique_id AS r FROM kk a JOIN kk b USING (bk)
@@ -180,12 +181,26 @@ def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> pd.Da
 
 
 def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Run every blocking pass, then union them. Counting and the union happen in DuckDB: at 1e6
+    records the candidate set is ~10^7 rows, which pure-Python bookkeeping cannot hold."""
+    del gold  # gold is read from the records' own `cluster` column, inside the database
     con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "threads": os.cpu_count() or 4})
     con.register("recs_df", df)
     con.execute("CREATE TABLE recs AS SELECT * FROM recs_df")
-    allp: list[pd.DataFrame] = []
+    con.execute("CREATE TABLE cand_all (l VARCHAR, r VARCHAR, pass VARCHAR)")
     stats: dict[str, Any] = {}
-    gold_pairs = sum(n * (n - 1) // 2 for n in pd.Series(list(gold.values())).value_counts())
+    gold_pairs = int(
+        con.execute("SELECT coalesce(sum(n * (n - 1) / 2), 0) FROM (SELECT count(*) n FROM recs GROUP BY cluster)").fetchall()[0][0]
+    )
+
+    def completeness(table: str) -> int:
+        return int(
+            con.execute(
+                f"""SELECT count(*) FROM {table} c JOIN recs a ON c.l = a.unique_id JOIN recs b ON c.r = b.unique_id
+                WHERE a.cluster = b.cluster"""
+            ).fetchall()[0][0]
+        )
+
     for name, keys in passes.items():
         t = time.time()
         if keys == ["@acr"]:
@@ -194,25 +209,30 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
             p, skipped = _rare_token_pairs(con), 0
         else:
             p, skipped = _pairs_on(con, keys)
-        p["pass"] = name
-        tp = int(sum(gold[a] == gold[b] for a, b in zip(p.l, p.r)))
+        con.register("pass_df", p[["l", "r"]])
+        con.execute("CREATE OR REPLACE TEMP TABLE pass_t AS SELECT DISTINCT l, r FROM pass_df")
+        con.execute(f"INSERT INTO cand_all SELECT l, r, '{name}' FROM pass_t")
         stats[name] = {
-            "pairs": len(p),
-            "pair_completeness": tp / gold_pairs if gold_pairs else 1.0,
+            "pairs": int(con.execute("SELECT count(*) FROM pass_t").fetchall()[0][0]),
+            "pair_completeness": completeness("pass_t") / gold_pairs if gold_pairs else 1.0,
             "keys_skipped_over_cap": skipped,
             "secs": round(time.time() - t, 2),
         }
-        allp.append(p)
-    cand = pd.concat(allp, ignore_index=True)
-    passes_of = cand.groupby(["l", "r"])["pass"].agg(lambda s: ",".join(sorted(set(s)))).reset_index()
+        con.unregister("pass_df")
+        del p
+    con.execute(
+        """CREATE TABLE cand AS SELECT l, r, string_agg(DISTINCT pass, ',' ORDER BY pass) AS pass
+        FROM cand_all GROUP BY l, r ORDER BY l, r"""
+    )
+    passes_of = con.execute("SELECT l, r, pass FROM cand ORDER BY l, r").df()
     n = len(df)
-    tp = int(sum(gold[a] == gold[b] for a, b in zip(passes_of.l, passes_of.r)))
     stats["_union"] = {
         "pairs": len(passes_of),
-        "pair_completeness": tp / gold_pairs if gold_pairs else 1.0,
+        "pair_completeness": completeness("cand") / gold_pairs if gold_pairs else 1.0,
         "reduction_ratio": 1 - len(passes_of) / (n * (n - 1) / 2),
-        "gold_pairs": int(gold_pairs),
+        "gold_pairs": gold_pairs,
     }
+    con.close()
     return passes_of, stats
 
 
@@ -260,11 +280,17 @@ def score(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
     settings = SettingsCreator(
         link_type="dedupe_only", comparisons=comparisons, blocking_rules_to_generate_predictions=prior_rules
     )
-    linker = Linker(sdf, settings, log_level=40)
-    linker.training.estimate_probability_two_random_records_match(prior_rules, recall=0.6)
-    linker.training.estimate_u_using_random_sampling(max_pairs=2e6)
+    train_df = df[cols]
+    if len(df) > TRAIN_MAX:  # EM over a seeded sample (usual practice); scoring uses every record
+        train_df = df[cols].sample(n=TRAIN_MAX, random_state=0)
+    tdb = DuckDBAPI(duckdb.connect(config={"memory_limit": DUCKDB_MEM, "temp_directory": "out/duckdb_tmp"}))
+    trainer = Linker(tdb.register(train_df.copy()), settings, log_level=40)
+    trainer.training.estimate_probability_two_random_records_match(prior_rules, recall=0.6)
+    trainer.training.estimate_u_using_random_sampling(max_pairs=2e6)
     for r in em_rules:
-        linker.training.estimate_parameters_using_expectation_maximisation(r)
+        trainer.training.estimate_parameters_using_expectation_maximisation(r)
+    model = trainer.misc.save_model_to_json()
+    linker = Linker(sdf, model, log_level=40)
     bp = cand[["l", "r"]].rename(columns={"l": "join_key_l", "r": "join_key_r"})
     bp.insert(0, "match_key", "0")
     linker.table_management.register_blocked_pairs_for_predict(db.register(bp))
@@ -286,7 +312,8 @@ def vetoes(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
     el, er_ = et.reindex(cand.l).to_numpy(), et.reindex(cand.r).to_numpy()
     def conflict(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
         # Both sides present AND different. NaN/None means "absent", never "different".
-        return np.array([bool(pd.notna(a) and pd.notna(b) and a != b) for a, b in zip(xs, ys)])
+        xa, ya = pd.Series(xs), pd.Series(ys)
+        return (xa.notna() & ya.notna() & (xa != ya)).to_numpy()
 
     return conflict(nl, nr) | conflict(rl, rr) | conflict(el, er_)
 
@@ -346,7 +373,8 @@ def run(
     timings["score_splink"] = time.time() - t
     _stage("score", t0)
     veto = vetoes(df, cand, kind)
-    y = np.array([gold[a] == gold[b] for a, b in zip(cand.l, cand.r)], dtype=int)
+    cl_of = pd.Series(gold)
+    y = (cl_of.reindex(cand.l).to_numpy() == cl_of.reindex(cand.r).to_numpy()).astype(int)
 
     # Labelled samples a reviewer would provide: uniform over candidate pairs, disjoint halves.
     rng = np.random.default_rng(seed)
