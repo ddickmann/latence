@@ -130,63 +130,53 @@ FP8), inconsistent across sources; no 4B vLLM numbers were found.
 
 ## Ranked shortlist for the bake-off (ADR-0036)
 
-All arms use the same chunks, the same EN+DE human gold set (new), and the same downstream
-type-consolidation stage. They report P/R/F1 for entities and relations, the unsupported-triple
-rate, ECE, chunks/s on each GPU class, and cost. **Arm B is the control** and always runs.
+All arms share chunks, a new human EN+DE gold set and the downstream type-consolidation stage, and
+report entity/relation P/R/F1, unsupported-triple rate, ECE, chunks/s per GPU class and cost.
+**Arm 4 is the control** and always runs.
 
 ### 1. Encoder-only, induction-free (recommended first)
 
-- **Stack.** GLiNER-Relex (large-v1.0 for EN, multi-v1.0 for DE) for joint NER+RE, plus the
-  bi-encoder v2 for NER against the label profiler's *whole* candidate pool. The per-chunk LLM
-  induction is dropped. A deterministic span-anchoring gate and a per-corpus conformal threshold sit
-  on top.
-- **Expected cost.** Zero LLM calls, which removes 247,944 calls per campaign. Extraction should run
-  at about the baseline's ~13 chunks/s or better (estimate). Everything is permissive pending
-  re-verification.
-- **Expected quality.** On published benchmarks, RE runs +8.5 average F1 over GLiNER2. NER over 40+
-  types should hold (CrossNER 61.5).
-- **Risks.** German for the bi-encoder is unverified. Two models are harder to reconcile than one.
-  The 1,024-token window remains. Every RE F1 is still under 41, so the gate is load-bearing.
+- **Stack.** GLiNER-Relex (large-v1.0 EN, multi-v1.0 DE) for joint NER+RE, plus bi-encoder v2 NER
+  against the label profiler's *whole* pool; per-chunk LLM induction dropped; deterministic
+  span-anchoring gate and per-corpus conformal threshold.
+- **Cost.** Zero LLM calls (minus 247,944 per campaign); extraction at about baseline's ~13
+  chunks/s or better (estimate); permissive pending re-verification.
+- **Quality.** +8.5 average RE F1 over GLiNER2 on published benchmarks; NER over 40+ types should
+  hold (CrossNER 61.5).
+- **Risks.** Bi-encoder German unverified; two models to reconcile; 1,024-token window remains; RE
+  F1 still under 41, so the gate is load-bearing.
 
 ### 2. Encoder + small-LLM verifier cascade
 
-- **Stack.** Arm 1 at high recall. Qwen3.5-4B or Ministral 3 8B (Apache-2.0) on vLLM FP8 *verifies
-  and types* only the triples inside the uncertain conformal band, with a fixed JSON schema and an
-  evidence quote checked by offset.
-- **Expected cost.** LLM calls on a fraction of candidate triples. The fraction is **UNVERIFIED**;
-  measure it.
-- **Expected quality.** The best precision per dollar, because the LLM sees short, anchored
-  questions rather than open extraction.
-- **Risks.** It is the most moving parts. Replay requires LLM outputs to be recorded as Evidence and
-  replayed from cache: vLLM batching is not bit-deterministic, and map criterion 1 demands
-  byte-identical replay.
+- **Stack.** Arm 1 at high recall; Qwen3.5-4B or Ministral 3 8B (Apache-2.0) on vLLM FP8 *verifies
+  and types* only triples in the uncertain conformal band, fixed JSON schema, offset-checked
+  evidence quote.
+- **Cost.** LLM calls on a fraction of candidate triples (fraction **UNVERIFIED**; measure it).
+- **Quality.** Best expected precision per dollar: short anchored questions, not open extraction.
+- **Risks.** Most moving parts. vLLM batching is not bit-deterministic, so LLM outputs must be
+  stored as Evidence and replayed from cache to meet map criterion 1.
 
 ### 3. Small-LLM extractor
 
-- **Stack.** NuExtract3 (4B) or Qwen3.5-4B/9B does open-type NER+RE in **one call per chunk**, with
-  types emitted inline. That replaces both the induce and the extract stages. Corpus-level
-  EDC-style canonicalization runs afterwards, then the same gates.
-- **Expected cost.** About 1 call per chunk instead of 2 (induce plus `relation.llm`). Assuming about
-  300 output tokens per chunk, the campaign needs about 89 M output tokens, roughly 3 H100-hours at
-  8k tok/s, or about 14 L4-hours (estimate).
-- **Expected quality.** The highest ceiling on relation semantics and German (unmeasured), and long
-  context is available.
-- **Risks.** Throughput falls well below an encoder on small GPUs. There are replay and
-  nondeterminism problems. Grammar overhead grows at batch 8 and above. Model-generated offsets need
-  a substring re-anchor step. Gemma 4 and NuExtract3 field accuracy is anecdotal.
+- **Stack.** NuExtract3 (4B) or Qwen3.5-4B/9B does open-type NER+RE in **one call per chunk**,
+  replacing induce and extract; corpus-level EDC-style canonicalization afterwards; same gates.
+- **Cost.** About 300 output tokens per chunk gives about 89 M tokens per campaign: roughly 3
+  H100-hours at 8k tok/s or about 14 L4-hours (estimate).
+- **Quality.** Highest ceiling on relation semantics and German (unmeasured); long context
+  available.
+- **Risks.** Far below encoder throughput on small GPUs; replay; grammar overhead at batch ≥8;
+  model-written offsets need substring re-anchoring; Gemma 4/NuExtract3 accuracy is anecdotal.
 
 ### 4. Control: GLiNER 2.5 + fixes
 
-- **Stack.** The baseline `fused_entity_relation.gliner25` at 1,024 tokens. Per-chunk induction is
-  replaced by sampled, corpus-level induction (calls proportional to the sample, for example about
-  1–2k instead of 248k), with the same gates and conformal threshold.
-- **Expected cost.** The lowest change cost. It isolates how much of the gain comes from the gates
-  rather than the model.
-- **Risks.** The label ceiling of about 20 and the window collapse stay.
+- **Stack.** Baseline `fused_entity_relation.gliner25` at 1,024 tokens; sampled corpus-level
+  induction (about 1–2k calls instead of 248k); same gates and threshold.
+- **Cost.** Lowest change cost; isolates the gates' contribution from the model's.
+- **Risks.** The ~20-label ceiling and window collapse stay.
 
-**Outside extraction, but decisive for map criterion 5.** glinker is 73% of runtime. Profile how its
-1,274 s splits between the linker and the resolver before any arm is timed end-to-end. Knowledgator
-attributes 10–100× linking speedups to precomputed label embeddings in GLinker (vendor).
+**Decisive for map criterion 5, outside extraction.** glinker is 73% of runtime: profile its
+1,274 s (linker vs resolver) before timing any arm end-to-end. GLinker's vendor attributes 10–100×
+linking speedups to precomputed label embeddings.
 
 ## Open questions
 
