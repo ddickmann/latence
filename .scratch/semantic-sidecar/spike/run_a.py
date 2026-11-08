@@ -138,6 +138,8 @@ PERSON_PASSES: dict[str, list[str]] = {
     "surname_meta+dob_year": ["first_meta", "dob_year"],
     "first+dob": ["first_name", "dob"],
     "initials+pc_out+dob_year": ["initials", "pc_out", "dob_year"],
+    "surname+birth_place": ["surname", "birth_place"],
+    "postcode": ["postcode_fake"],
 }
 
 
@@ -362,6 +364,12 @@ def run(
     acc_prec = float(y[acc].mean()) if acc.any() else float("nan")
     rej_match_rate = float(y[rej].mean()) if rej.any() else float("nan")
 
+    # Scored neighbours of every record: the evidence the cluster-level check reads.
+    adj: dict[str, dict[str, float]] = defaultdict(dict)
+    for a_, b_, pv in zip(cand.l.to_numpy(), cand.r.to_numpy(), p):
+        adj[a_][b_] = float(pv)
+        adj[b_][a_] = float(pv)
+
     # Constrained clustering.
     def cluster(with_expert: bool) -> tuple[dict[str, str], dict[str, int]]:
         cc = ConstrainedClusterer(ids)
@@ -376,8 +384,12 @@ def run(
             for i in np.where(rev & (y == 1))[0]:
                 cc.try_union(ls[i], rs[i])
         for i in np.where(acc)[0][np.argsort(-p[acc], kind="stable")]:
-            cc.try_union(ls[i], rs[i])
-        return cc.clusters(), {"merges": cc.merges, "blocked_merges": cc.blocked_merges}
+            cc.try_union_checked(ls[i], rs[i], adj)
+        return cc.clusters(), {
+            "merges": cc.merges,
+            "blocked_merges": cc.blocked_merges,
+            "blocked_by_linkage": cc.blocked_by_linkage,
+        }
 
     t = time.time()
     pred_machine, cs_m = cluster(False)

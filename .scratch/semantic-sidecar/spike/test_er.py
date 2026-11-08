@@ -67,6 +67,27 @@ def test_cannot_link_is_never_crossed_even_through_a_chain() -> None:
     assert cc.blocked_merges == 1
 
 
+def test_linkage_check_stops_a_chain_the_scorer_contradicts() -> None:
+    """A~B and B~C are confident, but the scorer says A and C do not match: no merge of C."""
+    adj = {
+        "a": {"b": 0.95, "c": 0.01},
+        "b": {"a": 0.95, "c": 0.9},
+        "c": {"b": 0.9, "a": 0.01},
+    }
+    cc = ConstrainedClusterer("abc")
+    assert cc.try_union_checked("a", "b", adj)
+    assert not cc.try_union_checked("b", "c", adj)  # crossing pair a~c is a strong negative
+    assert cc.clusters()["c"] != cc.clusters()["a"]
+    assert cc.blocked_by_linkage == 1
+
+
+def test_linkage_check_ignores_unscored_pairs() -> None:
+    adj = {"a": {"b": 0.9}, "b": {"a": 0.9, "c": 0.8}, "c": {"b": 0.8}}
+    cc = ConstrainedClusterer("abc")
+    assert cc.try_union_checked("a", "b", adj)
+    assert cc.try_union_checked("b", "c", adj)  # a~c unscored: no evidence either way
+
+
 def test_contradicting_cannot_link_raises() -> None:
     cc = ConstrainedClusterer(["a", "b"])
     cc.try_union("a", "b")

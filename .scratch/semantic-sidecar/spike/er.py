@@ -171,6 +171,7 @@ class ConstrainedClusterer:
         self.members: dict[str, set[str]] = {i: {i} for i in self.parent}
         self.cannot: dict[str, set[str]] = defaultdict(set)
         self.blocked_merges = 0
+        self.blocked_by_linkage = 0
         self.merges = 0
 
     def find(self, x: str) -> str:
@@ -211,6 +212,44 @@ class ConstrainedClusterer:
             self.cannot[ra] |= self.cannot.pop(rb)
         self.merges += 1
         return True
+
+    def linkage_ok(
+        self,
+        a: str,
+        b: str,
+        adj: dict[str, dict[str, float]],
+        *,
+        min_mean: float = 0.5,
+        strong_negative: float = 0.05,
+    ) -> bool:
+        """Cluster-level check: may the clusters of ``a`` and ``b`` merge?
+
+        Looks at every SCORED pair crossing the two clusters (unscored pairs are no evidence,
+        not negative evidence). Refuses when any crossing pair is a strong negative, or when the
+        crossing pairs are on average not confident matches. This is what stops a chain of
+        individually good edges (A~B, B~C) from gluing together records the scorer itself says
+        do not match (A !~ C).
+        """
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return True
+        small, large = (ra, rb) if len(self.members[ra]) <= len(self.members[rb]) else (rb, ra)
+        lm = self.members[large]
+        total, n = 0.0, 0
+        for x in self.members[small]:
+            for y, p in adj.get(x, {}).items():
+                if y in lm:
+                    if p < strong_negative:
+                        return False
+                    total += p
+                    n += 1
+        return n == 0 or total / n >= min_mean
+
+    def try_union_checked(self, a: str, b: str, adj: dict[str, dict[str, float]], **kw: float) -> bool:
+        if not self.linkage_ok(a, b, adj, **kw):
+            self.blocked_by_linkage += 1
+            return False
+        return self.try_union(a, b)
 
     def clusters(self) -> dict[str, str]:
         return {i: self.find(i) for i in self.parent}
