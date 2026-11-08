@@ -55,6 +55,12 @@ DUCKDB_MEM = os.environ.get("SPIKE_DUCKDB_MEM", "4GB")  # DuckDB spills to disk 
 BLOCK_CAP = 300  # a blocking key shared by more records than this is skipped (logged)
 
 
+def _present(v: object) -> bool:
+    """True for a real value. Parquet hands missing values back as None OR float NaN, and
+    str(NaN) == "nan" would otherwise become a key shared by every record with a gap."""
+    return v is not None and not (isinstance(v, float) and np.isnan(v)) and str(v).strip() != ""
+
+
 def _norm(s: str | None) -> str:
     if s is None or (isinstance(s, float) and np.isnan(s)):
         return ""
@@ -91,9 +97,9 @@ def normalise_org(df: pd.DataFrame) -> pd.DataFrame:
     out["first_meta"] = [jellyfish.metaphone(f) if f else None for f in firsts]
     out["acr_key"] = acr_keys
     out["acr_first"] = acr_firsts
-    out["reg_norm"] = [re.sub(r"\D", "", str(r)) if r is not None and str(r) != "None" else None for r in out["reg_id"]]
-    out["reg_norm"] = out["reg_norm"].replace("", None)
-    out["pc_out"] = [str(p).split()[0] if p is not None and str(p) != "None" else None for p in out["postcode"]]
+    out["reg_norm"] = [re.sub(r"\D", "", str(r)) or None if _present(r) else None for r in out["reg_id"]]
+    out["pc_out"] = [str(p).split()[0] if _present(p) else None for p in out["postcode"]]
+    out["industry"] = [v if _present(v) else None for v in out["industry"]]
     out["city_n"] = [_norm(c) or None for c in out["city"]]
     return out
 
