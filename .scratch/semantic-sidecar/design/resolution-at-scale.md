@@ -5,8 +5,8 @@ after that grilling and the feasibility spike (ticket 20) report. Written 2026-1
 
 Sources: [research 03](../research/03-sota-schema-matching.md),
 [research 04](../research/04-sota-entity-resolution.md),
-[research 05](../research/05-ontology-learning-and-standards.md). Relation canonicalization is
-still being researched in ticket 21. Claims the reports mark UNVERIFIED stay UNVERIFIED here.
+[research 05](../research/05-ontology-learning-and-standards.md). Relation resolution is detailed
+in [research 21](../research/21-relation-resolution-at-scale.md). Claims the reports mark UNVERIFIED stay UNVERIFIED here.
 
 ## Why this comes first
 
@@ -80,7 +80,7 @@ Resolution is first a linking problem, and only for what remains a clustering pr
   same lineage neighbours.
 - This separates two "Müller"s, or two `customer_id` columns, where names alone cannot.
 
-## 5. Relation resolution (research pending in ticket 21)
+## 5. Relation resolution (detail: [research 21](../research/21-relation-resolution-at-scale.md), stages R0–R8)
 
 - **Schema first.** Canonical predicates come from the ontology and from UC. Declared and verified
   foreign keys and joins are gold relations.
@@ -92,6 +92,11 @@ Resolution is first a linking problem, and only for what remains a clustering pr
   confidence and a support count. A violated functional property is flagged as a contradiction for
   review.
 - **Unmapped relations become proposals** for new properties, never silent new labels.
+- **Unit of work:** each distinct (raw label, head class, tail class) triple is canonicalised, not
+  each mention. That is thousands of items rather than millions, so a model in the review band is
+  affordable.
+- **Today's gap:** one edge is emitted per mention, and the fuzzy label fold is unsafe
+  (`not_located_in` folds into `located_in`). Both are fixed by aggregation and by the definition matcher.
 
 ## 6. The expert workbench (ticket 22)
 
