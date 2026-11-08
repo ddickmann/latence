@@ -1,0 +1,45 @@
+# Prototype: resolution feasibility spike (go/no-go)
+
+Type: prototype
+Mode: HITL
+Status: open
+Blocked by:
+
+## Question
+
+Does the candidate design in [design/resolution-at-scale.md](../design/resolution-at-scale.md) resolve entities well
+enough, at a reviewer effort that is acceptable, to be worth building? Nothing else is built
+until this reports go or no-go.
+
+Build a throwaway prototype on scratch code, outside the shipped packages. It has three parts:
+anchor-first linking with NIL clustering, calibrated three-band scoring, and constrained clustering.
+Run it on:
+
+- **Structured:**
+  - one public ER benchmark with a permissive licence (Leipzig/Magellan-style pairs or WDC
+    Products; verify the licence before use);
+  - the Metis synthetic estate's master data with injected duplicates (typos, abbreviations,
+    German/English variants, merged and split companies);
+  - Splink on DuckDB. Check the Spark path on the sandbox once *get a Databricks sandbox* lands.
+- **Text:**
+  - one permissively licensed entity-linking benchmark;
+  - a small hand-labelled German slice (a few hundred mention pairs);
+  - mentions are linked to anchors with a cross-encoder, and the leftovers are NIL-clustered.
+
+**Report:**
+
+- quality: B-cubed and pairwise P/R/F1;
+- auto-accept precision under Learn-then-Test at the declared target;
+- **review-band rate and estimated expert minutes per 1,000 records**, which measures the split of
+  work between machine and expert;
+- throughput and cost at 10⁵ and 10⁶ records;
+- a side-by-side against the current cascade as a baseline.
+
+**Go/no-go bars**, proposed here and set with the owner before the run:
+
+- auto-accept precision ≥ 0.98, with its confidence stated;
+- the review band small enough for the expected expert capacity;
+- 10⁶ records within an agreed time and cost budget.
+
+The spike also produces the realistic review-band items that *the expert resolution workbench*
+prototypes against.

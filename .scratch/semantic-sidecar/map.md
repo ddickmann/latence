@@ -49,6 +49,13 @@ ontology layer** from two input modalities:
   - a `SCHEMA_VERSION` bump on any contract change;
   - no fake green, and every fix needs a test that was red first.
   - `AGENTS.md` is the authority.
+- **Resolution is the critical path** (owner, 2026-11-08). No contract or harvester build starts
+  before *the resolution feasibility spike* reports go or no-go. The candidate design is
+  [design/resolution-at-scale.md](design/resolution-at-scale.md).
+- **The machine prepares and the expert decides** (owner, 2026-11-08). AI prepares, resolves and
+  processes as much as possible, and calibrated bands decide what it may accept alone. The
+  expert gets a very convenient workbench to resolve the review band and to QA everything
+  against enterprise standards. Success is measured as machine precision **and** expert effort.
 - **Standing principles:**
   - **Unity Catalog is the semantic source of truth on Databricks.** This engine overlays what
     UC lacks and proposes changes upstream; it never shadows a UC definition.

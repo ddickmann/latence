@@ -3,7 +3,7 @@
 Type: grilling
 Mode: HITL
 Status: open
-Blocked by: 04, 10
+Blocked by: 04, 10, 20, 21
 
 ## Question
 
@@ -19,3 +19,6 @@ Decide the resolution engine for both modalities:
 - scale: in-memory versus Spark;
 - what happens to `disambiguation.cascade`, `.embedding` and `.glinker`, and to
   `type_consolidation`.
+
+Start from the candidate design in [design/resolution-at-scale.md](../design/resolution-at-scale.md) and the
+feasibility spike's numbers.
