@@ -62,4 +62,5 @@ Agreed before any model arm runs. Full table, reasons and run order are in
 - Generative model: hosted, behind a provider-neutral adapter. A deep tier writes definitions and
   induction proposals; a fast tier writes review-item explanations. The spike sends only
   synthetic or public data.
-- Runtime: the owner's Apple Silicon M3 (32 GB).
+- Runtime: a Runpod pod, 1× L40S 48 GB with at least 64 GB system RAM (owner, 2026-11-08;
+  replaces the M3).

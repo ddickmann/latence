@@ -1,7 +1,8 @@
-# Ticket 20 spike: where it stands and what runs next (on the M3)
+# Ticket 20 spike: where it stands and what runs next (on the GPU pod)
 
-Status on 2026-11-08. The model arms run on the owner's Apple Silicon M3 (32 GB unified memory).
-Everything so far ran on a 4-CPU Linux box without a GPU. Read this file, then
+Status on 2026-11-08. The model arms run on a Runpod pod: 1× L40S 48 GB, at least 64 GB system RAM,
+about 150 GB volume, a PyTorch/CUDA image (owner, 2026-11-08; replaces the M3 plan). Everything
+so far ran on a 4-CPU Linux box without a GPU. Read this file, then
 [`../issues/20-resolution-feasibility-spike.md`](../issues/20-resolution-feasibility-spike.md) and
 [`../design/resolution-at-scale.md`](../design/resolution-at-scale.md).
 
@@ -9,15 +10,15 @@ Everything so far ran on a 4-CPU Linux box without a GPU. Read this file, then
 
 | Role | Model (Hugging Face id unless noted) | Runtime |
 |---|---|---|
-| English NER and relation extraction | `knowledgator/gliner-relex-large-v1.0` | PyTorch on MPS |
-| Same-entity / type / relation decisions | `fastino/GLiNER2.5-Decide` **vs** `fastino/GLiDE-*` (9B or smaller), head to head | MPS |
-| Candidate retrieval (blocking ANN and linking retriever) | `google/embeddinggemma-2`, 256-d Matryoshka, together with char-ngram TF-IDF | MPS or MLX |
-| Pairwise reranking | `Qwen/Qwen3-Reranker-0.6B`, zero-shot **vs** LoRA fine-tuned | MPS |
+| English NER and relation extraction | `knowledgator/gliner-relex-large-v1.0` | PyTorch, CUDA |
+| Same-entity / type / relation decisions | `fastino/GLiNER2.5-Decide` **vs** `fastino/GLiDE-*` (9B or smaller), head to head | CUDA (vLLM optional for GLiDE) |
+| Candidate retrieval (blocking ANN and linking retriever) | `google/embeddinggemma-2`, 256-d Matryoshka, together with char-ngram TF-IDF | CUDA |
+| Pairwise reranking | `Qwen/Qwen3-Reranker-0.6B`, zero-shot **vs** LoRA fine-tuned | CUDA |
 | Structured matching backbone | Splink 5 on DuckDB (Spark later) | CPU |
 | Definitions and type-induction proposals | `claude-opus-5-5` (hosted; Batches API for bulk) | `llm.py`, tier `deep` |
 | Explanations of review items | `claude-haiku-5-5` (hosted) | `llm.py`, tier `fast` |
-| Graph completion (not this ticket) | `mgalkin/ultra_50g` **vs** Flock (github `jw9730/flock`) | CPU |
-| German phase (later) | `gliner-relex-multi-v1.0`, `fastino/gliner2.5-multi-v1`, `fastino/GLiNER2.5-multi-Decide` | MPS |
+| Graph completion (not this ticket) | `mgalkin/ultra_50g` **vs** Flock (github `jw9730/flock`) | CUDA (torch-scatter) |
+| German phase (later) | `gliner-relex-multi-v1.0`, `fastino/gliner2.5-multi-v1`, `fastino/GLiNER2.5-multi-Decide` | CUDA |
 
 The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6) are dropped.
 `run_b.py` still references them and has to be rebuilt (step 4).
@@ -42,15 +43,15 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
 - **The 1M run has not finished.** Earlier attempts ran out of memory or disk on the Linux box. The fixes are in: DuckDB-side union, EM trained on a sample of at most 150k records, SQL passes, and the cap.
 - **Part B (text)** has only a lexical baseline: top-1 accuracy 0.784, 0% on acronyms, and LTT abstained.
 
-## M3 setup
+## Pod setup
 
 ```bash
 git clone -b claude/blissful-maxwell-bpln7a https://github.com/ddickmann/latence.git
 cd latence/.scratch/semantic-sidecar/spike
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install splink duckdb pandas pyarrow scikit-learn scipy torch transformers \
+pip install torch --index-url https://download.pytorch.org/whl/cu128   # match the image's CUDA
+pip install splink duckdb pandas pyarrow scikit-learn scipy transformers \
   sentence-transformers gliner gliner2 peft accelerate anthropic pytest psutil
-export PYTORCH_ENABLE_MPS_FALLBACK=1   # ops without an MPS kernel fall back to CPU
 export ANTHROPIC_API_KEY=...           # set in the shell; never commit it
 PYTHONHASHSEED=0 python -m pytest -q -p no:cacheprovider test_er.py test_llm.py   # 13 pass
 ```
@@ -69,8 +70,9 @@ python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet(
 
 ## Next steps, in order
 
+0. **Check the GPU:** `python -c "import torch; print(torch.cuda.get_device_name(0))"`.
 1. **Pin the models.** Download every model in the table and write each one's id, revision hash and licence to `results/models.json`.
-2. **Part A at scale on the M3:**
+2. **Part A at scale on the pod:**
    - Rerun 100k, then 1M, with `run_a.py`.
    - Report wall time, peak RSS and pairs per second.
 3. **Part A, uncertain pairs:**
@@ -99,5 +101,5 @@ python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet(
 
 **Go bar:**
 - realised auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05), with its confidence stated;
-- 10⁶ records within a time and cost budget agreed once the 100k timing on the M3 is known;
+- 10⁶ records within a time and cost budget agreed once the 100k timing on the pod is known;
 - no expert-capacity bar during development.
