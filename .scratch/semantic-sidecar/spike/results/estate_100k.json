@@ -1,0 +1,133 @@
+{
+  "dataset": "estate",
+  "path": "data/estate_100k.parquet",
+  "records": 98971,
+  "gold_clusters": 41250,
+  "seed": 7,
+  "blocking": {
+    "name_core": {
+      "pairs": 232907,
+      "pair_completeness": 0.6538683320096178,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.61
+    },
+    "first_tok+city": {
+      "pairs": 216044,
+      "pair_completeness": 0.6663910437043726,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.77
+    },
+    "first_meta+pc_out": {
+      "pairs": 72461,
+      "pair_completeness": 0.5832472011576164,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.24
+    },
+    "reg_id": {
+      "pairs": 28769,
+      "pair_completeness": 0.3127196370480781,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.1
+    },
+    "acronym": {
+      "pairs": 216184,
+      "pair_completeness": 0.05996975400650615,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.55
+    },
+    "rare_token": {
+      "pairs": 62311,
+      "pair_completeness": 0.022891212342106122,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.2
+    },
+    "_union": {
+      "pairs": 668391,
+      "pair_completeness": 0.9314678010727536,
+      "reduction_ratio": 0.9998635262703477,
+      "gold_pairs": 91913
+    }
+  },
+  "labels_used": {
+    "calibration": 2000,
+    "ltt": 3000
+  },
+  "bands": {
+    "accept_at": 0.62,
+    "reject_below": 0.395000000001,
+    "target": 0.95,
+    "reject_target": 0.99,
+    "delta": 0.05,
+    "share": {
+      "accept": 0.10233530972140559,
+      "review": 0.0360896541096454,
+      "reject": 0.861575036168949
+    },
+    "counts": {
+      "accept": 68400,
+      "review": 24122,
+      "reject": 575869
+    },
+    "auto_accept_precision_realised": 0.9792836257309941,
+    "auto_accept_precision_wilson_lower": 0.9781889701714627,
+    "auto_reject_true_match_rate": 0.0041641414974586234,
+    "auto_resolved_share": 0.9639103458903546,
+    "vetoed_pairs": 193748
+  },
+  "review_effort": {
+    "review_pairs": 24122,
+    "review_groups": 10765,
+    "expert_minutes_at_20s_per_group": 3588.3333333333335
+  },
+  "clustering": {
+    "machine_only": {
+      "pairwise_precision": 0.9811460766799506,
+      "pairwise_recall": 0.7767997998106906,
+      "pairwise_f1": 0.8670961787191148,
+      "bcubed_precision": 0.993545824630688,
+      "bcubed_recall": 0.8660520085008067,
+      "bcubed_f1": 0.9254284357924966,
+      "predicted_clusters": 51809,
+      "gold_clusters": 41250,
+      "merges": 47162,
+      "blocked_merges": 0,
+      "blocked_by_linkage": 856
+    },
+    "machine_plus_expert": {
+      "pairwise_precision": 0.9945303680945897,
+      "pairwise_recall": 0.9297814237376649,
+      "pairwise_f1": 0.9610665647035008,
+      "bcubed_precision": 0.9975508939367039,
+      "bcubed_recall": 0.9572076668923221,
+      "bcubed_f1": 0.9769629691623285,
+      "predicted_clusters": 44495,
+      "gold_clusters": 41250,
+      "merges": 54476,
+      "blocked_merges": 320,
+      "blocked_by_linkage": 1236
+    },
+    "plain_closure_splink_p95": {
+      "pairwise_precision": 0.8371084911277837,
+      "pairwise_recall": 0.7647666815358002,
+      "pairwise_f1": 0.7993040828277889,
+      "bcubed_precision": 0.9467991986750007,
+      "bcubed_recall": 0.8587148423949104,
+      "bcubed_f1": 0.9006083654581222,
+      "predicted_clusters": 50363,
+      "gold_clusters": 41250
+    },
+    "latence_cascade_baseline": "skipped: 98971 records > baseline_max 0"
+  },
+  "timings_s": {
+    "normalise": 1.9,
+    "block": 13.8,
+    "score_splink": 10.38,
+    "cluster": 5.92,
+    "total": 37.2
+  },
+  "peak_rss_mb": 1904.0,
+  "hardware": {
+    "cpus": 4,
+    "gpu": null
+  }
+}

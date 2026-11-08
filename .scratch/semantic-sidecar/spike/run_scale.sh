@@ -10,4 +10,4 @@ $PY run_a.py --dataset historical --path data/historical_50k.parquet --out out/h
 $PY generate.py --entities 33000 --seed 13 --out data/estate_100k.parquet
 $PY run_a.py --dataset estate --path data/estate_100k.parquet --out out/estate_100k.json --baseline-max 0 > out/estate_100k.log 2> out/estate_100k.stderr; echo "estate_100k exit=$?"
 $PY generate.py --entities 330000 --seed 17 --out data/estate_1m.parquet
-/usr/bin/time -v $PY run_a.py --dataset estate --path data/estate_1m.parquet --out out/estate_1m.json --baseline-max 0 > out/estate_1m.log 2> out/estate_1m.stderr; echo "estate_1m exit=$?"
+$PY run_a.py --dataset estate --path data/estate_1m.parquet --out out/estate_1m.json --baseline-max 0 > out/estate_1m.log 2> out/estate_1m.stderr; echo "estate_1m exit=$?"
