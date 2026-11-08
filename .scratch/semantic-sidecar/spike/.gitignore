@@ -3,3 +3,5 @@ data/
 out/
 __pycache__/
 models/
+.tmp/
+out_*.log
