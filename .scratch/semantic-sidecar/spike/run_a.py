@@ -144,40 +144,43 @@ PERSON_PASSES: dict[str, list[str]] = {
 }
 
 
-def _pairs_on(con: duckdb.DuckDBPyConnection, keys: list[str]) -> tuple[pd.DataFrame, int]:
+def _pairs_on(con: duckdb.DuckDBPyConnection, keys: list[str]) -> tuple[str, int]:
+    """SQL selecting (l, r) for records sharing every key in ``keys``; keys over BLOCK_CAP skipped."""
     k = " || '|' || ".join(f"CAST({c} AS VARCHAR)" for c in keys)
     nn = " AND ".join(f"{c} IS NOT NULL" for c in keys)
-    con.execute(
-        f"CREATE OR REPLACE TEMP TABLE kk AS SELECT unique_id, {k} AS bk FROM recs WHERE {nn}"
-    )
+    con.execute(f"CREATE OR REPLACE TEMP TABLE kk AS SELECT unique_id, {k} AS bk FROM recs WHERE {nn}")
     skipped = con.execute(
         f"SELECT count(*) FROM (SELECT bk FROM kk GROUP BY bk HAVING count(*) > {BLOCK_CAP})"
     ).fetchall()[0][0]
-    p = con.execute(
-        f"""WITH ok AS (SELECT bk FROM kk GROUP BY bk HAVING count(*) BETWEEN 2 AND {BLOCK_CAP})
-        SELECT a.unique_id AS l, b.unique_id AS r FROM kk a JOIN kk b USING (bk)
-        WHERE a.bk IN (SELECT bk FROM ok) AND a.unique_id < b.unique_id"""
-    ).df()
-    return p, int(skipped)
+    sql = f"""WITH ok AS (SELECT bk FROM kk GROUP BY bk HAVING count(*) BETWEEN 2 AND {BLOCK_CAP}),
+        kok AS (SELECT unique_id, bk FROM kk WHERE bk IN (SELECT bk FROM ok))
+        SELECT a.unique_id AS l, b.unique_id AS r FROM kok a JOIN kok b USING (bk) WHERE a.unique_id < b.unique_id"""
+    return sql, int(skipped)
 
 
-def _acronym_pairs(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    return con.execute(
-        """SELECT least(a.unique_id, b.unique_id) AS l, greatest(a.unique_id, b.unique_id) AS r
+def _acronym_pairs(con: duckdb.DuckDBPyConnection) -> tuple[str, int]:
+    """An acronym surface ("NL") against records whose name's initials are that acronym, same city
+    or unknown city. Capped like every other pass: an initials key shared by more than BLOCK_CAP
+    records is skipped (at 1e6 records an uncapped two-letter key is a quadratic blow-up)."""
+    skipped = con.execute(
+        f"SELECT count(*) FROM (SELECT acr_key FROM recs WHERE acr_key IS NOT NULL GROUP BY acr_key HAVING count(*) > {BLOCK_CAP})"
+    ).fetchall()[0][0]
+    sql = f"""WITH okk AS (SELECT acr_key FROM recs WHERE acr_key IS NOT NULL GROUP BY acr_key HAVING count(*) <= {BLOCK_CAP})
+        SELECT least(a.unique_id, b.unique_id) AS l, greatest(a.unique_id, b.unique_id) AS r
         FROM recs a JOIN recs b ON a.acr_first = b.acr_key AND a.unique_id <> b.unique_id
-        WHERE a.acr_first IS NOT NULL AND (a.city_n = b.city_n OR a.city_n IS NULL OR b.city_n IS NULL)"""
-    ).df()
+        WHERE a.acr_first IS NOT NULL AND b.acr_key IN (SELECT acr_key FROM okk)
+          AND (a.city_n = b.city_n OR a.city_n IS NULL OR b.city_n IS NULL)"""
+    return sql, int(skipped)
 
 
-def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> pd.DataFrame:
+def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> tuple[str, int]:
     con.execute(
         "CREATE OR REPLACE TEMP TABLE toks AS SELECT DISTINCT unique_id, unnest(string_split(name_core, ' ')) AS t FROM recs"
     )
-    return con.execute(
-        f"""WITH rare AS (SELECT t FROM toks WHERE length(t) >= 4 GROUP BY t HAVING count(*) BETWEEN 2 AND {max_df})
-        SELECT DISTINCT a.unique_id AS l, b.unique_id AS r FROM toks a JOIN toks b USING (t)
-        WHERE a.t IN (SELECT t FROM rare) AND a.unique_id < b.unique_id"""
-    ).df()
+    sql = f"""WITH rare AS (SELECT t FROM toks WHERE length(t) >= 4 GROUP BY t HAVING count(*) BETWEEN 2 AND {max_df}),
+        tr AS (SELECT unique_id, t FROM toks WHERE t IN (SELECT t FROM rare))
+        SELECT a.unique_id AS l, b.unique_id AS r FROM tr a JOIN tr b USING (t) WHERE a.unique_id < b.unique_id"""
+    return sql, 0
 
 
 def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -204,13 +207,12 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
     for name, keys in passes.items():
         t = time.time()
         if keys == ["@acr"]:
-            p, skipped = _acronym_pairs(con), 0
+            sql, skipped = _acronym_pairs(con)
         elif keys == ["@rare"]:
-            p, skipped = _rare_token_pairs(con), 0
+            sql, skipped = _rare_token_pairs(con)
         else:
-            p, skipped = _pairs_on(con, keys)
-        con.register("pass_df", p[["l", "r"]])
-        con.execute("CREATE OR REPLACE TEMP TABLE pass_t AS SELECT DISTINCT l, r FROM pass_df")
+            sql, skipped = _pairs_on(con, keys)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE pass_t AS SELECT DISTINCT l, r FROM ({sql})")
         con.execute(f"INSERT INTO cand_all SELECT l, r, '{name}' FROM pass_t")
         stats[name] = {
             "pairs": int(con.execute("SELECT count(*) FROM pass_t").fetchall()[0][0]),
@@ -218,8 +220,6 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
             "keys_skipped_over_cap": skipped,
             "secs": round(time.time() - t, 2),
         }
-        con.unregister("pass_df")
-        del p
     con.execute(
         """CREATE TABLE cand AS SELECT l, r, string_agg(DISTINCT pass, ',' ORDER BY pass) AS pass
         FROM cand_all GROUP BY l, r ORDER BY l, r"""
