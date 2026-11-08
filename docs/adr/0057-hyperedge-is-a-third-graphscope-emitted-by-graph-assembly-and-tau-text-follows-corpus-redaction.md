@@ -1,5 +1,10 @@
 # A Hyperedge is a third GraphScope emitted by Graph Assembly; its `tau_text` never holds what the corpus would not export
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 The m-ary Evidence Unit that chain-of-evidence retrieval selects over (ADR-0056) enters the domain
 model as a **Hyperedge** — a third `GraphScope` on the existing `GraphRecord`, emitted by the
 **Graph Assembly** Stage, not by a new Stage. It is **distinct from `Evidence`**, which keeps its

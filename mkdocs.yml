@@ -260,6 +260,9 @@ nav:
   # Grouped exactly as docs/adr/index.md groups them, so the tab and the log agree.
   - Decision Log (ADRs):
       - adr/index.md
+      - "Re-scope: semantic-resolution and ontology engine":
+          - "0067 — Re-scope: semantic-resolution and ontology engine, standalone and as a Metis sidecar": adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md
+          - "0068 — Query-time retrieval tooling is removed": adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md
       - Foundations & scope:
           - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
@@ -322,7 +325,7 @@ nav:
       - Empirical choices:
           - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
           - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
-      - Retrieval-quality tooling:
+      - Retrieval-quality tooling (superseded by 0068):
           - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
           - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
           - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md

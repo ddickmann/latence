@@ -1,5 +1,10 @@
 # Retrieval-quality tooling is strictly stateless — it holds no index, it generates signals and transforms candidates
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 The framework grows a **retrieval-quality tooling** layer (embedding/sparse/multi-vector generation,
 reranking, fusion, context-packing, graph-augmented retrieval, an MCP server) that sits **downstream**
 of the pipeline export. This ADR records the load-bearing boundary that constrains the entire layer:

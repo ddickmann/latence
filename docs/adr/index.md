@@ -7,7 +7,18 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 65 records numbered 0001–0066.
+    the sequence simply skipped it), so the log holds 67 records numbered 0001–0068.
+
+## Re-scope: the semantic-resolution and ontology engine
+
+The direction since 2026-11-08: a traceable semantic and ontology layer built from warehouse
+metadata and unstructured text, standalone and as a sidecar to Metis. The route is charted as a
+wayfinder map in `.scratch/semantic-sidecar/map.md`.
+
+| ADR | Decision |
+| --- | --- |
+| [0067](0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md) | Latence is re-scoped into a semantic-resolution and ontology engine that runs standalone and as a sidecar to Metis; warehouse metadata is a new input modality; the text path and Graph Completion stay (partly supersedes the scope framing of 0005 and 0017) |
+| [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) | Query-time retrieval tooling, hyperedges and Context Enrichment are removed; embedders stay only as a resolution signal (supersedes 0039, 0048–0053, 0056–0059; narrows 0045) |
 
 ## Foundations & scope
 
@@ -76,7 +87,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | --- | --- |
 | [0037](0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md) | Graph Completion is an OPTIONAL post-Assembly Capability; predicted edges are inferred-marked |
 | [0038](0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md) | Schema Induction is an OPTIONAL LLM Stage; induced labels are additive |
-| [0039](0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md) | Context Enrichment projects the KG onto chunks into the EMBEDDING input only |
+| [0039](0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md) | ~~Context Enrichment projects the KG onto chunks into the EMBEDDING input only~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
 | [0054](0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md) | Type-vocabulary canonicalization is its own Capability in the resolution phase (per-chunk induction's downstream fix) |
 
 ## The Quality Report, deltas & operations
@@ -99,20 +110,21 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0013](0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md) | Relation Extraction Provider is chosen empirically; a Provider may fulfil fused Capabilities |
 | [0046](0046-enterprise-glinker-entity-linking-and-audited-resolver.md) | Enterprise GLinker entity-linking + audited resolver, ported from dataset-intelligence |
 
-## Retrieval-quality tooling (the query-side layer)
+## Retrieval-quality tooling (the query-side layer) — superseded by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
 
-The stateless, downstream layer that feeds an adopter's retrieval engine without being one (design;
-see [Retrieval-quality tooling](../retrieval-tooling.md)).
+The stateless, downstream layer that fed an adopter's retrieval engine without being one (design;
+see [Retrieval-quality tooling](../retrieval-tooling.md)). Every record in this section is
+**superseded by ADR-0068** and kept as the dated record.
 
 | ADR | Decision |
 | --- | --- |
-| [0048](0048-retrieval-tooling-is-strictly-stateless.md) | Retrieval tooling is strictly stateless — it generates signals and transforms candidates, holds no index |
-| [0049](0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md) | Clock-split: index-time signals extend the pipeline; query-time is a downstream library with its own `latence.retrieval` seam |
-| [0050](0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md) | Multi-vector / MUVERA-FDE ships real-but-experimental, off by default, behind a stable seam |
-| [0051](0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md) | Zero-ops multi-hop graph retrieval via DuckDB over the emitted graph parquet; Neo4j optional |
-| [0052](0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md) | Retrieval MCP ports memory_engine hardening; bring-your-own backend; config-driven stack-adaptive copy |
-| [0053](0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md) | SPLADE sparse is a structured composition (model ⊕ confidence-gated NER ⊕ metadata), redacted by default |
-| [0056](0056-hypergraph-evidence-sidecar-is-read-per-call-over-a-point-lookup-kv-no-global-edge-adjacency.md) | Hypergraph Evidence sidecar is read per call over a point-lookup KV; no global edge-adjacency matrix |
-| [0057](0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md) | A Hyperedge is a third GraphScope emitted by Graph Assembly; `tau_text` follows the corpus redaction variant |
-| [0058](0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md) | `token_cost` is an approximate index-time weight; the budget guarantee is an exact query-time verification pass |
-| [0059](0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md) | Query-side entry is tiered: zero-model default over the alias KV; GLiNER2 query NER strictly opt-in |
+| [0048](0048-retrieval-tooling-is-strictly-stateless.md) | ~~Retrieval tooling is strictly stateless — it generates signals and transforms candidates, holds no index~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0049](0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md) | ~~Clock-split: index-time signals extend the pipeline; query-time is a downstream library with its own `latence.retrieval` seam~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0050](0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md) | ~~Multi-vector / MUVERA-FDE ships real-but-experimental, off by default, behind a stable seam~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0051](0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md) | ~~Zero-ops multi-hop graph retrieval via DuckDB over the emitted graph parquet; Neo4j optional~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0052](0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md) | ~~Retrieval MCP ports memory_engine hardening; bring-your-own backend; config-driven stack-adaptive copy~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0053](0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md) | ~~SPLADE sparse is a structured composition (model ⊕ confidence-gated NER ⊕ metadata), redacted by default~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0056](0056-hypergraph-evidence-sidecar-is-read-per-call-over-a-point-lookup-kv-no-global-edge-adjacency.md) | ~~Hypergraph Evidence sidecar is read per call over a point-lookup KV; no global edge-adjacency matrix~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0057](0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md) | ~~A Hyperedge is a third GraphScope emitted by Graph Assembly; `tau_text` follows the corpus redaction variant~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0058](0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md) | ~~`token_cost` is an approximate index-time weight; the budget guarantee is an exact query-time verification pass~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |
+| [0059](0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md) | ~~Query-side entry is tiered: zero-model default over the alias KV; GLiNER2 query NER strictly opt-in~~ — **SUPERSEDED by [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)** |

@@ -1,5 +1,10 @@
 # Clock-split: index-time signal generation extends the pipeline; query-time tooling is a downstream library with its own `latence.retrieval` seam
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 Retrieval tooling runs on two clocks with opposite constraints, and we split the architecture along
 that seam. **Index-time** signal generation (dense, SPLADE-sparse, MUVERA-FDE, raw multi-vectors, BM25
 term-stats, graph features) is **part of the pipeline** — produced during `latence process`, emitted as
