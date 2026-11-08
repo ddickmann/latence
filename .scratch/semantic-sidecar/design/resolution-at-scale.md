@@ -161,7 +161,8 @@ What a reviewer needs to resolve and QA quickly, with confidence:
 - **Cold start:** until reviewers have labelled pairs, most links sit in the review band. Expert
   effort is therefore the first number that matters.
 - **LLM egress and cost.**
-- **German compound names.**
+- **German compound names.** Deferred: v1 is English only (owner, 2026-11-08), and German follows
+  once English passes.
 - **Gold data.**
 
 ## Where Latence stands, and what carries over

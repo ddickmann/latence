@@ -10,7 +10,7 @@ Blocked by: 06, 10
 Decide how quality is proven:
 
 - gold sets for warehouse mapping (column ↔ concept, joins, synonyms) and for the text path
-  (entities, relations, merges), in German and English;
+  (entities, relations, merges), in English for v1 (German follows once English passes);
 - whether Metis's synthetic estate and golden set are reused;
 - metrics: pairwise and B-cubed merge P/R, mapping accuracy, SHACL conformance, ULTRA MRR, and
   downstream question-answering accuracy through Metis;

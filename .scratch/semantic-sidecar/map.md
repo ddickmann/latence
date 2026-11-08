@@ -60,7 +60,11 @@ ontology layer** from two input modalities:
   - **Unity Catalog is the semantic source of truth on Databricks.** This engine overlays what
     UC lacks and proposes changes upstream; it never shadows a UC definition.
   - **No silent over-merge.** An unknown link stays unknown.
-  - **German and English** throughout.
+  - **English first** (owner, 2026-11-08). v1 is built, measured and gated in English only.
+    German follows once English passes the go/no-go. The German items found in research
+    (02, 03, 05, 21: a German gold set, compound splitting, DE labels) wait in *Not yet
+    specified*. Designs stay language-neutral: labels carry a language tag, and nothing
+    hard-codes English, so German is an extension, not a rewrite.
   - Sending samples to a model needs an explicit egress decision.
 - **Reference reads** (read, never copied):
   - Metis: tickets 94, 99, 140, 147, 203, 207 and 211 in `metis/.scratch/metis/issues/`, and
@@ -107,6 +111,12 @@ ontology layer** from two input modalities:
 - A docs and site rewrite (README, docs index, ROADMAP, CONTEXT.md glossary), and whether the
   product keeps its name.
 - Release and versioning of the re-scoped engine, given ADR-0066's gates.
+- **The German extension**, once English passes:
+  - our own German gold sets for entities, relations and merges (no German relation benchmark
+    exists, and REBEL and WebNLG don't allow commercial use);
+  - German compound splitting for names and headers;
+  - re-measuring the multilingual extractors and the cross-encoder;
+  - DE labels and definitions in the ontology.
 - Other warehouses (Snowflake, Postgres, Trino) behind the warehouse seam, once the Databricks
   path is proven.
 

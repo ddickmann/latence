@@ -13,17 +13,18 @@ until this reports go or no-go.
 
 Build a throwaway prototype on scratch code, outside the shipped packages. It has three parts:
 anchor-first linking with NIL clustering, calibrated three-band scoring, and constrained clustering.
-Run it on:
+Run it on English data only (owner, 2026-11-08). The benchmarks used must have permissive
+licences, which rules out REBEL and WebNLG. Run it on:
 
 - **Structured:**
   - one public ER benchmark with a permissive licence (Leipzig/Magellan-style pairs or WDC
     Products; verify the licence before use);
   - the Metis synthetic estate's master data with injected duplicates (typos, abbreviations,
-    German/English variants, merged and split companies);
+    abbreviations and acronyms, merged and split companies);
   - Splink on DuckDB. Check the Spark path on the sandbox once *get a Databricks sandbox* lands.
 - **Text:**
   - one permissively licensed entity-linking benchmark;
-  - a small hand-labelled German slice (a few hundred mention pairs);
+  - a small hand-labelled English slice from an enterprise-like corpus (a few hundred mention pairs);
   - mentions are linked to anchors with a cross-encoder, and the leftovers are NIL-clustered.
 
 **Report:**

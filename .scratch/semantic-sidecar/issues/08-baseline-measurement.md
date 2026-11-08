@@ -17,7 +17,7 @@ The repo records no numbers for the learned text path:
 Before the text path is upgraded, record a baseline on the GPU pod:
 
 - per-stage wall time and GPU memory, and docs/hour, for the current best stack on one fixed
-  corpus (the dogfood RFC set plus one German corpus);
+  corpus (the dogfood RFC set; English only for v1);
 - entity, relation and merge quality on whatever gold exists (`goldset.py`), with the gap
   stated where gold is missing;
 - ULTRA filtered MRR / Hits@1/3/10 with leak detection (`latence-linkpred-ultra/evaluation.py`),
