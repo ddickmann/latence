@@ -1,16 +1,16 @@
-"""Real end-to-end pipeline on ``s3://`` object storage (MinIO in CI) — ADR-0009 made true.
+"""Real end-to-end pipeline on ``s3://`` object storage (S3 emulator in CI) — ADR-0009 made true.
 
 H-E1 Part 2. The old ``test_e2e_s3.py`` was named/docstringed "end-to-end S3" but set
 ``store = file://…`` and ran unconditionally, so the ADR-0009 promise — *the same pipeline runs
 on* ``s3://`` *with no code change* — was never exercised on object storage (the ``storage-s3``
-MinIO job ran only a 5-byte round-trip). That local-FS file is now honestly
+CI job ran only a 5-byte round-trip). That local-FS file is now honestly
 ``test_e2e_pipeline_spine.py``; THIS file runs the **same** screening spine (the shared
-``_spine_pipeline`` builder) against a real ``s3://`` bucket on MinIO.
+``_spine_pipeline`` builder) against a real ``s3://`` bucket on an S3 emulator (versitygw in CI).
 
 It is skipped unless ``LATENCE_S3_ENDPOINT`` is set (so the laptop suite stays hermetic); the
-``storage-s3`` CI lane sets it and points at MinIO. The framework code is UNCHANGED between the
-two lanes: the Runner builds ``Storage.for_uri(pipeline.storage_uri)`` with no options, and
-botocore resolves the MinIO endpoint from the standard ``AWS_ENDPOINT_URL_S3`` environment
+``storage-s3`` CI lane sets it and points at the emulator. The framework code is UNCHANGED
+between the two lanes: the Runner builds ``Storage.for_uri(pipeline.storage_uri)`` with no
+options, and botocore resolves the emulator endpoint from the standard ``AWS_ENDPOINT_URL_S3`` environment
 variable (set here from ``LATENCE_S3_ENDPOINT``) — that env-only resolution is exactly the
 "no code change" ADR-0009 claim.
 
@@ -41,13 +41,13 @@ from latence_core.storage import Storage
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LATENCE_S3_ENDPOINT"),
-    reason="set LATENCE_S3_ENDPOINT (and AWS creds) to run the real s3:// end-to-end on MinIO",
+    reason="set LATENCE_S3_ENDPOINT (and AWS creds) to run the real s3:// e2e on an S3 endpoint",
 )
 
 
 @pytest.fixture()
 def s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point botocore at MinIO via the STANDARD env vars — no framework code change.
+    """Point botocore at the S3 endpoint via the STANDARD env vars — no framework code change.
 
     The framework's ``Storage`` is built with no explicit endpoint/creds (``Storage.for_uri`` in
     the Runner). botocore resolves the endpoint from ``AWS_ENDPOINT_URL_S3`` and creds from the
@@ -58,7 +58,7 @@ def s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
     endpoint = os.environ["LATENCE_S3_ENDPOINT"]
     monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
     monkeypatch.setenv("AWS_ENDPOINT_URL", endpoint)
-    # A region is required for the SigV4 signer even against MinIO; default if the CI didn't set it.
+    # A region is required for the SigV4 signer even against an emulator; default it if CI didn't.
     monkeypatch.setenv("AWS_DEFAULT_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
 
 

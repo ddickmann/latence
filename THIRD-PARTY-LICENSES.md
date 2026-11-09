@@ -209,6 +209,11 @@ project under Apache-2.0. The framework bundles none of it.
 | mypy | 2.1.0 | MIT |
 | pathspec | 1.1.1 | MPL-2.0 (mypy dep; file-level copyleft, not linked into framework code) |
 | detect-secrets | (CI secret scan) | Apache-2.0 **(upstream)** |
+| versitygw (container image `versity/versitygw`) | v1.10.0, pinned by digest `sha256:89cad13c…` in `.github/workflows/ci-heavy.yml` (CI `storage-s3` S3 emulator) | Apache-2.0 **(upstream)** |
+
+The versitygw image is pulled only by the `storage-s3` CI lane, which uses it as the S3
+endpoint for the real `s3://` end-to-end tests. The framework neither bundles nor depends on it.
+It replaced MinIO in that lane once MinIO stopped publishing community images.
 
 **All runtime dependencies on the default install path are permissive. No GPL/AGPL
 runtime dependency is present.** Two exceptions are called out explicitly and neither

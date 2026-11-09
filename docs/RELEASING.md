@@ -218,7 +218,7 @@ so the commit you tag must already be green:
 bash scripts/verify-local.sh   # mirrors the CI merge gates locally
 ```
 
-The heavy lanes not covered by `verify-local.sh` (MinIO `s3://` e2e, the real-Airflow DAG
+The heavy lanes not covered by `verify-local.sh` (S3-emulator `s3://` e2e, the real-Airflow DAG
 tests) run in `ci-heavy.yml` on the PR and on push to `main`; confirm those are green on
 the commit you are about to tag.
 

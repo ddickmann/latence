@@ -1,10 +1,10 @@
 """The S3-slice pipeline spine (intake → parse → chunk → content → export), reused by both
-the local-FS end-to-end (``test_e2e_pipeline_spine.py``) and the ``s3://``-on-MinIO
+the local-FS end-to-end (``test_e2e_pipeline_spine.py``) and the ``s3://``-on-object-storage
 end-to-end (``test_e2e_s3.py``).
 
 Factoring the corpus + Pipeline here is what makes the ADR-0009 "same code on object storage,
 no change" claim *testable*: the identical builder is pointed at a ``file://`` root in the
-hermetic lane and at an ``s3://`` root in the MinIO lane, so the S3 test cannot silently drift
+hermetic lane and at an ``s3://`` root in the S3-emulator lane, so the S3 test cannot silently drift
 into a weaker pipeline than the one the local test proves.
 """
 
