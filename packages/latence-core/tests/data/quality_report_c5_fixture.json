@@ -1,5 +1,5 @@
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "pipeline_name": "c5-aggregators",
   "run_id": "c5",
   "document_count": 3,
@@ -258,6 +258,34 @@
       "skip_reason": null
     },
     {
+      "name": "export_corpus",
+      "capability": "export",
+      "provider": "export.jsonl_parquet",
+      "records_in": 3,
+      "records_out": 3,
+      "duration_seconds": 0.0,
+      "from_checkpoint": false,
+      "runner": "local",
+      "endpoint_retries": 0,
+      "error_count": 0,
+      "error_category": null,
+      "induction_fallbacks": 0,
+      "induction_documents": 0,
+      "induction_empty_after_sanitization": 0,
+      "induction_calls": 0,
+      "induction_cache_hits": 0,
+      "induction_prompt_tokens": 0,
+      "induction_completion_tokens": 0,
+      "induction_budget_exhausted": false,
+      "compute": "cpu",
+      "model_id": null,
+      "license": "Apache-2.0",
+      "device": "auto",
+      "device_selected": "cpu",
+      "skipped": false,
+      "skip_reason": null
+    },
+    {
       "name": "consolidate",
       "capability": "type_consolidation",
       "provider": "type_consolidation.cascade",
@@ -368,62 +396,6 @@
       "device_selected": "cpu",
       "skipped": false,
       "skip_reason": null
-    },
-    {
-      "name": "enrich",
-      "capability": "context_enrichment",
-      "provider": "context.kg_header",
-      "records_in": 14,
-      "records_out": 3,
-      "duration_seconds": 0.0,
-      "from_checkpoint": false,
-      "runner": "local",
-      "endpoint_retries": 0,
-      "error_count": 0,
-      "error_category": null,
-      "induction_fallbacks": 0,
-      "induction_documents": 0,
-      "induction_empty_after_sanitization": 0,
-      "induction_calls": 0,
-      "induction_cache_hits": 0,
-      "induction_prompt_tokens": 0,
-      "induction_completion_tokens": 0,
-      "induction_budget_exhausted": false,
-      "compute": "cpu",
-      "model_id": null,
-      "license": "Apache-2.0",
-      "device": "auto",
-      "device_selected": "cpu",
-      "skipped": false,
-      "skip_reason": null
-    },
-    {
-      "name": "export_corpus",
-      "capability": "export",
-      "provider": "export.jsonl_parquet",
-      "records_in": 3,
-      "records_out": 3,
-      "duration_seconds": 0.0,
-      "from_checkpoint": false,
-      "runner": "local",
-      "endpoint_retries": 0,
-      "error_count": 0,
-      "error_category": null,
-      "induction_fallbacks": 0,
-      "induction_documents": 0,
-      "induction_empty_after_sanitization": 0,
-      "induction_calls": 0,
-      "induction_cache_hits": 0,
-      "induction_prompt_tokens": 0,
-      "induction_completion_tokens": 0,
-      "induction_budget_exhausted": false,
-      "compute": "cpu",
-      "model_id": null,
-      "license": "Apache-2.0",
-      "device": "auto",
-      "device_selected": "cpu",
-      "skipped": false,
-      "skip_reason": null
     }
   ],
   "completeness": {
@@ -458,7 +430,7 @@
     "passed": 6,
     "findings": [
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:982edd69b14d130a8d6293294bfb9084293f62b215b7ceed84c9f6e89ac2d342",
@@ -468,7 +440,7 @@
         "marker": null
       },
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:74c0a16859f1ea6b52a60f02def29cfc5d49d27cb57f136fafc87fb6571ebe8e",
@@ -478,7 +450,7 @@
         "marker": null
       },
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:477d4c5e4721e7d548e533dc7965c55ee8a5219c8814bbde9b58dfecfb02c34f",
@@ -488,7 +460,7 @@
         "marker": null
       },
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:982edd69b14d130a8d6293294bfb9084293f62b215b7ceed84c9f6e89ac2d342",
@@ -498,7 +470,7 @@
         "marker": null
       },
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:74c0a16859f1ea6b52a60f02def29cfc5d49d27cb57f136fafc87fb6571ebe8e",
@@ -508,7 +480,7 @@
         "marker": null
       },
       {
-        "schema_version": 21,
+        "schema_version": 22,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:477d4c5e4721e7d548e533dc7965c55ee8a5219c8814bbde9b58dfecfb02c34f",
@@ -670,13 +642,7 @@
     "inferred_edge_count": 1,
     "inferred_edges_by_scorer": {
       "reference.adjacency": 1
-    },
-    "hyperedges": null
-  },
-  "context_enrichment": {
-    "chunks_enriched": 3,
-    "avg_neighbors_per_chunk": 0.666667,
-    "hub_entities_capped": 3
+    }
   },
   "drift": {
     "resolutions": 6,

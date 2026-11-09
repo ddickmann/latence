@@ -4,8 +4,8 @@
 loop had a four-way branch that picked the ``incoming`` shape and the ``records_in`` counting rule;
 two hand-maintained frozensets that the :class:`~latence_core.capability_descriptor.\
 CapabilityDescriptor` did not derive named which kinds went down which arm; the dispatch then
-re-decided the same shape a SECOND time (``gathered = [] if capability in _STREAMED or
-_PER_CARRIER else list(incoming)``) so it would not double-read a one-shot generator; and the
+re-decided the same shape a SECOND time (``gathered = [] if capability in _STREAMED else
+list(incoming)``) so it would not double-read a one-shot generator; and the
 wiring rules lived in a family of ~10 near-identical ``_require_*`` methods, each transcribing its
 own error text — three of which were dead.
 
@@ -136,8 +136,8 @@ class StageInputs:
         """How many records this has materialised into a list, or ``None`` if it never has.
 
         The memory-shaping fact ADR-0033 bounds, readable rather than inferred: a STREAMED /
-        PER_CARRIER / ACCUMULATOR Stage must never reach an ``int`` here, because no list of its
-        input exists at any corpus size.
+        ACCUMULATOR Stage must never reach an ``int`` here, because no list of its input exists
+        at any corpus size.
         """
         return None if self._gathered is None else len(self._gathered)
 
@@ -181,7 +181,7 @@ class StageInputs:
         """One carrier of this Stage's parents' output, lazily, with the reuse overlay folded in.
 
         The per-carrier read an ACCUMULATOR (Profiling/Type-Consolidation/Disambiguation/Graph)
-        and a PER_CARRIER Stage (Context Enrichment) do instead of receiving one gathered list: the
+        does instead of receiving one gathered list: the
         parents are re-read in declared ``depends_on`` order and only ``expected`` is yielded. A
         checkpoint is re-readable, so N carriers cost N O(1)-memory passes rather than one
         O(corpus) list, and the order is exactly the gathered order filtered — byte-identical
@@ -189,15 +189,14 @@ class StageInputs:
 
         W17/ADR-0061: the overlay of this carrier is MERGED document-interleaved into the FIRST
         doc-level parent stream that produces it, so the consumer folds ``fresh ∪ reused`` in the
-        full rebuild's arrival order. The two shapes differ ONLY in the trailer policy for an
-        overlay no parent stream claimed, and that difference is real:
+        full rebuild's arrival order. The trailer policy for an overlay no parent stream claimed
+        follows the shape:
 
         * ACCUMULATOR → ``APPEND_IF_CARRIER_UNSEEN``. An accumulator's contract is union semantics,
           so an overlay carrier no parent produces is still delivered — unless a CORPUS-LEVEL
           parent produces it, whose checkpoint already contains the union.
-        * PER_CARRIER → ``NEVER``. A doc-level Stage's input is its parents' records, never records
-          no parent produced (its chunk carrier always has a doc-level parent — its own wiring
-          check requires one — and corpus-level records are never reused).
+        * any other shape → ``NEVER``. A doc-level Stage's input is its parents' records, never
+          records no parent produced.
         """
         trailer = (
             OverlayTrailer.APPEND_IF_CARRIER_UNSEEN
@@ -247,7 +246,7 @@ class StageInputs:
         Per shape:
 
         * GATHERED → the length of the list the Stage is about to receive anyway.
-        * STREAMED / PER_CARRIER → the parents' checkpoint LINE counts (one record per line by
+        * STREAMED → the parents' checkpoint LINE counts (one record per line by
           construction of the checkpoint writer), so the count is exact without decoding — and
           therefore without re-validating — a single record.
         * ACCUMULATOR → the parents' records counted by streaming, plus the reuse overlay's
@@ -316,16 +315,9 @@ ReuseOverlay.count_for_stage`).
         carriers arrived*, not to hold them. A GATHERED Stage reads the list it already has; every
         other shape streams the parents once.
 
-        Two details are load-bearing:
-
-        * **the overlay top-up.** A parent whose fresh output is empty because every one of its
-          documents was reused still "produces" its carrier through the overlay, so an all-reused
-          delta is not misread as a mis-wired empty parent (W17).
-        * **the short-circuit.** When the plan declares it sound, the scan stops the moment every
-          required carrier has been seen — nothing later can change a presence verdict, so the
-          correctly-wired case never reads past the first record of the last required carrier and
-          the full pass is paid only for the error the message describes. A plan with an EXCLUSIVE
-          rule can never declare it: that verdict depends on every type in the stream.
+        One detail is load-bearing — **the overlay top-up.** A parent whose fresh output is empty
+        because every one of its documents was reused still "produces" its carrier through the
+        overlay, so an all-reused delta is not misread as a mis-wired empty parent (W17).
         """
         if self._plan.shape is StageInputShape.GATHERED:
             records = self.gathered()
@@ -335,15 +327,10 @@ ReuseOverlay.count_for_stage`).
             )
         present: set[type[StageOutput]] = set()
         names: set[str] = set()
-        unseen = set(self._plan.short_circuit_carriers)
         for parent in self._stage.depends_on:
             for record in self._source.records(parent):
                 present.add(type(record))
                 names.add(type(record).__name__)
-                if unseen:
-                    unseen -= {carrier for carrier in unseen if isinstance(record, carrier)}
-                    if not unseen:
-                        return frozenset(present), frozenset(names)
             parent_stage = self._by_name.get(parent)
             if parent_stage is not None:
                 parent_type = self._source.carrier(parent_stage)

@@ -271,7 +271,19 @@ from latence_core.errors import PageMapSidecarError
 # Every field defaults: a v20 record deserialises unchanged, and a pipeline with no sidecars
 # resolves every offset to exactly the page it resolved to before — the only difference is that
 # the map now SAYS it assumed one page.
-SCHEMA_VERSION = 21
+#
+# v22 (ADR-0068 — the query-time retrieval tooling is removed): BREAKING, by removal. The
+# contracts that existed only to feed retrieval leave the schema: ``ContextHeader`` and
+# ``ChunkRecord.context_header`` (v15), and the Hyperedge family added in v20 —
+# ``GraphHyperedge``, ``HyperedgeRelation``, ``HyperedgeSourceRef``, ``GraphScope.HYPEREDGE`` and
+# ``GraphRecord.hyperedge``. Graph Assembly emits NODE and EDGE records only; the m-ary context a
+# Hyperedge carried is not lost as Evidence, because every edge keeps its mention-level Evidence.
+# Every contract is ``extra="forbid"``, so a v21 chunk record that carries a ``context_header`` key
+# and a v21 HYPEREDGE-scope graph record are rejected: checkpoints are run-scoped artifacts, and a
+# run is re-derived from its Source, so there is no migration path to provide — the number bump is
+# the notice. Node and edge records are otherwise unchanged (same ids, same fields, same order);
+# ``CanonicalEntity.member_link_confidences`` (v20) stays.
+SCHEMA_VERSION = 22
 
 
 class Provenance(BaseModel):
@@ -1014,128 +1026,6 @@ class OffsetMap(BaseModel):
         return self
 
 
-class ContextHeader(BaseModel):
-    """The KG projected back onto a chunk for retrieval coherence (CONTEXT ``Context Enrichment``).
-
-    W13 (ADR-0039) restores the connections a chunk needs for retrieval relevance — its canonical
-    entities and their top-k knowledge-graph neighbor triples — that the RAG export otherwise
-    discards by embedding each chunk in isolation. The OPTIONAL ``context_enrichment`` Stage builds
-    this compact header per chunk from the run's already-computed :class:`EntityMention` +
-    :class:`GraphRecord` streams and the Export prepends it to the **EMBEDDING input only**: the
-    coherence inflates the vector + a metadata column, never the stored chunk text (the LLM window
-    stays the clean chunk, ``masked_content``/``content`` byte-unchanged).
-
-    Like :class:`RiskMarker` / :class:`InducedLabels` it is a **field on the record contract** (not
-    an out-of-band note), so it survives into the corpus and a downstream retriever reads it off the
-    chunk it already holds. It is deliberately COMPACT (the bloat discipline, ADR-0039): compact
-    rendered triples not neighbor prose, a top-k neighbor + confidence cap (the hub-entity guard),
-    and
-    join keys not raw KG text (query-time KG expansion is the retriever's job — ADR-0017, files not
-    a
-    live DB; W13 only emits the keys).
-
-    * ``entities`` — the chunk's canonical entity names (sorted, deduped), and ``entity_types`` the
-      aligned entity type per name (same length + order as ``entities``). ``entity_confidences`` is
-      the aligned per-entity 0..1 admission confidence (ADR-0053) — the value the enrichment gate
-      admitted the entity at, carried so a downstream composing SparseEmbedder's
-      ``confidence_threshold`` gates weak NER at index time by the identical rule; ``[]`` for a
-      header built without it.
-    * ``neighbor_triples`` — the chunk's top KG-neighbor relations rendered ``A —label→ B``,
-      confidence-sorted and CAPPED (``max_neighbors_per_entity`` per entity, ``max_triples``
-      overall)
-      — the anti-bloat + hub-entity guard: a corpus-wide hub entity contributes only its TOP
-      relations, never all of them.
-    * ``kg_node_ids`` — the deterministic content-addressed node ids of the chunk's own entities
-    (the
-      join keys a downstream retriever hybridises/reranks on).
-    * ``neighbor_node_ids`` — the node ids of the neighbor entities the triples reach (the
-    query-time
-      KG-expansion keys), sorted + deduped.
-    * ``kg_node_centrality`` / ``kg_node_community`` — the OPTIONAL ADR-0051 graph-feature
-      projection: each entity's index-time **centrality** score and **community** id, aligned 1:1
-      with ``kg_node_ids`` (same length + order), so a downstream ranker reads a chunk's own
-      entities' structural importance/cluster off the header it already holds. Both are ``[]`` when
-      the ``graph_features`` enrichment is OFF (the nodes carry no centrality) — byte-identical to a
-      run without it — and both full-length (aligned with ``kg_node_ids``) when it is ON.
-    * ``situating_sentence`` — OPTIONAL LLM-generated Contextual-Retrieval-style sentence
-      (deterministic=False, a documented follow-on, ADR-0039); ``None`` in the deterministic default
-      reference build. ``model_id`` records the LLM when that mode is used (audit), ``None`` for the
-      deterministic build.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: int = Field(default=SCHEMA_VERSION)
-    entities: list[str] = Field(
-        default_factory=list, description="The chunk's canonical entity names (sorted, deduped)."
-    )
-    entity_types: list[str] = Field(
-        default_factory=list, description="Entity type per name (aligned with ``entities``)."
-    )
-    entity_confidences: list[float] = Field(
-        default_factory=list,
-        description=(
-            "Per-entity 0..1 admission confidence aligned with ``entities`` (ADR-0053): the value "
-            "at which the enrichment gate admitted the entity, so a downstream composing "
-            "SparseEmbedder's ``confidence_threshold`` applies the identical rule at index time. "
-            "``[]`` for a header built without it (byte-identical to a run without the field)."
-        ),
-    )
-    neighbor_triples: list[str] = Field(
-        default_factory=list,
-        description="Top-k KG-neighbor relations 'A —label→ B' (confidence-sorted, capped).",
-    )
-    kg_node_ids: list[str] = Field(
-        default_factory=list, description="Node ids of the chunk's own entities (join keys)."
-    )
-    neighbor_node_ids: list[str] = Field(
-        default_factory=list,
-        description="Node ids the triples reach (query-time KG-expansion keys; sorted, deduped).",
-    )
-    kg_node_centrality: list[float] = Field(
-        default_factory=list,
-        description="Per-entity centrality, aligned with ``kg_node_ids`` (ADR-0051); [] if off.",
-    )
-    kg_node_community: list[str] = Field(
-        default_factory=list,
-        description="Per-entity community id, aligned with ``kg_node_ids`` (ADR-0051); [] if off.",
-    )
-    situating_sentence: str | None = Field(
-        default=None,
-        description="OPTIONAL LLM situating sentence (deterministic=False follow-on); None here.",
-    )
-    model_id: str | None = Field(
-        default=None, description="The LLM that wrote the situating sentence (audit); None if none."
-    )
-
-    @model_validator(mode="after")
-    def _entities_aligned(self) -> ContextHeader:
-        if len(self.entities) != len(self.entity_types):
-            msg = (
-                "A ContextHeader's entities and entity_types must be the same length "
-                f"(got {len(self.entities)} names, {len(self.entity_types)} types)."
-            )
-            raise ValueError(msg)
-        # ADR-0051: the graph-feature projection is either OFF (empty) or aligned 1:1 with the
-        # chunk's own entity node ids — never a partial per-entity map (anti-false-green).
-        for name, values in (
-            ("kg_node_centrality", self.kg_node_centrality),
-            ("kg_node_community", self.kg_node_community),
-        ):
-            if values and len(values) != len(self.kg_node_ids):
-                msg = (
-                    f"A ContextHeader's {name} must be empty or aligned with kg_node_ids "
-                    f"(got {len(values)} values for {len(self.kg_node_ids)} node ids)."
-                )
-                raise ValueError(msg)
-        return self
-
-    @property
-    def is_empty(self) -> bool:
-        """True if the header carries no entities and no triples (nothing to prepend)."""
-        return not self.entities and not self.neighbor_triples
-
-
 class ChunkRecord(Record):
     """One retrieval-sized piece of a parsed document (CONTEXT ``Chunk``).
 
@@ -1219,16 +1109,6 @@ class ChunkRecord(Record):
             "None (default) ⇒ the chunk is unchanged and every extractor uses its config labels."
         ),
     )
-    context_header: ContextHeader | None = Field(
-        default=None,
-        description=(
-            "The KG projected back onto this chunk (canonical entities + top-k neighbor triples) "
-            "the OPTIONAL context_enrichment Stage attached, which the Export prepends to the "
-            "EMBEDDING input ONLY — the stored content is byte-unchanged (W13, ADR-0039). None "
-            "(default) ⇒ the chunk is unchanged and the Export prepends nothing (byte-identical to "
-            "a run without the Stage), mirroring the risk_markers/induced_labels precedent."
-        ),
-    )
     masked_content: str | None = Field(
         default=None,
         description=(
@@ -1237,7 +1117,7 @@ class ChunkRecord(Record):
             "placeholder. The clean ``content`` stays UNMASKED (so extraction still sees full "
             "entities); the Export materializes ``masked_content`` for the PII-safe RAG corpus. "
             "None (default) ⇒ no Redaction Stage ran, and the Export falls back to ``content`` "
-            "(byte-identical to a run without the Stage), mirroring the context_header precedent. "
+            "(byte-identical to a run without the Stage), mirroring the induced_labels precedent. "
             "Redaction runs per CHUNK (each ≤ the model window) so no PII is truncated — the fix "
             "for the document-level 768-token truncation leak (ADR-0042)."
         ),
@@ -2124,13 +2004,12 @@ class CanonicalEntity(Record):
     merge_decisions: list[MergeDecision] = Field(
         default_factory=list, description="The audited merges that built this cluster."
     )
-    # v20 (ADR-0057): per-mention LINK confidence, keyed by member mention record_id. The
-    # linker has always computed this score and then dropped it before any durable record —
-    # leaving the Hyperedge's gamma (spec 1.5) and weighted incidence (spec 6.1) with no data
-    # source. Additive and defaulted: the algorithmic resolver cascade leaves it empty (its
-    # merge confidence already lives on Evidence/MergeDecision), a linking Provider fills it
-    # for the mentions it actually linked. Absent key = "no link score for that mention",
-    # never 0.0 — consumers must treat missing as unknown, not as zero confidence.
+    # v20: per-mention LINK confidence, keyed by member mention record_id. The linker has
+    # always computed this score and then dropped it before any durable record. Additive and
+    # defaulted: the algorithmic resolver cascade leaves it empty (its merge confidence already
+    # lives on Evidence/MergeDecision), a linking Provider fills it for the mentions it actually
+    # linked. Absent key = "no link score for that mention", never 0.0 — consumers must treat
+    # missing as unknown, not as zero confidence.
     member_link_confidences: dict[str, float] = Field(
         default_factory=dict,
         description="mention record_id -> linker confidence 0..1, for linked members only.",
@@ -2356,163 +2235,19 @@ class GraphEdge(Record):
         return self
 
 
-class HyperedgeRelation(BaseModel):
-    """One directed relation carried inside a :class:`GraphHyperedge` (CONTEXT ``Hyperedge``).
-
-    The Hyperedge's relation signature is the set of these triples — ``(head_node_id, label,
-    tail_node_id)`` — and two Hyperedges are dedup-equivalent only when BOTH their entity sets
-    AND their relation signatures match (ADR-0057: identical entity sets with differing
-    signatures are *distinct facts about the same group* and are never merged).
-    ``relation_id`` back-references the source relation record for audit; ``confidence`` is the
-    extractor's score, one input of the Hyperedge's ``gamma``.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: int = Field(default=SCHEMA_VERSION)
-    relation_id: str = Field(..., min_length=1, description="Source relation record_id (audit).")
-    head_node_id: str = Field(..., min_length=1, description="Head GraphNode node_id.")
-    label: str = Field(..., min_length=1, description="The relation label.")
-    tail_node_id: str = Field(..., min_length=1, description="Tail GraphNode node_id.")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
-
-    @property
-    def signature(self) -> tuple[str, str, str]:
-        """The dedup signature triple: (head_node_id, label, tail_node_id)."""
-        return (self.head_node_id, self.label, self.tail_node_id)
-
-
-class HyperedgeSourceRef(BaseModel):
-    """A non-primary source span folded into a Hyperedge on dedup-merge (CONTEXT ``Hyperedge``).
-
-    On merge the highest-γ instance's ``tau_text`` and Provenance stay primary and every other
-    instance is appended here (ADR-0057 / spec 1.4), so a corpus-repeated fact keeps its full
-    audit trail while ``support`` counts the repetitions. Offsets are in the parent document's
-    original coordinates, like every Provenance span.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: int = Field(default=SCHEMA_VERSION)
-    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
-    chunk_record_id: str = Field(..., min_length=1, description="Parent ChunkRecord id.")
-    char_start: int = Field(..., ge=0, description="Span start, original document coordinates.")
-    char_end: int = Field(..., ge=0, description="Span end (half-open), original coordinates.")
-
-
-class GraphHyperedge(Record):
-    """One Hyperedge: the m-ary unit of retrieval (CONTEXT ``Hyperedge``, ADR-0057).
-
-    Where a :class:`GraphEdge` connects exactly two nodes, a Hyperedge connects the FULL set of
-    canonical entities co-occurring in one minimal text span, together with the directed
-    relations extracted from that span — so a joint fact stays one selectable unit instead of
-    fragmenting into disconnected pairs. It is the atomic item the chain-of-evidence selector
-    packs into a token budget, which is why its selection inputs are precomputed on the record
-    (ADR-0056: the index is built for the solver):
-
-    * ``tau_text`` — the verbatim span text, **in the corpus redaction variant** (ADR-0057):
-      it never contains text the exported corpus would not contain. The span's Provenance
-      stays in original coordinates for audit and Purge.
-    * ``token_cost`` — the knapsack weight, computed at build time by the named
-      ``token_counter`` and treated downstream as an approximate ranking weight whose budget
-      guarantee comes from an exact query-time verification pass (ADR-0058). The counter
-      identity is stored beside the value so a later mismatch is detectable, never silent.
-    * ``gamma`` — extraction confidence composed from link/relation/mention confidences
-      (spec 1.5; uncalibrated until the calibration decision lands).
-    * ``support`` — how many distinct source spans asserted this same fact (dedup-merge
-      counter); a frequency prior for scoring.
-    * ``has_relations`` — ``False`` marks a *weak* Hyperedge (entities only), emitted behind a
-      config toggle and utility-discounted downstream.
-
-    ``hyperedge_id`` is deterministic and content-addressed over the corpus id, the sorted
-    entity-node set, and the sorted relation signature — NOT over the span position — so the
-    same fact found twice hashes to the same id and dedup-merge is the identity operation the
-    S11 affected-set machinery can key off. Like every carrier it is a :class:`Record`
-    (Provenance = the primary span, original coordinates; Classification inherited), and it
-    carries :class:`Evidence` linking back to the member mentions.
-    """
-
-    hyperedge_id: str = Field(..., min_length=1, description="Deterministic content-addressed id.")
-    entity_node_ids: list[str] = Field(
-        ..., min_length=1, description="Sorted unique GraphNode node_ids this Hyperedge connects."
-    )
-    member_mention_ids: list[str] = Field(
-        default_factory=list, description="record_ids of the mentions inside the span."
-    )
-    relations: list[HyperedgeRelation] = Field(
-        default_factory=list, description="Directed relations extracted from the span."
-    )
-    tau_text: str = Field(
-        ..., min_length=1, description="Verbatim span text, corpus redaction variant (ADR-0057)."
-    )
-    token_cost: int = Field(..., ge=1, description="Knapsack weight: token count of tau_text.")
-    token_counter: str = Field(
-        ...,
-        min_length=1,
-        description="Identity of the counter that produced token_cost (ADR-0058).",
-    )
-    gamma: float = Field(..., ge=0.0, le=1.0, description="Extraction confidence (spec 1.5).")
-    support: int = Field(default=1, ge=1, description="Distinct source spans asserting this fact.")
-    has_relations: bool = Field(..., description="False = weak Hyperedge (entities only).")
-    merged_sources: list[HyperedgeSourceRef] = Field(
-        default_factory=list, description="Non-primary source spans folded in on dedup-merge."
-    )
-    properties: dict[str, Any] = Field(
-        default_factory=dict, description="Open attribute bag (JSON-serialisable)."
-    )
-    evidence: Evidence
-
-    @property
-    def arity(self) -> int:
-        """The number of entities this Hyperedge connects (m)."""
-        return len(self.entity_node_ids)
-
-    @property
-    def weak(self) -> bool:
-        """True for an entities-only Hyperedge (no extracted relation)."""
-        return not self.has_relations
-
-    @model_validator(mode="after")
-    def _consistent(self) -> GraphHyperedge:
-        if self.entity_node_ids != sorted(set(self.entity_node_ids)):
-            msg = "A GraphHyperedge's entity_node_ids must be sorted and unique."
-            raise ValueError(msg)
-        if self.has_relations != bool(self.relations):
-            msg = (
-                "A GraphHyperedge's has_relations flag must match its relations: "
-                f"has_relations={self.has_relations} with {len(self.relations)} relation(s)."
-            )
-            raise ValueError(msg)
-        if self.has_relations and len(self.entity_node_ids) < 2:
-            msg = "A relation-bearing GraphHyperedge must connect at least 2 entities."
-            raise ValueError(msg)
-        node_set = set(self.entity_node_ids)
-        for rel in self.relations:
-            if rel.head_node_id not in node_set or rel.tail_node_id not in node_set:
-                msg = (
-                    f"Hyperedge relation {rel.signature!r} references a node outside "
-                    "entity_node_ids — every relation argument must be a member entity."
-                )
-                raise ValueError(msg)
-        return self
-
-
 class GraphScope(StrEnum):
     """The scope a :class:`GraphRecord` describes (CONTEXT ``Graph Assembly``).
 
     Graph Assembly is a *corpus-level* Stage, so — like Disambiguation (ADR-0026) and
     Profiling (ADR-0025) — it emits a single scoped carrier rather than two contracts.
     ``NODE`` records carry one :class:`GraphNode` each (the graph's entity half); ``EDGE``
-    records carry one :class:`GraphEdge` each (the graph's relation half); ``HYPEREDGE``
-    records carry one :class:`GraphHyperedge` each (the m-ary retrieval unit, ADR-0057 —
-    emitted only when the Stage is configured for hyperedges, so a stack that never opts in
-    never sees the scope). A consumer reads one exported stream and filters by ``scope``; the
-    DAG, the checkpoint, and the KG Export all treat one carrier.
+    records carry one :class:`GraphEdge` each (the graph's relation half). A consumer reads
+    one exported stream and filters by ``scope``; the DAG, the checkpoint, and the KG Export
+    all treat one carrier.
     """
 
     NODE = "node"
     EDGE = "edge"
-    HYPEREDGE = "hyperedge"
 
 
 class GraphRecord(Record):
@@ -2522,33 +2257,25 @@ class GraphRecord(Record):
     :class:`DisambiguationRecord`'s scope split (ADR-0026). Exactly one of ``node``/``edge``
     is populated, selected by ``scope``:
 
-    * ``scope == NODE``: ``node`` holds the :class:`GraphNode`; ``edge``/``hyperedge`` are
-      ``None``. Its Provenance/Classification are the source canonical entity's (page-accurate).
-    * ``scope == EDGE``: ``edge`` holds the :class:`GraphEdge`; ``node``/``hyperedge`` are
-      ``None``. Its Provenance/Classification are the source normalized relation's.
-    * ``scope == HYPEREDGE``: ``hyperedge`` holds the :class:`GraphHyperedge` (ADR-0057);
-      ``node``/``edge`` are ``None``. Its Provenance is the primary span's, in original
-      coordinates.
+    * ``scope == NODE``: ``node`` holds the :class:`GraphNode`; ``edge`` is ``None``. Its
+      Provenance/Classification are the source canonical entity's (page-accurate).
+    * ``scope == EDGE``: ``edge`` holds the :class:`GraphEdge`; ``node`` is ``None``. Its
+      Provenance/Classification are the source normalized relation's.
 
     The scope/payload consistency is contract-enforced, so a Provider cannot emit a node-scope
     record with an edge payload (or leave both empty). Records are emitted deterministically
-    (all NODE records in node-id order, then all EDGE records in edge-id order, then any
-    HYPEREDGE records in hyperedge-id order), so a seeded run is byte-identical (Baseline bar).
+    (all NODE records in node-id order, then all EDGE records in edge-id order), so a seeded
+    run is byte-identical (Baseline bar).
     """
 
     scope: GraphScope
     node: GraphNode | None = Field(default=None)
     edge: GraphEdge | None = Field(default=None)
-    hyperedge: GraphHyperedge | None = Field(default=None)
 
     @model_validator(mode="after")
     def _scope_payload_consistent(self) -> GraphRecord:
-        expected = {
-            GraphScope.NODE: "node",
-            GraphScope.EDGE: "edge",
-            GraphScope.HYPEREDGE: "hyperedge",
-        }[self.scope]
-        for field in ("node", "edge", "hyperedge"):
+        expected = {GraphScope.NODE: "node", GraphScope.EDGE: "edge"}[self.scope]
+        for field in ("node", "edge"):
             value = getattr(self, field)
             article = "an" if field == "edge" else "a"
             if field == expected and value is None:

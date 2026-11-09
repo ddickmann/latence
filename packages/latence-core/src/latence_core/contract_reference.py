@@ -43,20 +43,11 @@ from pydantic import BaseModel
 
 from latence_core.capability import (
     ENTRY_POINT_GROUP,
-    ComposingSparseEmbedder,
     DeltaOutcome,
     DeltaProcessor,
     DocumentEnumerator,
-    FdeConverter,
     FusedExtraction,
-    GraphFeatureComputer,
-    GraphFeatures,
-    MultiVectorEmbedder,
     ScreeningOutcome,
-    SparseEmbedder,
-    SparseSignals,
-    SparseVector,
-    Tokenizer,
     TypeConsolidation,
     protocol_members,
 )
@@ -90,9 +81,9 @@ REGENERATE_COMMAND = "PYTHONHASHSEED=0 .venv/bin/latence contracts --write --rep
 class SignalSeam:
     """One non-Stage Capability seam under the same ``latence.providers`` entry-point group.
 
-    The retrieval-signal generators and engine seams (ADR-0048/0049/0050) are Capabilities a
-    Provider fulfils and conformance covers, but they are not DAG Stages, so they have no
-    :class:`~latence_core.pipeline.CapabilityKind` and no descriptor. Their conformance case
+    An engine seam is a Capability a
+    Provider fulfils and conformance covers, but it is not a DAG Stage, so it has no
+    :class:`~latence_core.pipeline.CapabilityKind` and no descriptor. Its conformance case
     equals their prefix (the ``_NON_STAGE_PREFIX_TO_CAPABILITY`` convention in
     ``conformance/cases.py`` — the drift gate asserts the two agree). ``refinements`` are the
     optional companion Protocols a Provider of this seam MAY additionally satisfy.
@@ -105,14 +96,7 @@ class SignalSeam:
 
 #: The non-Stage seams, in the fixed documentation order. Every entry-point name in the workspace
 #: must classify to either a descriptor prefix or one of these (the drift gate enforces it).
-SIGNAL_SEAMS: tuple[SignalSeam, ...] = (
-    SignalSeam(prefix="sparse", protocol=SparseEmbedder, refinements=(ComposingSparseEmbedder,)),
-    SignalSeam(prefix="multivector", protocol=MultiVectorEmbedder),
-    SignalSeam(prefix="fde", protocol=FdeConverter),
-    SignalSeam(prefix="tokenizer", protocol=Tokenizer),
-    SignalSeam(prefix="graph_features", protocol=GraphFeatureComputer),
-    SignalSeam(prefix="delta", protocol=DeltaProcessor),
-)
+SIGNAL_SEAMS: tuple[SignalSeam, ...] = (SignalSeam(prefix="delta", protocol=DeltaProcessor),)
 
 #: Optional companion Protocols per Stage Capability (a Provider MAY also satisfy these).
 _STAGE_REFINEMENTS: dict[CapabilityKind, tuple[type, ...]] = {
@@ -126,9 +110,6 @@ _RESULT_TYPES: tuple[type, ...] = (
     FusedExtraction,
     TypeConsolidation,
     DeltaOutcome,
-    GraphFeatures,
-    SparseVector,
-    SparseSignals,
 )
 
 _RST_ROLE = re.compile(r":[A-Za-z]+(?::[A-Za-z]+)?:`([^`]+)`")
@@ -281,7 +262,6 @@ def _input_plan_entry(descriptor: CapabilityDescriptor) -> dict[str, Any]:
             for requirement in plan.requires
         ],
         "exclusive": exclusive,
-        "scan_short_circuit": plan.scan_short_circuit,
     }
 
 
@@ -653,8 +633,7 @@ def render_markdown(reference: dict[str, Any]) -> str:
         "",
         "These Capabilities register under the same `latence.providers` group and pass the same",
         "conformance gate, but they are not DAG Stages: no `CapabilityKind`, no checkpoint of",
-        "their own. They are resolved from a Stage's config (an Export's embedders and",
-        "tokenizer, Graph Assembly's `graph_features`) or by the engine (the delta processor).",
+        "their own. They are resolved by the engine (the delta processor).",
         "",
     ]
     for seam_entry in reference["signal_seams"]:

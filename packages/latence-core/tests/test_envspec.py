@@ -199,11 +199,13 @@ def test_a_missing_lock_pin_is_caught(sandbox: Path) -> None:
 
 def test_a_renamed_provider_is_caught(sandbox: Path) -> None:
     """The recipe promises a Provider set; a rename under it must not pass silently."""
-    pyproject = sandbox / "packages" / "latence-splade" / "pyproject.toml"
-    pyproject.write_text(
-        pyproject.read_text(encoding="utf-8").replace('"sparse.splade"', '"sparse.splade_v2"'),
-        encoding="utf-8",
+    pyproject = sandbox / "packages" / "latence-embedder-st" / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    renamed = original.replace(
+        '"embedding.sentence_transformers"', '"embedding.sentence_transformers_v2"'
     )
+    assert renamed != original, "the mutation must actually rename the registered Provider"
+    pyproject.write_text(renamed, encoding="utf-8")
     codes = _codes(sandbox)
     assert "E-PROVIDER-UNREGISTERED" in codes
 
@@ -564,13 +566,16 @@ def test_stack_walk_finds_nested_signal_providers(tmp_path: Path) -> None:
         "  - name: export\n    capability: export\n    provider: export.jsonl_parquet\n"
         "    config:\n"
         "      embedder: {provider: embedding.sentence_transformers}\n"
-        "      sparse_embedder: {provider: sparse.splade}\n",
+        "  - name: parse\n    capability: parse\n    provider: parser.render\n"
+        "    config:\n"
+        "      ocr: {provider: parser.lighton}\n",
         encoding="utf-8",
     )
     assert stack_providers(stack) == {
         "export.jsonl_parquet",
         "embedding.sentence_transformers",
-        "sparse.splade",
+        "parser.render",
+        "parser.lighton",
     }
 
 
@@ -847,7 +852,7 @@ def test_stack_component_order_is_deterministic() -> None:
     """The walk reads a ``frozenset`` of keys; order must come from the FILE, not from hashing."""
     from latence_core.envspec import stack_components
 
-    stack = _REPO_ROOT / "stacks" / "retrieval-signals.yaml"
+    stack = _REPO_ROOT / "stacks" / "gpu-sota.yaml"
     first = [(c.capability, c.provider) for c in stack_components(stack)]
     for _ in range(5):
         assert [(c.capability, c.provider) for c in stack_components(stack)] == first

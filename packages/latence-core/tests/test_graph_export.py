@@ -12,7 +12,6 @@ from latence_core.contracts import (
     Classification,
     Evidence,
     GraphEdge,
-    GraphHyperedge,
     GraphNode,
     GraphRecord,
     GraphScope,
@@ -288,43 +287,13 @@ def test_control_chars_dont_break_any_representation(tmp_path: Path) -> None:
 # -- Set-atomic publication (the corpus-Export discipline, ADR-0061 §2) ---------
 
 
-def _hyperedge(hid: str, node_ids: list[str]) -> GraphRecord:
-    hyperedge = GraphHyperedge(
-        record_id=f"hyper:{hid}",
-        hyperedge_id=hid,
-        entity_node_ids=sorted(node_ids),
-        member_mention_ids=["m1"],
-        tau_text="Alice works for Acme.",
-        token_cost=5,
-        token_counter="tokenizer.regex",
-        gamma=0.7,
-        support=1,
-        has_relations=False,
-        evidence=Evidence(mention_ids=["m1"], document_ids=["doc-1"], confidence=0.7),
-        provenance=_prov(),
-        classification=_cls(),
-    )
-    return GraphRecord(
-        record_id=f"hyper:{hid}#graph",
-        scope=GraphScope.HYPEREDGE,
-        hyperedge=hyperedge,
-        provenance=_prov(),
-        classification=_cls(),
-    )
-
-
-def _six_file_records() -> list[GraphRecord]:
-    """The full six-file configuration: nodes + edge + a hyperedge (parquet AND KV ship)."""
-    return [*_records(), _hyperedge("h1", ["na", "nb"])]
-
-
 def test_export_leaves_no_temp_files(tmp_path: Path) -> None:
     # Atomic set publication: every file streams into a temp sibling and is renamed on
     # publish, so a completed export leaves no ``.tmp`` behind (the corpus-Export idiom).
     store = f"file://{tmp_path}"
     s = Storage.for_uri(store)
-    uris = KnowledgeGraphExport().export(_six_file_records(), s, f"{store}/kg")
-    assert len(uris) == 6  # nodes/edges parquet + ttl + graphml + hyperedges parquet + kv
+    uris = KnowledgeGraphExport().export(_records(), s, f"{store}/kg")
+    assert len(uris) == 4  # nodes/edges parquet + ttl + graphml
     leftover = [p for p in s.walk_files(f"{store}/kg") if p.endswith(".tmp")]
     assert leftover == []
 
@@ -334,15 +303,15 @@ def test_crash_mid_set_leaves_previous_complete_set(
 ) -> None:
     # The torn-set hazard this Export publication exists to close (ADR-0061 §2): a crash
     # part-way through re-exporting must leave the PREVIOUS complete, mutually-consistent
-    # file set — never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv``. Inject the
-    # crash mid-set (after the parquet streams, before GraphML/hyperedges/KV) and assert every
+    # file set — never a new ``graph.ttl`` beside a stale ``graph-nodes.parquet``. Inject the
+    # crash mid-set (after the parquet + TTL streams, before GraphML) and assert every
     # previously-published byte survives untouched, with no temp debris.
     store = f"file://{tmp_path}"
     s = Storage.for_uri(store)
     out = f"{store}/kg"
-    KnowledgeGraphExport().export(_six_file_records(), s, out)
+    KnowledgeGraphExport().export(_records(), s, out)
     before = {uri: s.read_bytes(uri) for uri in s.walk_files(out)}
-    assert len(before) == 6
+    assert len(before) == 4
 
     def _boom(self: object, nodes: object, edges: object) -> str:
         msg = "injected mid-set crash"
@@ -351,9 +320,7 @@ def test_crash_mid_set_leaves_previous_complete_set(
     monkeypatch.setattr(KnowledgeGraphExport, "_render_graphml", _boom)
     # A CHANGED graph (extra node) so a torn publication would be detectable as mixed bytes.
     with pytest.raises(RuntimeError, match="injected mid-set crash"):
-        KnowledgeGraphExport().export(
-            [*_six_file_records(), _node("nc", "Carol")], s, out
-        )
+        KnowledgeGraphExport().export([*_records(), _node("nc", "Carol")], s, out)
 
     after = {uri: s.read_bytes(uri) for uri in s.walk_files(out)}
     assert after == before  # the previous complete set, byte-for-byte; no partials, no temps

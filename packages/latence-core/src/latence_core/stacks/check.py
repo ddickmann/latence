@@ -41,16 +41,14 @@ What it checks, in one pass over the DAG:
     the suggestion, because that is a typo, not a missing package.
 ``sub_provider``
     every nested ``{provider, config}`` block (:mod:`latence_core.subprovider`) — shape, Provider
-    resolution, and a class-only check against the slot's declared Protocol. This is the check the
-    blessed SOTA stack's two nested blocks never had.
+    resolution, and a class-only check against the slot's declared Protocol.
 ``config_key``
     a ``{provider, ...}`` block under a Capability that declares no such slot (silently ignored at
-    run time), and a slot wired without the companion it requires (``fde_converter`` without
-    ``multivector_embedder``).
+    run time).
 ``wiring``
     a Stage whose parents cannot supply a carrier its Capability REQUIRES (a Relation-Extraction
-    Stage with no Entity-Extraction parent, a Context-Enrichment Stage with no Graph Assembly
-    above it). Both halves are declarations — what a Capability's Stage must receive
+    Stage with no Entity-Extraction parent). Both halves are declarations — what a Capability's
+    Stage must receive
     (:attr:`~latence_core.capability_descriptor.CapabilityDescriptor.input_plan`) and what a Stage
     checkpoints — so the run-time ``ContractError`` a full extraction would eventually raise is
     decidable here, with the same message.
@@ -82,7 +80,6 @@ from latence_core.reuse_overlay import stage_produces
 from latence_core.run_store import stage_output_type
 from latence_core.subprovider import (
     class_satisfies_capability,
-    missing_required_slots,
     slots_for,
     sub_provider_ref,
     undeclared_sub_provider_keys,
@@ -95,8 +92,8 @@ if TYPE_CHECKING:
 __all__ = ["Finding", "Severity", "StackCheck", "check_stack"]
 
 # How close a mistyped Provider name has to be to a registered one before we call it a typo rather
-# than an uninstalled package. Measured against the real registry (``graph_features.pagerannk`` vs
-# ``graph_features.pagerank`` = 0.98, ``tokenizer.regexp`` vs ``tokenizer.regex`` = 0.97) and
+# than an uninstalled package. Measured against the real registry (``disambiguation.cascad`` vs
+# ``disambiguation.cascade`` = 0.98, ``embedding.hashng`` vs ``embedding.hashing`` = 0.97) and
 # against genuinely-absent heavy Providers (``embedding.granite_r2`` vs its nearest in-core
 # neighbour = 0.60, ``parser.lighton_vllm`` = 0.49). 0.9 separates the two populations with a wide
 # margin in both directions, so neither verdict is a coin flip.
@@ -273,7 +270,7 @@ def _provider_findings(
     """Does this Provider name resolve? A near-miss is a typo (ERROR); an absence is a WARNING.
 
     Shared by the Stage-level Provider and every nested sub-Provider, so a mistyped
-    ``graph_features.pagerannk`` inside a config block gets the same "did you mean" a mistyped
+    ``embedding.hashng`` inside a config block gets the same "did you mean" a mistyped
     Stage Provider gets.
     """
     if provider in registry.names():
@@ -311,10 +308,9 @@ def _sub_provider_findings(
     """Every nested ``{provider, config}`` block: shape, resolution, and the Protocol it must fit.
 
     Iterates the slots the Stage's Capability *declares* (:func:`~latence_core.subprovider.
-    slots_for`), so the SOTA stack's ``graph.config.graph_features`` and
-    ``export_corpus.config.bm25`` are checked exactly like the Export's ``embedder`` — the thing
-    neither of them had before. The Protocol check is class-only: the Provider is imported but
-    never constructed, so this stays torch-free and offline.
+    slots_for`), so a resolver's ``embedder`` and the universal Parser's ``ocr`` are checked
+    exactly like the Export's ``embedder``. The Protocol check is class-only: the Provider is
+    imported but never constructed, so this stays torch-free and offline.
     """
     findings: list[Finding] = []
     for slot in slots_for(stage.capability):
@@ -397,13 +393,11 @@ def _wiring_findings(stage: Stage, pipeline: Pipeline) -> tuple[Finding, ...]:
 
 
 def _config_key_findings(stage: Stage) -> tuple[Finding, ...]:
-    """Sub-Provider blocks that go nowhere, and slots wired without the companion they need.
+    """Sub-Provider blocks that go nowhere.
 
-    Both are wiring mistakes that today surface only at run time (or never): an undeclared block is
-    read by nobody, and a companion-less slot raises inside the Stage's constructor after the
-    operator has already waited for the pipeline to reach it.
+    A wiring mistake that otherwise never surfaces at all: an undeclared block is read by nobody.
     """
-    findings = [
+    return tuple(
         Finding(
             check="config_key",
             severity=Severity.ERROR,
@@ -415,17 +409,4 @@ def _config_key_findings(stage: Stage) -> tuple[Finding, ...]:
             stage=stage.name,
         )
         for key in undeclared_sub_provider_keys(stage)
-    ]
-    findings.extend(
-        Finding(
-            check="config_key",
-            severity=Severity.ERROR,
-            message=(
-                f"config {wired!r} requires {required!r} to be wired as well "
-                f"(it has nothing to act on without it)"
-            ),
-            stage=stage.name,
-        )
-        for wired, required in missing_required_slots(stage)
     )
-    return tuple(findings)

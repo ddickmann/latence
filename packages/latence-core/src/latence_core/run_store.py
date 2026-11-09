@@ -161,7 +161,7 @@ def stage_output_type(stage: Stage, pipeline: Pipeline) -> type[StageOutput] | t
     Read straight off the Capability's own :class:`~latence_core.capability_descriptor.\
 CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain. Every
     rationale that used to be a comment beside a branch — Source/Intake Screening thread raw
-    ParserInputs, the chunk→chunk transforms (Schema Induction, Context Enrichment, Redaction)
+    ParserInputs, the chunk→chunk transforms (Schema Induction, Redaction)
     checkpoint the SAME ChunkRecords, a fused or type-consolidating Stage checkpoints a MIXED
     carrier signalled by :class:`~latence_core.contracts.Record` and decoded per line — now
     sits beside the ``carrier`` field that states it.
@@ -214,7 +214,7 @@ def export_producer(stage: Stage, pipeline: Pipeline) -> Stage | None:
 
     The walk :func:`export_carrier` reads its answer from, exposed as the Stage itself
     because the overlay fold rule needs the producer's LEVEL, not only its carrier: a
-    corpus-level producer (Context Enrichment, Type Consolidation) re-emits the whole
+    corpus-level producer (Type Consolidation) re-emits the whole
     ``fresh ∪ reused`` union, so a doc-level Export below it must NOT materialize the overlay
     again, while a doc-level producer (chunk/redact/extract) emits only the fresh documents
     and the Export merges the overlay in. ``None`` when no ancestor produces an exportable

@@ -6,32 +6,29 @@ behind its own Capability seam:
 
 .. code-block:: yaml
 
-    - name: export_corpus
-      capability: export
-      provider: export.jsonl_parquet
+    - name: disambiguate
+      capability: disambiguation
+      provider: disambiguation.embedding
       config:
         embedder: {provider: embedding.hashing, config: {dimension: 64}}
-        bm25:     {provider: tokenizer.regex,   config: {}}
 
-That ``{provider, config}`` block is a real concept and it used to have no module. A grep for its
-readers found **ten** independent implementations: the Export's five signal slots, the Graph
-Assembly's ``graph_features``, the Type Consolidator's semantic ``embedder``, the universal
-Parser's ``ocr``, both neural resolvers' ``embedder``, the capability guard, the ``stack validate``
-device pre-flight, the envspec walker and the autotune overlay — each with its own hard-coded key
-list, its own shape validation, and its own error strings. They disagreed: the same mistake raised
-``ConfigError`` in one and ``ContractError`` in another; four of them knew only about ``embedder``.
+That ``{provider, config}`` block is a real concept and it used to have no module. Its readers were
+independent implementations — the Export's ``embedder``, the Type Consolidator's semantic
+``embedder``, the universal Parser's ``ocr``, both neural resolvers' ``embedder``, the capability
+guard, the ``stack validate`` device pre-flight, the envspec walker and the autotune overlay — each
+with its own hard-coded key list, its own shape validation, and its own error strings. They
+disagreed: the same mistake raised ``ConfigError`` in one and ``ContractError`` in another, and
+several of them knew only about one Capability's ``embedder``.
 
-The consequence was measurable. The blessed SOTA stack emits two of these blocks
-(``graph.config.graph_features`` and ``export_corpus.config.bm25``) and NEITHER was
-capability-checked, device-skip-checked, or seen by the placement probe, so a typo in
-``graph_features.pagerannk`` sailed through ``latence setup`` and died at run time; and a block
-written under a Capability that declares no such slot was read by nobody at all, silently.
+The consequence was measurable: a nested block that no static tool looked at was neither
+capability-checked, device-skip-checked, nor seen by the placement probe, so a typo in its Provider
+name sailed through ``latence setup`` and died at run time; and a block written under a Capability
+that declares no such slot was read by nobody at all, silently.
 
 This module is the one place that knows about the block:
 
-* :data:`SubProviderSlot` — a Capability *declares* its nested slots (key → Capability Protocol,
-  plus any companion slot it requires). :func:`slots_for` is that declaration, and it is the only
-  list of nested keys in the codebase.
+* :data:`SubProviderSlot` — a Capability *declares* its nested slots (key → Capability Protocol).
+  :func:`slots_for` is that declaration, and it is the only list of nested keys in the codebase.
 * :func:`sub_provider_ref` — parse one block into a typed :class:`SubProviderRef`, with the shape
   errors (:class:`~latence_core.errors.ConfigError`) raised in ONE place.
 * :func:`build_sub_provider` / :func:`resolve_sub_provider` — load, construct and capability-check
@@ -47,11 +44,10 @@ This module is the one place that knows about the block:
   form of the capability check, for the offline checker.
 
 The capability check is :func:`~latence_core.capability.satisfies_capability`, NOT plain
-``isinstance`` (audit R6): several of these Protocols declare a property, and a
-``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which *invokes* it and pulls a Provider's
-heavy backend (``sparse.splade`` loads a Hugging Face checkpoint from ``vocab_size``) at wiring
-time, breaking ADR-0016's defer-to-first-use contract and making config validation reach the
-network.
+``isinstance`` (audit R6): a Protocol here declares a property (``Embedder.dimension``), and a
+``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which *invokes* it. A Provider whose
+property is backed by its model therefore loads that model at wiring time, breaking ADR-0016's
+defer-to-first-use contract and making config validation reach the network.
 
 Thin core (ADR-0016): this module imports only ``latence_core.capability`` /
 ``latence_core.pipeline`` / ``latence_core.errors`` — the Protocol objects and the Stage contract.
@@ -65,12 +61,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import (
     Embedder,
-    FdeConverter,
-    GraphFeatureComputer,
-    MultiVectorEmbedder,
     Parser,
-    SparseEmbedder,
-    Tokenizer,
     protocol_members,
     satisfies_capability,
 )
@@ -87,7 +78,6 @@ __all__ = [
     "build_sub_provider",
     "class_satisfies_capability",
     "declared_slot_keys",
-    "missing_required_slots",
     "owner_label",
     "resolve_sub_provider",
     "slot_for",
@@ -103,14 +93,11 @@ class SubProviderSlot:
     """One nested ``{provider, config}`` slot a Capability declares.
 
     ``key`` is the config key the block sits under; ``protocol`` is the Capability Protocol the
-    named Provider must satisfy; ``requires`` names sibling slots the block is meaningless without
-    (the Export's ``fde_converter`` reduces the multi-vector to one dense vector, so it needs a
-    ``multivector_embedder`` — a wiring error that used to bite only at run time).
+    named Provider must satisfy.
     """
 
     key: str
     protocol: type
-    requires: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,7 +115,7 @@ class SubProviderRef:
 
     @property
     def key(self) -> str:
-        """The config key this block sits under (``embedder``, ``bm25``, …)."""
+        """The config key this block sits under (``embedder``, ``ocr``)."""
         return self.slot.key
 
     @property
@@ -158,16 +145,8 @@ _SLOTS: dict[CapabilityKind, tuple[SubProviderSlot, ...]] = {
     # page OCR to a nested Parser (``stacks/universal-parse.yaml`` wires ``parser.lighton`` there).
     # It is the GPU-gated node of that stack and, before this declaration, no static tool saw it.
     CapabilityKind.PARSE: (SubProviderSlot("ocr", Parser),),
-    # ADR-0017 (dense embedder) + ADR-0049/0050 (the index-time retrieval signals) + #164 (BM25).
-    CapabilityKind.EXPORT: (
-        SubProviderSlot("embedder", Embedder),
-        SubProviderSlot("sparse_embedder", SparseEmbedder),
-        SubProviderSlot("multivector_embedder", MultiVectorEmbedder),
-        SubProviderSlot("fde_converter", FdeConverter, requires=("multivector_embedder",)),
-        SubProviderSlot("bm25", Tokenizer),
-    ),
-    # ADR-0051: the optional graph-feature computer the Assembler stamps onto every node.
-    CapabilityKind.GRAPH_ASSEMBLY: (SubProviderSlot("graph_features", GraphFeatureComputer),),
+    # ADR-0017: the corpus Export's opt-in dense embedder.
+    CapabilityKind.EXPORT: (SubProviderSlot("embedder", Embedder),),
     # ADR-0054: the Type Consolidator's optional semantic rung.
     CapabilityKind.TYPE_CONSOLIDATION: (SubProviderSlot("embedder", Embedder),),
     # The neural resolvers (latence-disambig-glinker / latence-disambig-embedding) resolve their
@@ -175,20 +154,11 @@ _SLOTS: dict[CapabilityKind, tuple[SubProviderSlot, ...]] = {
     CapabilityKind.DISAMBIGUATION: (SubProviderSlot("embedder", Embedder),),
 }
 
-# Boolean config flags that are meaningless without a companion slot. Same class of wiring error
-# as :attr:`SubProviderSlot.requires` (the Export's ``keep_multivectors`` writes the multi-vector
-# sidecar — there is nothing to persist without a ``multivector_embedder``), so it is declared
-# here rather than being discoverable only by reading the Export's constructor.
-_FLAG_REQUIRES: dict[CapabilityKind, dict[str, tuple[str, ...]]] = {
-    CapabilityKind.EXPORT: {"keep_multivectors": ("multivector_embedder",)},
-}
-
 # The human label that prefixes a slot's error messages, per Capability. Kept beside the slot
 # declaration so the message an operator sees names the Stage kind they wrote, not this module.
 _OWNER_LABEL: dict[CapabilityKind, str] = {
     CapabilityKind.PARSE: "Parse config",
     CapabilityKind.EXPORT: "Export config",
-    CapabilityKind.GRAPH_ASSEMBLY: "Graph Assembly config",
     CapabilityKind.TYPE_CONSOLIDATION: "Type Consolidation config",
     CapabilityKind.DISAMBIGUATION: "Disambiguation config",
 }
@@ -216,9 +186,8 @@ def declared_slot_keys() -> frozenset[str]:
 
     Read by :func:`latence_core.envspec.stack_components`, the walker that feeds the GPU-placement
     probe and the env-stack constructibility gate, AT WALK TIME — so a newly declared slot cannot
-    leave it behind. It kept its own three-key tuple until R3-seams_real_not_hypothetical-0, and
-    four of the seven slots below (``ocr``, ``fde_converter``, ``bm25``, ``graph_features``) were
-    invisible to both gates the whole time.
+    leave it behind. It kept its own key tuple until R3-seams_real_not_hypothetical-0, and a slot
+    missing from that tuple (``ocr`` was one) was invisible to both gates the whole time.
 
     A *Stage-scoped* consumer wants :func:`stage_sub_providers` instead: this set is
     capability-agnostic on purpose, because a structural YAML walk has no Stage to ask.
@@ -353,8 +322,8 @@ def undeclared_sub_provider_keys(stage: Stage) -> tuple[str, ...]:
 
     Sorted, so the result is deterministic. Such a block is silently IGNORED at run time — nothing
     reads it — which is exactly how a mistyped slot key (``embedders:``) or a block written under
-    the wrong Stage (``graph_features`` on an Export) survives ``latence setup`` and quietly costs
-    an operator the signal they thought they configured.
+    the wrong Stage (``ocr`` on an Export) survives ``latence setup`` and quietly costs an operator
+    the Provider they thought they configured.
     """
     declared = {slot.key for slot in slots_for(stage.capability)}
     return tuple(
@@ -364,32 +333,6 @@ def undeclared_sub_provider_keys(stage: Stage) -> tuple[str, ...]:
             if key not in declared and _looks_like_a_block(value)
         )
     )
-
-
-def missing_required_slots(stage: Stage) -> tuple[tuple[str, str], ...]:
-    """``(wired_key, missing_companion)`` pairs this Stage's config is missing.
-
-    Covers both declared kinds of companion requirement: a slot that requires a sibling slot
-    (``fde_converter`` → ``multivector_embedder``) and a boolean flag that requires one
-    (``keep_multivectors`` → ``multivector_embedder``). Both are wiring errors the Stage's own
-    constructor raises at run time; surfacing them here makes them catchable offline.
-    """
-    missing: list[tuple[str, str]] = []
-    for slot in slots_for(stage.capability):
-        if stage.config.get(slot.key) is None:
-            continue
-        missing.extend(
-            (slot.key, required)
-            for required in slot.requires
-            if stage.config.get(required) is None
-        )
-    for flag, requires in _FLAG_REQUIRES.get(stage.capability, {}).items():
-        if not stage.config.get(flag):
-            continue
-        missing.extend(
-            (flag, required) for required in requires if stage.config.get(required) is None
-        )
-    return tuple(missing)
 
 
 def class_satisfies_capability(provider_cls: type, protocol: type) -> bool:

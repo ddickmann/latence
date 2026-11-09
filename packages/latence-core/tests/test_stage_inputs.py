@@ -24,12 +24,10 @@ import pytest
 from latence_core.capability_descriptor import (
     ACCUMULATOR_KINDS,
     DESCRIPTORS,
-    PER_CARRIER_INPUT_KINDS,
     STREAMED_INPUT_KINDS,
     StageInputPlan,
     StageInputShape,
     index_descriptors,
-    input_plan_for,
 )
 from latence_core.contracts import (
     CanonicalEntity,
@@ -40,9 +38,6 @@ from latence_core.contracts import (
     DocumentRecord,
     EntityMention,
     Evidence,
-    GraphNode,
-    GraphRecord,
-    GraphScope,
     Provenance,
     Record,
     RelationMention,
@@ -120,27 +115,6 @@ def _relation(record_id: str = "r1") -> RelationMention:
         head_text="Acme",
         tail_text="Widgets",
         confidence=1.0,
-    )
-
-
-def _graph(record_id: str = "g1") -> GraphRecord:
-    node = GraphNode(
-        record_id=f"node:{record_id}",
-        provenance=_PROVENANCE,
-        classification=_CLASSIFICATION,
-        node_id=record_id,
-        entity_id=f"ent:{record_id}",
-        label="ORG",
-        canonical_name="Acme",
-        confidence=1.0,
-        evidence=Evidence(mention_ids=["m1"], confidence=1.0),
-    )
-    return GraphRecord(
-        record_id=record_id,
-        provenance=_PROVENANCE,
-        classification=_CLASSIFICATION,
-        scope=GraphScope.NODE,
-        node=node,
     )
 
 
@@ -226,12 +200,11 @@ def _inputs(
 
 
 def test_the_derived_kind_sets_reproduce_the_executors_historical_partition() -> None:
-    """The two hand-maintained frozensets, now derived, name exactly the same Capabilities.
+    """The hand-maintained frozenset, now derived, names exactly the same Capabilities.
 
-    This is the substitution's regression line: ``runner._STREAMED_INPUT_KINDS`` and
-    ``runner._PER_CARRIER_INPUT_KINDS`` were literal sets the descriptor did not derive, so a new
-    Capability could declare a shape and still be delivered a different one. The literals below are
-    those sets as they stood before the move.
+    This is the substitution's regression line: ``runner._STREAMED_INPUT_KINDS`` was a literal
+    set the descriptor did not derive, so a new Capability could declare a shape and still be
+    delivered a different one. The literal below is that set as it stood before the move.
     """
     assert frozenset(
         {
@@ -243,10 +216,9 @@ def test_the_derived_kind_sets_reproduce_the_executors_historical_partition() ->
             CapabilityKind.REDACTION,
         }
     ) == STREAMED_INPUT_KINDS
-    assert frozenset({CapabilityKind.CONTEXT_ENRICHMENT}) == PER_CARRIER_INPUT_KINDS
 
 
-def test_every_capability_declares_exactly_one_shape_and_the_four_partition_the_kinds() -> None:
+def test_every_capability_declares_exactly_one_shape_and_the_shapes_partition_the_kinds() -> None:
     """Shape is total and disjoint — the ``if/elif/elif/else`` it replaced could not overlap."""
     by_shape: dict[StageInputShape, set[CapabilityKind]] = {
         shape: {d.kind for d in DESCRIPTORS if d.input_plan.shape is shape}
@@ -419,7 +391,6 @@ def test_an_empty_input_is_legitimately_empty_for_every_rule() -> None:
         (CapabilityKind.DISAMBIGUATION, ("entities",)),
         (CapabilityKind.GRAPH_ASSEMBLY, ("resolve",)),
         (CapabilityKind.RELATION_EXTRACTION, ("parse",)),
-        (CapabilityKind.CONTEXT_ENRICHMENT, ("parse",)),
     ):
         pipeline = _pipeline(
             _stage(CapabilityKind.PARSE, "parse"),
@@ -497,25 +468,6 @@ def test_an_empty_input_is_legitimately_empty_for_every_rule() -> None:
             "A Relation-Extraction Stage must also depend on the Chunk (or Content-Screening) "
             "Stage for the text + page map. Check depends_on.",
         ),
-        (
-            CapabilityKind.CONTEXT_ENRICHMENT,
-            "enrich",
-            ("assemble",),
-            {"assemble": [_graph()]},
-            "Stage 'enrich' (context_enrichment) received no ChunkRecords (got: GraphRecord). "
-            "A Context-Enrichment Stage must depend on the Chunk (or Content-Screening / "
-            "Schema-Induction) Stage — the chunks it enriches. "
-            "Check the Pipeline's depends_on wiring.",
-        ),
-        (
-            CapabilityKind.CONTEXT_ENRICHMENT,
-            "enrich",
-            ("chunk",),
-            {"chunk": [_chunk()]},
-            "Stage 'enrich' (context_enrichment) received no GraphRecords (got: ChunkRecord). "
-            "A Context-Enrichment Stage must also depend on the Graph Assembly Stage — the "
-            "assembled KG it projects onto each chunk. Check the Pipeline's depends_on wiring.",
-        ),
     ],
 )
 def test_every_wiring_message_is_byte_identical_to_the_one_the_runner_raised(
@@ -576,45 +528,6 @@ def test_a_correctly_wired_exclusive_stage_passes_with_its_own_carrier() -> None
     inputs.validate()
 
 
-def test_the_scan_short_circuits_only_where_the_plan_declares_it_sound() -> None:
-    """Context Enrichment stops at the second carrier; an accumulator scan still runs to the end.
-
-    The short-circuit is declared, not inferred, precisely because it changes how much is READ.
-    A plan with an EXCLUSIVE rule could never declare it — that verdict depends on every type in
-    the stream — and the accumulator checks that predate it still pay the full pass.
-    """
-    pipeline = _pipeline(
-        _stage(CapabilityKind.CHUNK, "chunk"),
-        _stage(CapabilityKind.GRAPH_ASSEMBLY, "graph"),
-        _stage(CapabilityKind.CONTEXT_ENRICHMENT, "enrich", "chunk", "graph"),
-        _stage(CapabilityKind.PARSE, "parse"),
-        _stage(CapabilityKind.PROFILING, "profile", "parse"),
-    )
-    enrich, enrich_source = _inputs(
-        pipeline,
-        "enrich",
-        {
-            "chunk": [_chunk(f"c{i}") for i in range(5)],
-            "graph": [_graph(f"g{i}") for i in range(5)],
-        },
-    )
-    enrich.validate()
-    assert len(enrich_source.reads) == 6, "the scan read past the first record of the 2nd carrier"
-
-    profile, profile_source = _inputs(
-        pipeline, "profile", {"parse": [_document(f"d{i}") for i in range(5)]}
-    )
-    profile.validate()
-    assert len(profile_source.reads) == 5
-
-    assert input_plan_for(CapabilityKind.CONTEXT_ENRICHMENT).scan_short_circuit
-    assert not input_plan_for(CapabilityKind.PROFILING).scan_short_circuit
-    assert not any(
-        d.input_plan.scan_short_circuit and d.input_plan.exclusive is not None
-        for d in DESCRIPTORS
-    ), "a short-circuited scan cannot decide an exclusive rule"
-
-
 def test_an_all_reused_parent_still_counts_as_producing_its_carrier(
 ) -> None:
     """W17: a delta where every document was reused is not a mis-wired empty parent.
@@ -643,28 +556,21 @@ def test_an_all_reused_parent_still_counts_as_producing_its_carrier(
 # -- 5. the trailer policies each shape carries -------------------------------------------------
 
 
-def test_the_accumulator_and_per_carrier_shapes_carry_different_trailer_policies() -> None:
-    """The one honest behavioral difference between the two per-carrier reads (ADR-0061 §5).
+def test_the_accumulator_shape_delivers_an_overlay_carrier_no_parent_produces() -> None:
+    """The accumulator's trailer policy (ADR-0061 §5).
 
     An accumulator's contract is union semantics, so an overlay carrier NO parent produces is still
-    delivered; a doc-level per-carrier Stage's input is its parents' records and nothing else. Both
-    Stages below have a parent that produces neither carrier, so only the trailer distinguishes
-    them.
+    delivered. The Stage below has a parent that does not produce the carrier, so only the trailer
+    delivers it.
     """
     pipeline = _pipeline(
         _stage(CapabilityKind.PARSE, "parse"),
         _stage(CapabilityKind.DISAMBIGUATION, "disambiguate", "parse"),
-        _stage(CapabilityKind.CONTEXT_ENRICHMENT, "enrich", "parse"),
     )
     accumulator, _ = _inputs(
         pipeline, "disambiguate", {"parse": [_document()]}, reuse=[_mention("m9")]
     )
     assert [r.record_id for r in accumulator.stream_of(EntityMention)] == ["m9"]
-
-    per_carrier, _ = _inputs(
-        pipeline, "enrich", {"parse": [_document()]}, reuse=[_chunk("c9")]
-    )
-    assert [r.record_id for r in per_carrier.stream_of(ChunkRecord)] == []
 
 
 def test_the_corpus_wide_read_always_delivers_an_unclaimed_overlay() -> None:

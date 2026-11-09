@@ -33,7 +33,6 @@ from latence_core import run_store
 from latence_core.capability import (
     Chunker,
     ContentScreener,
-    ContextEnricher,
     Disambiguator,
     EntityExtractor,
     Export,
@@ -251,10 +250,9 @@ _LOG = logging.getLogger(__name__)
 KG_ENTITY_NAMES_WARNING = (
     "A redaction Stage is wired but extract_on is 'unmasked': the exported corpus is masked "
     "while the knowledge graph is NOT. Extracted entity names ship in cleartext as "
-    "GraphNode.canonical_name — the nodes parquet canonical_name/evidence/properties columns, "
-    "the TTL rdfs:label, the GraphML label, and the hyperedge KV 'a|' alias keys. "
-    "GraphHyperedge.tau_text follows the corpus redaction (ADR-0057); node labels deliberately "
-    "do not. Set extract_on: masked to keep PII out of extraction and out of the graph."
+    "GraphNode.canonical_name — the nodes parquet canonical_name/evidence columns, "
+    "the TTL rdfs:label and the GraphML label. "
+    "Set extract_on: masked to keep PII out of extraction and out of the graph."
 )
 
 
@@ -419,8 +417,8 @@ class LocalRunner:
         # W17 (ADR-0043): the cross-run doc-level REUSE OVERLAY. A delta excludes an unchanged
         # document at Source (so its doc-level Stages never run) and hands the Runner that
         # document's persisted doc-level records; the Runner streams them into the CORPUS-LEVEL
-        # accumulators (Profiling/Disambiguation/Graph) and the post-assembly per-chunk
-        # transforms (Context Enrichment) / a doc-level Export ALONGSIDE the freshly-extracted
+        # accumulators (Profiling/Disambiguation/Graph) and
+        # a doc-level Export ALONGSIDE the freshly-extracted
         # records, so those Stages see the whole corpus (reused ∪ fresh) exactly as if every
         # document had been re-extracted — while the doc-level Stages ran only on the changed
         # documents. The overlay is NEVER fed to a doc-level Stage (parse→…→redact) — those
@@ -635,7 +633,7 @@ class LocalRunner:
         Read straight off the Capability's own :class:`~latence_core.capability_descriptor.\
 CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain here. Every
         rationale that used to be a comment beside a branch — Source/Intake Screening thread raw
-        ParserInputs, the chunk→chunk transforms (Schema Induction, Context Enrichment, Redaction)
+        ParserInputs, the chunk→chunk transforms (Schema Induction, Redaction)
         checkpoint the SAME ChunkRecords, a fused or type-consolidating Stage checkpoints a MIXED
         carrier signalled by :class:`~latence_core.contracts.Record` and read back via
         :meth:`_read_mixed_checkpoint` — now sits beside the ``carrier`` field that states it.
@@ -761,7 +759,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         The walk :meth:`_export_carrier` reads its answer from, exposed as the Stage itself
         because the overlay fold rule needs the producer's LEVEL, not only its carrier: a
-        corpus-level producer (Context Enrichment, Type Consolidation) re-emits the whole
+        corpus-level producer (Type Consolidation) re-emits the whole
         ``fresh ∪ reused`` union, so a doc-level Export below it must NOT materialize the overlay
         again, while a doc-level producer (chunk/redact/extract) emits only the fresh documents
         and the Export merges the overlay in. ``None`` when no ancestor produces an exportable
@@ -1311,7 +1309,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         The remaining materialisations are inherent, not oversights: Export must hold the records
         it materialises (it writes a file); the screening Capabilities return an outcome object
-        holding passed + quarantined; a two-carrier branch (Relation, Context Enrichment) must
+        holding passed + quarantined; a two-carrier branch (Relation) must
         buffer one side of the partition; and the fused/consolidating Stages return two carriers
         from one call. All are bounded by what the Provider itself already held.
         """
@@ -1537,25 +1535,6 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # non-empty input is a typed wiring error) before the assembler folds the stream.
             inputs.validate()
             graph_records = inputs.stream_of(DisambiguationRecord)
-            # ADR-0057: a Provider that OPTS IN (``wants_document_streams``, absent/False on
-            # every other Provider) additionally receives the run's chunks + mentions +
-            # relations for the Hyperedge projection — gathered from the WHOLE pipeline with
-            # the same #69 lazy-streaming discipline (and the same rationale) as the
-            # Disambiguation chunk gather above. A Provider that never opts in takes the
-            # unchanged single-stream path: no extra reads, byte-identical behavior.
-            if getattr(graph_assembler, "wants_document_streams", False):
-                assembly_chunks = inputs.corpus_records_of(ChunkRecord)
-                assembly_mentions = inputs.corpus_records_of(EntityMention)
-                assembly_relations = inputs.corpus_records_of(RelationMention)
-                assemble_with_documents = getattr(graph_assembler, "assemble_with_documents")  # noqa: B009 - the opt-in gate above proves presence; getattr keeps the Protocol narrow
-                return iter(
-                    assemble_with_documents(
-                        graph_records,
-                        chunks=assembly_chunks,
-                        mentions=assembly_mentions,
-                        relations=assembly_relations,
-                    )
-                )
             return iter(graph_assembler.assemble(graph_records))
 
         if stage.capability is CapabilityKind.GRAPH_COMPLETION:
@@ -1573,48 +1552,6 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             inputs.validate()
             assembled = inputs.stream_of(GraphRecord)
             return iter(graph_completer.complete(assembled))
-
-        if stage.capability is CapabilityKind.CONTEXT_ENRICHMENT:
-            context_enricher = self._capability_provider(stage, provider, ContextEnricher)
-            # W13: Context Enrichment is the OPTIONAL post-Assembly Stage. It is a chunk→chunk
-            # transform (it yields the SAME ChunkRecords with ``context_header`` populated, like
-            # Schema Induction) but MULTI-INPUT: it depends_on the chunk stream (Chunk /
-            # Content-Screening / Schema-Induction) AND Graph Assembly, so its parents carry both
-            # the ChunkRecords it enriches (and passes through 1:1) and the assembled GraphRecords
-            # (NODE + EDGE) it reads the KG from — one lazy stream each; a missing side is a wiring
-            # error. The run's EntityMentions (a chunk's canonical entities) come
-            # from the WHOLE pipeline — Entity Extraction is a graph ancestor, not a direct parent,
-            # so this streams every Stage's output for them, exactly as Disambiguation streams the
-            # run's ChunkRecords (#94). A run with no Entity-Extraction Stage yields no mentions ⇒
-            # every chunk's ``context_header`` stays None (byte-identical to no-stage). The enriched
-            # chunk stream threads downstream to the corpus Export, which prepends the header to the
-            # EMBEDDING input only (the stored content stays byte-unchanged — ADR-0039).
-            #
-            # dogfood-3: BOTH parent-side carriers are streamed, not gathered. The Provider consumes
-            # each of its three inputs exactly once and folds/projects on arrival, so the Runner
-            # opens one independent lazy stream per carrier over the same parents
-            # (the declared PER_CARRIER shape) instead of materialising one gathered list and
-            # partitioning it. Same records in the same order as the eager partition — a per-carrier
-            # stream reads the parents in ``depends_on`` order and filters, which is exactly what
-            # ``[r for r in gathered if isinstance(r, ...)]`` did — so the chunk stream is still
-            # threaded 1:1 and in order, and the output is byte-identical. What changes is only what
-            # is resident: at UDA scale (220 129 chunks / ~90 k graph records, a fixture-measured
-            # ~5.1 kB per GraphNode) the gathered list was GiBs held for the Stage's whole
-            # execution, inside the 29 GB cgroup that OOM-killed this pipeline twice.
-            inputs.validate()
-            enrich_chunks = inputs.stream_of(ChunkRecord)
-            enrich_graph = inputs.stream_of(GraphRecord)
-            # W17/ADR-0061: Context Enrichment is NOT a per-document transform — a chunk's
-            # ``context_header`` summarizes the mutable assembled graph — which is exactly why
-            # reuse composes with it soundly: the reuse store persists the PRE-enrichment
-            # (redacted) chunk variant, the per-carrier chunk stream above folds the reused
-            # chunks in document order (the PER_CARRIER trailer policy), and EVERY chunk's
-            # header — reused and fresh alike — is re-derived here from the CURRENT assembled
-            # graph. No header ever crosses a run boundary, so none can go stale. The enriched
-            # union then flows to Export, whose overlay fold is suppressed below a corpus-level
-            # producer (this Stage) — no collision, no double count.
-            enrich_mentions = inputs.corpus_records_of(EntityMention)
-            return iter(context_enricher.enrich(enrich_chunks, enrich_mentions, enrich_graph))
 
         if stage.capability is CapabilityKind.EXPORT:
             exporter = self._capability_provider(stage, provider, Export)
@@ -1637,7 +1574,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # its gathered input, so the reused documents' records are folded in here — MERGED
             # document-interleaved in source order (not appended), so the exported row order (and
             # the embedder's batch composition) is identical to a full rebuild's. An Export below
-            # a CORPUS-LEVEL producer (Context Enrichment re-emitting the enriched union, Type
+            # a CORPUS-LEVEL producer (Type
             # Consolidation, Disambiguation/Graph) receives the whole ``fresh ∪ reused`` union
             # through that Stage's checkpoint already — folding the overlay again would export
             # every reused record twice, so it is suppressed by the producer's level.

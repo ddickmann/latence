@@ -72,7 +72,7 @@ def broad_pipeline(store: str, docs_dir: Path, gold_uri: str) -> Pipeline:
     """One stack wiring every in-core Capability that contributes a Quality-Report section.
 
     source -> intake_screen -> parse -> chunk -> content_screen -> {entities, relations} ->
-    consolidate -> disambiguate -> graph -> complete -> enrich -> export, plus redaction and
+    consolidate -> disambiguate -> graph -> complete -> export, plus redaction and
     profiling branches and a gold set. Deliberately broad: a byte-identity fixture is only
     meaningful if it covers the sections the fold has to reproduce.
     """
@@ -170,19 +170,10 @@ stages:
       corpus_id: c5
       transitive_labels: [partner_of]
       symmetric_labels: [partner_of]
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [redact, graph]
-    config:
-      max_neighbors_per_entity: 1
-      max_triples: 6
-      min_entity_confidence: 0.0
-      min_edge_confidence: 0.0
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [enrich]
+    depends_on: [redact]
     config:
       basename: corpus
 """
