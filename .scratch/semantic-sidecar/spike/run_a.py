@@ -39,6 +39,7 @@ from er import (
     plain_closure,
     wilson_lower,
 )
+from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, stage_two, uncertain_region
 
 LEGAL_CANON = {
     "ltd": "ltd", "limited": "ltd", "inc": "inc", "incorporated": "inc", "llc": "llc",
@@ -347,14 +348,49 @@ def latence_cascade(df: pd.DataFrame, name_col: str, label_col: str | None, budg
 # --------------------------------------------------------------------------------------------
 
 
+def _gpu_name() -> str | None:
+    try:
+        import torch
+
+        return torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    except ImportError:
+        return None
+
+
 def _stage(name: str, t0: float) -> None:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     print(f"[stage] {name:16s} t={time.time() - t0:7.1f}s peak_rss={rss} MB", file=sys.stderr, flush=True)
 
 
+def _load_scorers(names: list[str], question: str, instruction: str) -> dict[str, Any]:
+    """The neural pair scorers of the agreed model set, loaded only when an arm asks for them."""
+    import models as M
+
+    make = {
+        "rerank": lambda: M.Reranker(instruction),
+        "decide": lambda: M.GlinerDecide(question),
+        "glide": lambda: M.GlideDecide(question),
+    }
+    return {n: make[n]() for n in names}
+
+
 def run(
-    dataset: str, path: Path, n_cal: int, n_ltt: int, seed: int, baseline_max: int, reject_target: float = 0.99
+    dataset: str,
+    path: Path,
+    n_cal: int,
+    n_ltt: int,
+    seed: int,
+    baseline_max: int,
+    reject_target: float = 0.99,
+    rescore: list[str] | None = None,
+    n_cal2: int = 1000,
+    n_ltt2: int = 1500,
+    scorers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
+    first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes)."""
+    rescore = list(rescore or [])
+    delta = 0.05 / 2 if rescore else 0.05  # two accept claims share the 0.05 by the union bound
     t0 = time.time()
     raw = pd.read_parquet(path)
     kind = "org" if dataset == "estate" else "person"
@@ -383,9 +419,50 @@ def run(
     iso = fit_isotonic(p_raw[cal_idx], y[cal_idx])
     p = iso.predict(p_raw)
     p[veto] = 0.0
-    bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=0.05, reject_target=reject_target)
+    bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=delta, reject_target=reject_target)
     band = np.array([bands.band(x) for x in p])
     _stage("bands", t0)
+
+    stage2_info: dict[str, Any] | None = None
+    if rescore:
+        t = time.time()
+        unc = np.where(uncertain_region(p, bands, veto))[0]
+        cols = ORG_TEXT_COLS if kind == "org" else PERSON_TEXT_COLS
+        text_of = {r["unique_id"]: record_text(r, cols) for r in raw.to_dict("records")}
+        pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(cand.l.to_numpy()[unc], cand.r.to_numpy()[unc])]
+        if scorers is None:
+            import models as M
+
+            scorers = _load_scorers(rescore, M.SAME_QUESTION, M.SAME_RECORD_INSTRUCTION)
+        sc_times: dict[str, float] = {}
+        sc: dict[str, np.ndarray] = {}
+        for name in rescore:
+            ts = time.time()
+            sc[name] = np.asarray(scorers[name].score(pairs), dtype=float)
+            sc_times[name] = round(time.time() - ts, 2)
+        # A reviewer labels a sample of the uncertain region only: disjoint halves again.
+        order2 = np.random.default_rng(seed + 1).permutation(len(unc))
+        cal2, ltt2 = order2[:n_cal2], order2[n_cal2 : n_cal2 + n_ltt2]
+        s2 = stage_two(p[unc], sc, y[unc], cal2, ltt2, target=0.95, delta=delta, reject_target=reject_target)
+        band2 = np.array([s2.bands.band(x) for x in s2.p2])
+        band[unc] = band2
+        p[unc] = s2.p2  # the cluster-level check reads the better-informed probability
+        timings["rescore"] = time.time() - t
+        _stage("rescore", t0)
+        stage2_info = {
+            "scorers": rescore,
+            "uncertain_pairs": int(len(unc)),
+            "labels_used": {"calibration": s2.n_cal, "ltt": s2.n_ltt},
+            "features": dict(zip(s2.feature_names, s2.coefficients)),
+            "accept_at": s2.bands.accept_at,
+            "reject_below": s2.bands.reject_below,
+            "delta_per_stage": delta,
+            "moved": {b: int((band2 == b).sum()) for b in ("accept", "review", "reject")},
+            "accept_precision_realised": float(y[unc][band2 == "accept"].mean()) if (band2 == "accept").any() else float("nan"),
+            "reject_true_match_rate": float(y[unc][band2 == "reject"].mean()) if (band2 == "reject").any() else float("nan"),
+            "scorer_secs": sc_times,
+            "pairs_per_s": {n: (len(unc) / v if v > 0 else float("inf")) for n, v in sc_times.items()},
+        }
     acc, rev, rej = band == "accept", band == "review", band == "reject"
 
     # Realised quality of the bands on ALL candidate pairs (full gold): does the guarantee hold?
@@ -411,7 +488,7 @@ def run(
                     cc.add_cannot_link(ls[i], rs[i])
             for i in np.where(rev & (y == 1))[0]:
                 cc.try_union(ls[i], rs[i])
-        for i in np.where(acc)[0][np.argsort(-p[acc], kind="stable")]:
+        for i in np.where(acc)[0][np.argsort(-p[acc], kind="stable")]:  # first- and second-stage accepts
             cc.try_union_checked(ls[i], rs[i], adj)
         return cc.clusters(), {
             "merges": cc.merges,
@@ -445,6 +522,7 @@ def run(
             "target": bands.target,
             "reject_target": reject_target,
             "delta": bands.delta,
+            "second_stage": stage2_info,
             "share": {"accept": float(acc.mean()), "review": float(rev.mean()), "reject": float(rej.mean())},
             "counts": {"accept": int(acc.sum()), "review": int(rev.sum()), "reject": int(rej.sum())},
             "auto_accept_precision_realised": acc_prec,
@@ -472,7 +550,7 @@ def run(
         result["clustering"]["latence_cascade_baseline"] = f"skipped: {len(df)} records > baseline_max {baseline_max}"
     result["timings_s"]["total"] = round(time.time() - t0, 1)
     result["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 0)
-    result["hardware"] = {"cpus": os.cpu_count(), "gpu": None}
+    result["hardware"] = {"cpus": os.cpu_count(), "gpu": _gpu_name()}
     return result
 
 
@@ -486,8 +564,14 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--baseline-max", type=int, default=15_000)
     ap.add_argument("--reject-target", type=float, default=0.99)
+    ap.add_argument("--rescore", default="", help="comma-separated pair scorers for the uncertain pairs: rerank,decide,glide")
+    ap.add_argument("--n-cal2", type=int, default=1000)
+    ap.add_argument("--n-ltt2", type=int, default=1500)
     a = ap.parse_args()
-    res = run(a.dataset, a.path, a.n_cal, a.n_ltt, a.seed, a.baseline_max, a.reject_target)
+    res = run(
+        a.dataset, a.path, a.n_cal, a.n_ltt, a.seed, a.baseline_max, a.reject_target,
+        rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
+    )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))
     print(json.dumps({k: res[k] for k in ("records", "bands", "review_effort", "clustering", "timings_s", "peak_rss_mb")}, indent=1, default=float))

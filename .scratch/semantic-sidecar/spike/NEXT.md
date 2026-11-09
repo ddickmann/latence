@@ -61,11 +61,17 @@ git clone -b claude/blissful-maxwell-bpln7a https://github.com/ddickmann/latence
 cd latence/.scratch/semantic-sidecar/spike
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cu128   # match the image's CUDA
-pip install splink duckdb pandas pyarrow scikit-learn scipy transformers \
-  sentence-transformers gliner gliner2 peft accelerate anthropic pytest psutil
+pip install splink duckdb pandas pyarrow scikit-learn scipy jellyfish transformers \
+  sentence-transformers torchvision pillow gliner "gliner2[local]" peft accelerate anthropic pytest psutil
 export ANTHROPIC_API_KEY=...           # set in the shell; never commit it
-PYTHONHASHSEED=0 python -m pytest -q -p no:cacheprovider test_er.py test_llm.py   # 13 pass
+PYTHONHASHSEED=0 python -m pytest -q -p no:cacheprovider .   # 23 pass, no network, no model
+python smoke_models.py                 # loads each model once; proves the code path, not quality
+hf download fastino/GLiDE-9B --local-dir models/GLiDE-9B && pip install -r models/GLiDE-9B/requirements.txt
+python smoke_models.py glide           # GLiDE ships its own `glide` package and pinned requirements
 ```
+
+GLiDE pins its own torch and transformers versions. If they clash with the rest, give GLiDE its
+own venv and run only the `glide` arms from it.
 
 `data/`, `out/` and `models/` are git-ignored. Regenerate the data:
 
@@ -79,6 +85,19 @@ python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet(
 
 `run_scale.sh` runs all of Part A in sequence. Its 1M step is the open one.
 
+## What the CPU smoke test showed (2026-11-09; not results)
+
+All four small models load and run through `models.py` on a CPU: EmbeddingGemma 2 (256-d,
+unit norm; it needs `torchvision` and `pillow` even for text), Qwen3-Reranker-0.6B, GLiNER-Relex
+(entities with character offsets, and relations) and GLiNER2.5-Decide. GLiDE has not been
+loaded anywhere yet.
+
+One thing to watch when the real arms run: on three hand-written record pairs, zero-shot
+GLiNER2.5-Decide gave nearly the same P(yes) for a clear match and a clear non-match, and its
+answer flipped with the wording of the labels. Three examples prove nothing, and Decide is only
+a feature of the calibrated score. If the measured arm confirms it, the options are the GLiDE
+arm and fine-tuning Decide (its model card documents that).
+
 ## Next steps, in order
 
 0. **Check the GPU:** `python -c "import torch; print(torch.cuda.get_device_name(0))"`.
@@ -86,17 +105,37 @@ python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet(
 2. **Part A at scale on the pod:**
    - Rerun 100k, then 1M, with `run_a.py`.
    - Report wall time, peak RSS and pairs per second.
-3. **Part A, uncertain pairs:**
-   - Write out the pairs between the reject and accept bands as text (`name | city | postcode | reg_id …`).
-   - Score them with Qwen3-Reranker-0.6B and with Decide or GLiDE.
-   - Feed `[splink_logit, rerank, decide]` into a logistic calibrator, then `er.learn_then_test_bands`, then `er.ConstrainedClusterer.try_union_checked`. Keep `er.py` as it is.
-   - Run these arms: Splink only; plus zero-shot scores; plus a LoRA-fine-tuned reranker trained on a disjoint labelled split.
-   - The fine-tuned arm ships only if it clears 0.95 where zero-shot does not.
-4. **Part B rebuilt in `run_b.py`:**
-   - GLiNER-Relex extracts mentions from the raw documents; score extraction P/R against the span gold in `mentions.jsonl`.
-   - Retrieve candidates with TF-IDF plus EmbeddingGemma 2, rerank them with Qwen3-Reranker, and add the Decide or GLiDE probability.
-   - A logistic model, then LTT, sorts mentions into link, NIL or review. NIL mentions are then clustered.
-   - Add one permissively licensed English entity-linking benchmark, checking the licence before use.
+3. **Part A, uncertain pairs** (code: `rescore.py`, wired into `run_a.py --rescore`):
+   - The pairs between the first-stage reject and accept bands are written out as text and
+     scored by the named scorers. `[splink_logit, <scorers>]` feed a logistic calibrator, then
+     Learn-then-Test on a labelled sample of the uncertain region, then the constrained clusterer.
+   - Each stage runs at δ/2, so the combined accepted set keeps the 0.95 claim at δ = 0.05.
+   - Arms to run at 100k (and at 1M once it fits):
+     ```bash
+     python run_a.py --dataset estate --path data/estate_100k.parquet --baseline-max 0 --out out/a_100k_splink.json
+     python run_a.py ... --rescore rerank        --out out/a_100k_rerank.json
+     python run_a.py ... --rescore decide        --out out/a_100k_decide.json
+     python run_a.py ... --rescore glide         --out out/a_100k_glide.json
+     python run_a.py ... --rescore rerank,decide --out out/a_100k_rerank_decide.json
+     python run_a.py ... --rescore rerank,glide  --out out/a_100k_rerank_glide.json
+     ```
+   - **Not written yet:** the LoRA fine-tune of the reranker on a disjoint labelled split. It
+     ships only if it clears 0.95 where zero-shot does not.
+4. **Part B** (`run_b.py` is rebuilt on the agreed models):
+   - Arms, each adding one thing to the one before:
+     ```bash
+     python run_b.py --data data/text_2k --scorer lexical                          --out out/b_lexical.json
+     python run_b.py --data data/text_2k --scorer rerank                           --out out/b_rerank.json
+     python run_b.py --data data/text_2k --scorer rerank --embed                   --out out/b_rerank_embed.json
+     python run_b.py --data data/text_2k --scorer rerank --embed --decide decide   --out out/b_decide.json
+     python run_b.py --data data/text_2k --scorer rerank --embed --decide glide    --out out/b_glide.json
+     python run_b.py --data data/text_2k --scorer rerank --embed --mentions relex  --out out/b_end_to_end.json
+     ```
+   - `--mentions relex` extracts mentions from the raw documents with GLiNER-Relex and reports
+     extraction precision and recall against the span gold; linking then works on the extracted
+     surfaces.
+   - **Not done yet:** one permissively licensed English entity-linking benchmark (check the
+     licence before use).
 5. **Review items:** `llm.explain_review_item` (fast tier) explains a sample of review-band pairs, synthetic data only. These are the inputs for ticket 16. Spot-check them; they gate nothing.
 6. **`REPORT.md`:**
    - B-cubed and pairwise P/R/F1;
