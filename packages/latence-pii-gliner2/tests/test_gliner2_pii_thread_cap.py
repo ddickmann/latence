@@ -72,10 +72,17 @@ def cores(monkeypatch: pytest.MonkeyPatch) -> Any:
     10-core dev box and RED on the 2-4 vCPU ``ubuntu-latest`` runner CI runs the suite on. Pinning
     the count makes every assertion below host-independent — high to hold the clamp inert while the
     cap itself is under test, low in the one test that puts the clamp under test.
+
+    Every probe ``effective_cpu_count`` consults is pinned, not just ``os.cpu_count``: the default
+    cap derives from the affinity-aware ``process_cpu_count`` / ``sched_getaffinity`` first, which
+    say 4 on a 4-vCPU runner whatever ``cpu_count`` claims. ``raising=False`` because neither probe
+    exists on every platform.
     """
 
     def _pin(n: int) -> None:
         monkeypatch.setattr(os, "cpu_count", lambda: n)
+        monkeypatch.setattr(os, "process_cpu_count", lambda: n, raising=False)
+        monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(n)), raising=False)
 
     return _pin
 
