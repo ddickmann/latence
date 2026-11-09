@@ -6,7 +6,7 @@
 # local-green when Actions minutes are exhausted. Same commands, same env, same order.
 #
 # NOT covered here (need containers/heavy installs — run separately when relevant):
-#   - the MinIO s3:// e2e lane (needs a MinIO container)
+#   - the S3-emulator s3:// e2e lane (needs a versitygw container)
 #   - the Airflow DAG lane (needs apache-airflow installed under its constraints)
 #   - GPU-provider real runs (validated on the CUDA pod)
 # Those are called out in the summary so nothing is silently skipped.
@@ -130,5 +130,5 @@ ok "bake-off"
 printf '\n\033[1;32m========================================\n'
 printf 'LOCAL VERIFY GREEN — all mirrored CI gates pass.\n'
 printf '========================================\033[0m\n'
-printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod),\n'
+printf 'Not run here (separate/infra): S3-emulator s3 e2e, Airflow DAG lane, GPU real runs (pod),\n'
 printf '  deploy/env/* gates 2+ (need the installed heavy venv, and a CUDA-13 GPU for the\n  gpu-learned placement gate: bash deploy/env/<name>/smoke.sh).\n'

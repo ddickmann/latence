@@ -1,6 +1,6 @@
 name: CI
 
-# Fast, required merge gates. The heavy/slow lanes (MinIO s3:// e2e, the Airflow DAG
+# Fast, required merge gates. The heavy/slow lanes (S3-emulator s3:// e2e, the Airflow DAG
 # lane, and the Goal-B per-Stage bake-offs) live in ci-heavy.yml so PR feedback here
 # stays quick. scripts/verify-local.sh mirrors ALL of these gates locally.
 on:

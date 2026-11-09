@@ -1,4 +1,4 @@
-"""Storage round-trip against an S3-compatible endpoint (MinIO in CI).
+"""Storage round-trip against an S3-compatible endpoint (an S3 emulator in CI).
 
 Skipped unless ``LATENCE_S3_ENDPOINT`` is set, so the suite stays hermetic on a
 laptop while CI proves the same code path works on ``s3://`` with no code change
@@ -15,7 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LATENCE_S3_ENDPOINT"),
-    reason="set LATENCE_S3_ENDPOINT (and AWS creds) to run the S3/MinIO test",
+    reason="set LATENCE_S3_ENDPOINT (and AWS creds) to run the S3 test",
 )
 
 

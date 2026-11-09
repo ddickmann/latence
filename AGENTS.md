@@ -145,7 +145,7 @@ bash scripts/verify-local.sh > /tmp/verify.log 2>&1; echo "REAL_EXIT=$?"
 **Capture the exit code by redirect, never by piping.** A shell pipeline reports the status of its
 *last* command, so `bash scripts/verify-local.sh | tail -20` exits `0` on a thoroughly red tree.
 That mistake has been made in this repository and produced a false green that survived into a
-written summary. It prints, on completion, the lanes it did **not** cover (the MinIO `s3://` e2e
+written summary. It prints, on completion, the lanes it did **not** cover (the S3-emulator `s3://`
 lane, the Airflow DAG lane, real GPU runs) — say in your summary which of those you could not
 exercise rather than implying you did.
 

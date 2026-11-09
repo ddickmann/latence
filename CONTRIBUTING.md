@@ -136,7 +136,7 @@ the status of its *last* command, so `bash scripts/verify-local.sh | tail -20` e
 a thoroughly red tree. That mistake was made once in this repo and produced a false green
 that survived into a written summary. Redirect to a file, echo `$?`, then read the log.
 
-The script does not cover the MinIO `s3://` end-to-end lane, the Airflow DAG lane, or real
+The script does not cover the S3-emulator `s3://` end-to-end lane, the Airflow DAG lane, or real
 GPU-provider runs — those need containers, a heavy install, or a CUDA host. It prints that
 list when it finishes. Say in your PR which of them you could not exercise.
 

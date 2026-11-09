@@ -4,7 +4,7 @@ Note on the name: "S3" here is the framework's third *slice* (Chunk + Screening)
 ``s3://`` object store. This file runs on ``file://`` and was previously mis-named
 ``test_e2e_s3.py`` with an "end-to-end S3" docstring, which read as object-storage coverage it
 never had (H-E1 Part 2). It is renamed to ``test_e2e_pipeline_spine.py`` and the test functions
-to ``test_pipeline_spine_*``; the real ``s3://``-on-MinIO end-to-end lives in ``test_e2e_s3.py``,
+to ``test_pipeline_spine_*``; the real ``s3://`` end-to-end lives in ``test_e2e_s3.py``,
 which drives this **same** pipeline (the shared ``_spine_pipeline`` builder) over object storage.
 
 Exercises every S3-slice acceptance criterion on a real Pipeline over a temp folder:

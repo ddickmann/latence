@@ -87,6 +87,17 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Fixed
 
+- **The `s3://` end-to-end lane failed before any test ran, on every run.** `ci-heavy.yml`'s
+  `storage-s3` job pulled `minio/minio:latest` and `minio/mc:latest`. Both were deleted from
+  Docker Hub, and MinIO no longer publishes community images, so the pull failed (`pull access
+  denied`) and the lane was red on `main` and on every PR. The lane now runs **versitygw**
+  (Apache-2.0, recorded in `THIRD-PARTY-LICENSES.md`), pinned by tag and digest
+  (`v1.10.0@sha256:89cad13c…`) instead of a floating `latest`. The bucket is created with a real
+  S3 CreateBucket call through the s3fs the lane already installs. The tests, their env vars and
+  the framework code are unchanged: the same Storage round-trip and the full screening-spine
+  pipeline still run end to end on `s3://`. The readiness wait now fails the step, printing the
+  container logs, if the emulator never answers. Before, it fell through to the tests. The job is
+  now displayed as "Pipeline e2e on S3 emulator (s3://)".
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept

@@ -1,14 +1,14 @@
 name: CI (heavy lanes)
 
 # The slow/infra-heavy gates, split out of ci.yml so PR feedback there stays fast:
-#   - storage-s3 : the real pipeline e2e over MinIO (s3://) — spins a container
+#   - storage-s3 : the real pipeline e2e over an S3 emulator (s3://) — spins a container
 #   - airflow-dag: the real build_dag tests under a constrained apache-airflow install
 #   - bake-off   : Goal-B per-Stage provider matrices, end-to-end on the bundled corpus
 #
 # Still runs on every PR + on pushes to main (so nothing merges unproven), plus a nightly
 # schedule and manual dispatch. Docs-only changes skip these lanes (paths-ignore) — a
-# README/ADR edit never needs a MinIO container. scripts/verify-local.sh covers the
-# bake-off locally; the MinIO + Airflow lanes are called out there as infra-only.
+# README/ADR edit never needs an S3 emulator container. scripts/verify-local.sh covers the
+# bake-off locally; the S3-emulator + Airflow lanes are called out there as infra-only.
 on:
   push:
     branches: ["main"]
@@ -73,40 +73,53 @@ jobs:
           done
 
   storage-s3:
-    name: Pipeline e2e on MinIO (s3://)
+    name: Pipeline e2e on S3 emulator (s3://)
     runs-on: ubuntu-latest
     env:
       LATENCE_S3_ENDPOINT: http://localhost:9000
       LATENCE_S3_BUCKET: latence-test
+      # Throwaway credentials for the CI-only emulator (audited in .secrets.baseline).
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
-      # botocore resolves the MinIO endpoint from these STANDARD env vars, so the
+      # botocore resolves the emulator endpoint from these STANDARD env vars, so the
       # framework's own Storage.for_uri("s3://…") (built with no options in the Runner)
-      # talks to MinIO with no code change — the ADR-0009 guarantee the real e2e exercises.
+      # talks to it with no code change — the ADR-0009 guarantee the real e2e exercises.
       AWS_ENDPOINT_URL_S3: http://localhost:9000
       AWS_ENDPOINT_URL: http://localhost:9000
       AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
-      - name: Start MinIO
+      # The S3 emulator is versitygw (Apache-2.0, THIRD-PARTY-LICENSES.md), pinned by tag AND
+      # digest. MinIO used to fill this slot, but minio/minio and minio/mc were deleted from
+      # Docker Hub (2026-09) and MinIO no longer publishes community images, so an unpinned
+      # `minio/minio:latest` pull is what turned this lane red. To bump: pick a release tag and
+      # copy its index digest from Docker Hub; never go back to a floating tag.
+      - name: Start S3 emulator (versitygw)
         run: |
-          # Run MinIO directly (services: can't pass the required `server` command).
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          # Wait for the health endpoint (host curl, not container curl).
+          # Run directly (services: can't pass the backend command). The posix backend keeps
+          # objects on a host bind mount, which carries the xattrs it stores metadata in.
+          mkdir -p "$RUNNER_TEMP/s3-data"
+          docker run -d --name s3 -p 9000:9000 \
+            -v "$RUNNER_TEMP/s3-data:/data" \
+            -e ROOT_ACCESS_KEY="$AWS_ACCESS_KEY_ID" \
+            -e ROOT_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
+            versity/versitygw:v1.10.0@sha256:89cad13cc981986ee284cbafea4613f9533ce6fd5f37a2c96c4c4fb8adb3a316 \
+            --port :9000 --health /health posix /data
+          # Wait for the health endpoint (host curl, not container curl). Never fall through
+          # to the tests with no endpoint: if it doesn't come up, show why and fail here.
+          ready=0
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live; then
-              echo "minio ready"; break
+            if curl -sf http://localhost:9000/health > /dev/null; then
+              ready=1; echo "s3 emulator ready"; break
             fi
-            echo "waiting for minio ($i)"; sleep 2
+            echo "waiting for the s3 emulator ($i)"; sleep 2
           done
-          # Create the test bucket via the mc client.
-          docker run --rm --network host \
-            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
-            minio/mc:latest mb --ignore-existing local/latence-test
+          if [ "$ready" -ne 1 ]; then
+            docker logs s3
+            echo "::error::the s3 emulator never answered /health"
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -117,6 +130,19 @@ jobs:
         run: |
           uv sync
           uv pip install s3fs
+
+      # A real S3 CreateBucket against the emulator, through the s3fs this lane already
+      # installs — no extra client image or tool.
+      - name: Create the test bucket
+        run: |
+          uv run python -c "
+          import os, s3fs
+          fs = s3fs.S3FileSystem(client_kwargs={'endpoint_url': os.environ['LATENCE_S3_ENDPOINT']})
+          bucket = os.environ['LATENCE_S3_BUCKET']
+          fs.mkdir(bucket)
+          assert fs.exists(bucket), f'bucket {bucket} was not created'
+          print('bucket ready:', bucket)
+          "
 
       # The Storage round-trip (5-byte) PLUS the real end-to-end pipeline on s3:// — the honest
       # ADR-0009 coverage (H-E1 Part 2). The e2e drives the SAME screening spine the local

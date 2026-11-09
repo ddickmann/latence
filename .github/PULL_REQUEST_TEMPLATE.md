@@ -67,6 +67,6 @@ bash scripts/verify-local.sh > /tmp/verify.log 2>&1; echo "REAL_EXIT=$?"
 
 ## Not run locally (if applicable)
 
-<!-- verify-local.sh does not cover: the MinIO s3:// e2e lane, the Airflow DAG lane,
+<!-- verify-local.sh does not cover: the S3-emulator s3:// e2e lane, the Airflow DAG lane,
      GPU-provider real runs (validated on the CUDA pod), or the deploy/env gates that
      need the installed heavy venv. Note anything you could not exercise, and why. -->
