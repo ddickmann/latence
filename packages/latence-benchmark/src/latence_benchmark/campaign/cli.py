@@ -9,7 +9,6 @@
                              [--accept-non-commercial]
     latence-campaign approve <stage> [-c campaign.yaml]
     latence-campaign resume  [-c campaign.yaml] [--repo-root DIR] [--accept-non-commercial]
-    latence-campaign retrieval-config [-c campaign.yaml]
 
 Stdlib ``argparse`` deliberately, matching ``latence-label``: the campaign must be drivable
 straight from a clone with the framework installed and nothing else.
@@ -27,7 +26,6 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from latence_benchmark.campaign.retrieval_lib import render_rescue_config
 from latence_benchmark.campaign.stages import (
     CampaignContext,
     GateRefusedError,
@@ -46,16 +44,10 @@ from latence_benchmark.campaign.state import (
 )
 from latence_benchmark.campaign.wizard import (
     KNOWN_DATASETS,
-    RETRIEVAL_GRAPH_MODES,
-    RETRIEVAL_SELECTORS,
     S3_INDUCTION_MODES,
-    S5_FUSIONS,
-    S5_LEGS,
     CampaignAnswers,
     CampaignConfigError,
-    RetrievalAnswers,
     S3Answers,
-    S5Answers,
     build_campaign_config,
     parse_campaign_config,
 )
@@ -141,59 +133,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Turn the learned redaction guardrail screen OFF (default: on).",
     )
-    # Graph-rescue retrieval headline choices (prompted interactively; the remaining knobs are
-    # flag-only, same house style as s3). Every default is the measured S5b operating point.
-    init.add_argument(
-        "--retrieval-graph-mode",
-        default=None,
-        choices=[*RETRIEVAL_GRAPH_MODES],
-        help="Graph-rescue policy gate: auto (default — pay for the graph lane only on "
-        "graph-shaped queries), off, or force.",
-    )
-    init.add_argument(
-        "--retrieval-selector",
-        default=None,
-        choices=[*RETRIEVAL_SELECTORS],
-        help="Token-budget selector: packed (knapsack @ 10k, the precision point — default), "
-        "coe (chain-of-evidence @ 16k, the recall point), or none (ranked union).",
-    )
-    for flag, help_text in (
-        ("--retrieval-packed-budget", "knapsack token budget (default 10000)."),
-        ("--retrieval-coe-budget", "chain-of-evidence token budget (default 16000)."),
-        ("--retrieval-seed-top-k", "expander anchor size (default 5)."),
-        ("--retrieval-hop-weight", "expander 1-hop bonus per linked seed (default 0.05)."),
-        ("--retrieval-community-weight", "expander shared-community bonus (default 0.01)."),
-        ("--retrieval-centrality-weight", "expander peak-centrality bonus (default 0.05)."),
-        ("--retrieval-seed-docs-k", "first-stage docs seeding entity resolution (default 5)."),
-        ("--retrieval-seed-node-cap", "max seed nodes handed to the traversal (default 32)."),
-        ("--retrieval-rescue-cap", "max rescue candidates appended per query (default 50)."),
-        (
-            "--retrieval-pack-centrality-weight",
-            "kg_node_centrality weight in the packer's value (default 0.25).",
-        ),
-    ):
-        init.add_argument(flag, default=None, help=help_text)
-    # S5 feature matrix: flag-only, no prompts — the default IS the full matrix over the
-    # corpus selection, and every deviation is a deliberate narrowing (see S5Answers).
-    init.add_argument(
-        "--s5-fusion",
-        default=None,
-        choices=[*S5_FUSIONS],
-        help="Matrix fusion variant: equal (default, the untuned RRF baseline) or tuned "
-        "(weights fitted on a dev split, reported on the disjoint test split).",
-    )
-    for flag, help_text in (
-        (
-            "--s5-datasets",
-            "comma-separated matrix datasets (default: empty = the corpus selection).",
-        ),
-        (
-            "--s5-legs",
-            f"comma-separated legs to run (default: all of {','.join(S5_LEGS)}).",
-        ),
-        ("--s5-limit", "query cap per dataset for a smoke matrix (default: the full sets)."),
-    ):
-        init.add_argument(flag, default=None, help=help_text)
     init.add_argument(
         "--non-interactive",
         action="store_true",
@@ -247,12 +186,6 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(resume, repo_root=True)
     resume.add_argument("--accept-non-commercial", action="store_true", help=argparse.SUPPRESS)
 
-    retrieval_config = sub.add_parser(
-        "retrieval-config",
-        help="Render the `retrieval:` block as the GraphRescueRetrieval config it configures.",
-    )
-    _common(retrieval_config, repo_root=False)
-
     return parser
 
 
@@ -268,11 +201,6 @@ def _flag_or(flag: str | None, default: object) -> str:
     LOUDLY (exit 2), so the flag is kept verbatim whenever it was given at all.
     """
     return flag if flag is not None else str(default)
-
-
-def _name_tuple(raw: str) -> tuple[str, ...]:
-    """A comma-separated flag value as a name tuple; blanks dropped, ``''`` = empty."""
-    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 def _ask(flag: str | None, prompt: str, why: str, default: str, *, interactive: bool) -> str:
@@ -330,27 +258,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         interactive=interactive,
     )
 
-    # Graph-rescue headline choices: prompted; the remaining knobs resolve flag > default only.
-    retrieval_mode = _ask(
-        args.retrieval_graph_mode,
-        f"Graph-rescue policy gate ({'/'.join(RETRIEVAL_GRAPH_MODES)})",
-        "auto = pay for the graph lane only on graph-shaped queries (the measured default); "
-        "off = base dense+BM25 only; force = every query",
-        "auto",
-        interactive=interactive,
-    )
-    retrieval_selector = _ask(
-        args.retrieval_selector,
-        f"Retrieval selector ({'/'.join(RETRIEVAL_SELECTORS)})",
-        "packed = knapsack @ 10k tokens (precision point); coe = chain-of-evidence @ 16k "
-        "(recall point); none = ranked union, no token budget",
-        "packed",
-        interactive=interactive,
-    )
-
     datasets = tuple(d.strip() for d in datasets_raw.split(",") if d.strip())
     defaults = S3Answers()
-    retrieval_defaults = RetrievalAnswers()
     try:
         s3 = S3Answers(
             chunk_max_tokens=int(_flag_or(args.s3_chunk_max_tokens, defaults.chunk_max_tokens)),
@@ -388,62 +297,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
             ),
             redaction_guardrails=not args.s3_no_guardrails,
         )
-        retrieval = RetrievalAnswers(
-            graph_mode=retrieval_mode.strip(),
-            selector=retrieval_selector.strip(),
-            packed_budget=int(
-                _flag_or(args.retrieval_packed_budget, retrieval_defaults.packed_budget)
-            ),
-            coe_budget=int(_flag_or(args.retrieval_coe_budget, retrieval_defaults.coe_budget)),
-            seed_top_k=int(_flag_or(args.retrieval_seed_top_k, retrieval_defaults.seed_top_k)),
-            hop_weight=float(
-                _flag_or(args.retrieval_hop_weight, retrieval_defaults.hop_weight)
-            ),
-            community_weight=float(
-                _flag_or(args.retrieval_community_weight, retrieval_defaults.community_weight)
-            ),
-            centrality_weight=float(
-                _flag_or(
-                    args.retrieval_centrality_weight, retrieval_defaults.centrality_weight
-                )
-            ),
-            seed_docs_k=int(
-                _flag_or(args.retrieval_seed_docs_k, retrieval_defaults.seed_docs_k)
-            ),
-            seed_node_cap=int(
-                _flag_or(args.retrieval_seed_node_cap, retrieval_defaults.seed_node_cap)
-            ),
-            rescue_cap=int(_flag_or(args.retrieval_rescue_cap, retrieval_defaults.rescue_cap)),
-            pack_centrality_weight=float(
-                _flag_or(
-                    args.retrieval_pack_centrality_weight,
-                    retrieval_defaults.pack_centrality_weight,
-                )
-            ),
-        )
-        s5_defaults = S5Answers()
-        s5 = S5Answers(
-            # `is not None`, never truthiness: `--s5-datasets ''` is the explicit "follow the
-            # corpus selection" answer and `--s5-legs ''` must reach the empty-legs refusal,
-            # not silently restore the full ladder (the Wave 1-C flag rule).
-            datasets=(
-                _name_tuple(args.s5_datasets)
-                if args.s5_datasets is not None
-                else s5_defaults.datasets
-            ),
-            legs=(
-                _name_tuple(args.s5_legs) if args.s5_legs is not None else s5_defaults.legs
-            ),
-            limit=(int(args.s5_limit) if args.s5_limit is not None else s5_defaults.limit),
-            fusion=_flag_or(args.s5_fusion, s5_defaults.fusion).strip(),
-        )
         answers = CampaignAnswers(
             campaign_root=root,
             datasets=datasets,
             pod_ssh=pod_ssh.strip(),
             s3=s3,
-            retrieval=retrieval,
-            s5=s5,
         )
     except (CampaignConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -469,21 +327,6 @@ def _cmd_init(args: argparse.Namespace) -> int:
         f"  s3: induction {answers.s3.induction_mode}, "
         f"cap ${answers.s3.induction_budget_usd_cap:.2f}, "
         f"guardrails {'on' if answers.s3.redaction_guardrails else 'off'}"
-    )
-    budget = {
-        "packed": answers.retrieval.packed_budget,
-        "coe": answers.retrieval.coe_budget,
-    }.get(answers.retrieval.selector)
-    print(
-        f"  retrieval: graph {answers.retrieval.graph_mode}, "
-        f"selector {answers.retrieval.selector}"
-        + (f" @ {budget} tok" if budget is not None else "")
-    )
-    matrix_datasets = answers.s5.datasets or answers.datasets
-    print(
-        f"  s5 matrix: {len(matrix_datasets)} dataset(s) × {len(answers.s5.legs)} leg(s), "
-        + ("full query sets" if answers.s5.limit is None else f"limit {answers.s5.limit}")
-        + f", fusion {answers.s5.fusion}"
     )
     print("")
     print(f"Run `latence-campaign status -c {output}` to see the stage table.")
@@ -606,22 +449,6 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
-# -- retrieval-config ---------------------------------------------------------------------------
-
-
-def _cmd_retrieval_config(args: argparse.Namespace) -> int:
-    """Print the config the campaign's ``retrieval:`` block hands ``GraphRescueRetrieval``.
-
-    The block's one consumer on the CLI surface: it resolves the file (so a typo'd knob is the
-    same loud parse error every subcommand gives) and renders the mapping the production
-    component is constructed from, so "campaign.yaml is a valid production config source" is
-    something an operator can see rather than a claim in a guide.
-    """
-    answers = _read_answers(args.config)
-    print(render_rescue_config(answers.retrieval), end="")
-    return 0
-
-
 # -- entry ------------------------------------------------------------------------------------
 
 
@@ -633,7 +460,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run": _cmd_run,
         "approve": _cmd_approve,
         "resume": _cmd_resume,
-        "retrieval-config": _cmd_retrieval_config,
     }
     handler = commands[args.command]
     try:
