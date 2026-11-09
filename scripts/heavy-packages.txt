@@ -37,4 +37,3 @@ latence-linkpred-ultra
 latence-schema-inducer
 latence-parser-render
 latence-disambig-glinker
-latence-splade
