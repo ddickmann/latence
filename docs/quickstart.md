@@ -1,14 +1,13 @@
-# Quickstart — from a folder of documents to a queryable corpus
+# Quickstart — from a folder of documents to a corpus and a knowledge graph
 
 *Roughly 15 minutes on a laptop. No GPU. Once installed, only step 3 touches the network.*
 
-By the end of this page you will have run the pipeline over your own documents and asked the
-result a question. What you get out is **files** — a chunked, PII-masked RAG corpus with vectors, a
-knowledge graph whose every edge carries the evidence it was built from, a BM25 term-statistics
-artifact, and a Quality Report — which is the whole point: nothing is locked inside a service.
+By the end of this page you will have run the pipeline over your own documents and read the
+result. What you get out is **files** — a chunked, PII-masked corpus with vectors, a
+knowledge graph whose every edge carries the evidence it was built from,
+and a Quality Report — which is the whole point: nothing is locked inside a service.
 
-If you want the reasoning behind the design before you run anything, read the
-[deep dive](DEEP-DIVE.md). If you want to keep going after this page, the
+If you want to keep going after this page, the
 [tutorials](tutorials/index.md) pick up exactly where it stops.
 
 **Every command below is real.** Where a step prints something, a `✓ look for` block states what a
@@ -29,7 +28,7 @@ uv sync
 ```
 
 `uv sync` installs the CPU-first, offline, deterministic set: `latence-core` (which brings the
-`latence` CLI), the plaintext / pdfplumber / document parsers, the retrieval library, the run
+`latence` CLI), the plaintext / pdfplumber / document parsers, the benchmark harness, the run
 console, and the demo. The heavy learned Providers (torch, transformers, spaCy, Airflow) are
 **deliberately not** in that set — you add the ones you want in step 3.
 
@@ -38,7 +37,7 @@ uv run latence --help
 ```
 
 ✓ **look for** — a command list containing `run`, `setup`, `process`, `stack`, `bake-off`, `tune`,
-`delta`, `retract`, `purge`, `env` and `retrieval`. If `latence` is not found, `uv sync` did not
+`delta`, `retract`, `purge`, `contracts` and `env`. If `latence` is not found, `uv sync` did not
 finish; re-run it and read its output.
 
 !!! note "`uv run` vs a bare command"
@@ -162,8 +161,8 @@ runs every chunk against your fixed labels.
 
 Saved quality-baked stack to: latence.stack.yaml
   profile: lite
-  stages (13): source -> intake_screen -> parse -> chunk -> content_screen -> extract -> redact ->
-               profiling -> disambiguate -> graph -> enrich -> export_kg -> export_corpus
+  stages (12): source -> intake_screen -> parse -> chunk -> content_screen -> extract -> redact ->
+               profiling -> disambiguate -> graph -> export_kg -> export_corpus
   parser: parser.pdfplumber   device: cpu
   intake size cap: 2097152 bytes — sized from your corpus (largest file 232 bytes)
   PII redaction + guardrail screening: ON (financial-PII; chunk-level masking + report)
@@ -239,161 +238,23 @@ The same content is on disk as `quality-report.md` if you would rather read it i
 ls latence-out/_latence/runs/run-0001/export/
 ```
 
-✓ **look for** — the RAG corpus and the knowledge graph, as portable files:
+✓ **look for** — the corpus and the knowledge graph, as portable files:
 
 | File | What it is |
 | --- | --- |
-| `records.jsonl` / `records.parquet` | One row per chunk: masked text, provenance, offsets, page span, the dense `embedding`, and the denormalised KG columns (`kg_node_ids`, `neighbor_node_ids`, `kg_node_community`, `kg_node_centrality`). |
+| `records.jsonl` / `records.parquet` | One row per chunk: masked text, provenance, offsets, page span, and the dense `embedding`. |
 | `graph-nodes.parquet` | Resolved entity nodes — canonical name, type, confidence, member mentions, source documents. |
 | `graph-edges.parquet` | Extracted relations — each with an `evidence` block naming the source documents and the exact mentions it was built from. |
 | `graph.ttl` / `graph.graphml` | The same graph as RDF and as GraphML, for tools that speak them. |
 | `quality-report.md` / `.json` | The artifact that substantiates "AI-ready" — human- and machine-readable. |
 
-Everything a retrieval system needs is in `records.parquet`; everything an auditor needs is in the
+The processed text is in `records.parquet`; everything an auditor needs is in the
 graph files and the report. [Tutorial 2](tutorials/02-understanding-the-output.md) reads each one
 field by field.
 
 ---
 
-## 6. Ask it a question
-
-The retrieval side of the framework is **stateless**: it never holds an index and never runs
-first-stage search ([ADR-0048](adr/0048-retrieval-tooling-is-strictly-stateless.md)). It transforms
-a candidate list *you* fetched — from Qdrant, Elastic, whatever you run. For a corpus this size you
-do not need an engine at all: the emitted files are enough.
-
-Two additions first. The BM25 term-statistics artifact is opt-in, so add a `bm25` block to the
-`export_corpus` stage of your `latence.stack.yaml`:
-
-```yaml
-  - name: export_corpus
-    capability: export
-    provider: export.jsonl_parquet
-    depends_on: [enrich]
-    config:
-      basename: records
-      context_columns: true
-      # ... your embedder block stays as the wizard wrote it ...
-      bm25: {provider: tokenizer.regex, config: {}}
-```
-
-Re-run `latence process` with a fresh `--run-id`, then install the embedded graph engine the
-multi-hop expander uses (MIT, serverless, nothing to stand up):
-
-```bash
-uv pip install -e 'packages/latence-retrieval[graph-duckdb]'
-```
-
-✓ **look for** — `bm25-stats.json` and `bm25-postings.parquet` beside `records.parquet` in the new
-run's `export/`. If they are absent the `bm25` block did not take effect and the next step will
-raise.
-
-Now save this as `ask.py`:
-
-```python
-"""Ask the exported corpus a question — BM25, then graph expansion, then packing."""
-
-import sys
-
-import pyarrow.parquet as pq
-from latence_retrieval import (
-    Bm25Rescorer,
-    Candidate,
-    DuckDBGraphSource,
-    MultiHopExpander,
-    Packer,
-)
-
-export, question = sys.argv[1], sys.argv[2]
-rows = pq.read_table(f"{export}/records.parquet").to_pylist()
-
-pool = [
-    Candidate(
-        id=r["record_id"],
-        score=0.0,
-        text=r["content"],
-        metadata={"kg_node_ids": list(r["kg_node_ids"] or [])},
-    )
-    for r in rows
-]
-
-
-def show(title, candidates):
-    print(f"\n-- {title}")
-    for c in candidates[:4]:
-        print(f"   {c.score:7.3f}  {c.text.splitlines()[0][:52]}")
-
-
-ranked = Bm25Rescorer.from_export(export).process(question, pool)
-show("BM25 over the emitted corpus stats", ranked)
-
-expanded = MultiHopExpander(
-    {"seed_top_k": 1, "max_hops": 2, "hop_weight": 1.5},
-    graph_source=DuckDBGraphSource(f"{export}/graph-edges.parquet"),
-).process(question, ranked)
-show("after 2-hop knowledge-graph expansion", expanded)
-
-packed = Packer({"budget": 600}).process(question, expanded)
-show("packed into a 600-token budget", packed)
-```
-
-```bash
-uv run python ask.py latence-out/_latence/runs/run-0002/export "<a question about your documents>"
-```
-
-✓ **look for** — three blocks. The first is lexical: BM25 scores the chunks that share terms with
-your question and leaves the rest at exactly `0.000`. The second is the interesting one: chunks that
-share *entities* with the top hit are lifted off zero by the graph traversal even though they
-contain none of your query's words. The third keeps the highest-value, least-redundant subset that
-fits the token budget. On the four-document corpus from
-[Tutorial 1](tutorials/01-your-first-pipeline.md) it looks like this:
-
-```
--- BM25 over the emitted corpus stats
-     5.576  Travel and Expense Policy
-     0.000  Incident Report 2024-07
-     0.000  Acme Corporation Employee Handbook
-     0.000  Master Services Agreement
-
--- after 2-hop knowledge-graph expansion
-     5.576  Travel and Expense Policy
-     1.500  Incident Report 2024-07
-     1.500  Acme Corporation Employee Handbook
-     1.500  Master Services Agreement
-
--- packed into a 600-token budget
-     5.576  Travel and Expense Policy
-     1.500  Incident Report 2024-07
-     1.500  Acme Corporation Employee Handbook
-     1.500  Master Services Agreement
-```
-
-Read the middle block carefully, because it is the argument of the whole framework in four lines.
-BM25 and dense embeddings both retrieve text that is *near the question*. Those three documents are
-not near it lexically at all — they were reached by following edges in the knowledge graph out from
-a document that was. That is a signal no single-hop retriever exposes, and it is why the pipeline
-bothers to build a graph.
-
-!!! note "Your numbers will differ, and the knobs matter"
-    Scores depend on your corpus. The **shapes** are what to check: BM25 leaves non-matching chunks
-    at exactly `0.000`, expansion moves graph-adjacent chunks above zero, and packing returns a
-    subset in descending score.
-
-    Two settings decide whether you see anything at all. `seed_top_k` is how many top candidates
-    anchor the traversal, and a candidate whose entity nodes are *already in the seed set* earns no
-    bonus — so on a small, densely-connected corpus a large `seed_top_k` can absorb every node and
-    make expansion a no-op. Start at `1` and raise it as the corpus grows. `hop_weight` must be
-    scaled to the score range it is added to: `1.5` is right next to raw BM25 scores of ~5, and far
-    too large next to fused reciprocal-rank scores of ~0.03.
-    [Tutorial 3](tutorials/03-retrieval.md) works through both.
-
-    If expansion changes nothing even at `seed_top_k: 1`, your chunks probably carry no
-    `kg_node_ids` — check that the `enrich` stage ran and that `context_columns: true` is set on
-    `export_corpus`.
-
----
-
-## 7. Where to go next
+## 6. Where to go next
 
 <div class="grid cards" markdown>
 
@@ -403,13 +264,10 @@ bothers to build a graph.
 - :material-numeric-2-box: **[Understanding the output](tutorials/02-understanding-the-output.md)**
   Every artifact, every column, and how to trace a claim back to the sentence it came from.
 
-- :material-numeric-3-box: **[Retrieval](tutorials/03-retrieval.md)**
-  Dense, sparse, BM25 and graph traversal — what each signal contributes, measured on one corpus.
-
-- :material-numeric-4-box: **[Bringing your own Provider](tutorials/04-bringing-your-own-provider.md)**
+- :material-numeric-3-box: **[Bringing your own Provider](tutorials/04-bringing-your-own-provider.md)**
   Implement a Capability, register the entry point, and have the conformance suite check you.
 
-- :material-numeric-5-box: **[Production](tutorials/05-production.md)**
+- :material-numeric-4-box: **[Production](tutorials/05-production.md)**
   GPU serving, staged runs, checkpoint/resume, and incremental corpus deltas.
 
 </div>

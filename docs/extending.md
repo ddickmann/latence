@@ -93,7 +93,6 @@ is the responsibility of whoever introduces the component, and the
 |---|---|
 | add a Provider under an existing Capability | no |
 | swap a model, a parser, an embedder, a graph store | no |
-| add a query-time component (fuser, reranker, packer) | no — separate `latence.retrieval` group |
 | add a genuinely **new Capability** | yes, by design |
 
 The last row is deliberate. A Capability declares nine facts about itself in one frozen descriptor —

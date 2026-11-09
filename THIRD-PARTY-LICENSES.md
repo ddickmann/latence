@@ -104,7 +104,6 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | torch-scatter | (PyG wheel) | MIT **(upstream)** | latence-linkpred-ultra (`ultra` extra; PyG wheel index, not a plain PyPI pin) |
 | pykeen | ≥1.10,<2 | MIT **(upstream)** | latence-linkpred-ultra (`pykeen` extra) |
 | easydict | ≥1.10,<2 | ⚠️ **LGPL-3.0 (upstream)** — see flag below | latence-linkpred-ultra (`ultra` extra only) |
-| qdrant-client | ≥1.10 | Apache-2.0 **(upstream)** | latence-sink-qdrant (`client` extra), latence-retrieval (`backend-qdrant` extra). Code: <https://github.com/qdrant/qdrant-client/blob/master/LICENSE>; the Qdrant engine it talks to is Apache-2.0 (<https://github.com/qdrant/qdrant/blob/master/LICENSE>). A vector store ships **no model weights**, so weights-vs-code (ADR-0012) collapses to the code license alone. Verified 2026-07-16. Offline tests use the shipped faithful `FakeQdrantClient`, so neither package needs it installed. |
 
 > **⚠️ License flag — `easydict` is LGPL-3.0, not permissive.** Pulled only by the opt-in
 > `latence-linkpred-ultra[ultra]` extra (used by the vendored MIT ULTRA inference subset), and
@@ -241,7 +240,6 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | knowledgator/gliner-linker-rerank-v1.0 | Disambiguation (L4 reranker; `disambiguation.glinker`, ADR-0046) | Apache-2.0 |
 | ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`, wired in `deploy/env/gpu-learned/stack.yaml`) | Apache-2.0 |
 | ibm-granite/granite-embedding-97m-multilingual-r2 | Embedding (CPU tier) | Apache-2.0 |
-| opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1 | Sparse signal (`sparse.splade`, wired in `deploy/env/cpu-text/stack.yaml`) | Apache-2.0 |
 | intfloat/multilingual-e5-small | Embedding (fallback) | MIT |
 | sentence-transformers/all-MiniLM-L6-v2 | Embedding (fallback) | Apache-2.0 |
 | microsoft/llmlingua-2 | Compression (post-v1) | MIT |

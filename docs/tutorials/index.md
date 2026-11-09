@@ -1,7 +1,8 @@
 # Tutorials
 
-Five tutorials, in order. Each one builds on the last and ends where the next begins. All of them
-run on a laptop; only the last needs a GPU, and it says exactly where.
+Four tutorials, in order. Each one builds on the last and ends where the next begins. All of them
+run on a laptop; only the last needs a GPU, and it says exactly where. They keep their original
+numbers: Tutorial 3 (retrieval) was removed with the retrieval tooling ([ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)).
 
 They share one convention with the rest of this documentation: every step ends in a
 **`✓ look for`** block stating what a correct result looks like. If your output disagrees with one,
@@ -12,7 +13,6 @@ discovering at the end that something did.
 | --- | --- | --- | --- |
 | 1 | [Your first pipeline](01-your-first-pipeline.md) | A folder of documents turned into an AI-ready corpus + knowledge graph, stage by stage. | Nothing but the workspace. No network, no downloads, no GPU. |
 | 2 | [Understanding the output](02-understanding-the-output.md) | Fluency in every emitted artifact — and the ability to trace a graph edge back to the sentence it came from. | Tutorial 1's output. |
-| 3 | [Retrieval](03-retrieval.md) | A four-signal query path over the emitted files: dense, sparse, BM25 and graph traversal, fused and packed. | Tutorial 1's output + one extra. |
 | 4 | [Bringing your own Provider](04-bringing-your-own-provider.md) | A real Provider package of your own, registered as a plugin and green against the conformance suite. | The workspace. |
 | 5 | [Production](05-production.md) | Served GPU models, staged runs, checkpoint/resume, and incremental corpus deltas. | Tutorials 1–2; a GPU for the served-model sections. |
 
@@ -31,5 +31,4 @@ They also assume the vocabulary from [Concepts & Architecture](../concepts/index
 * the **Runner** executes that DAG; the **Storage** seam is where every artifact lands.
 
 If you want the reasoning rather than the mechanics — why the pipeline extracts narrow and resolves
-wide, why retrieval is stateless, what the knowledge graph actually buys — read the
-[deep dive](../DEEP-DIVE.md). It is the argument these tutorials are the practice for.
+wide — read the [pipeline anatomy](../anatomy/index.md) and the [decision log](../adr/index.md).

@@ -46,9 +46,9 @@ outside any employer.
 - **No carve-outs, no exceptions.** Every file in the repository is Apache-2.0, and
   `packages/latence-core/tests/test_publish_readiness.py` fails the build if any source
   header, package manifest or licence document disagrees. (Under PolyForm, seven query-time
-  retrieval modules in `latence-retrieval` kept a file-level Apache-2.0 grant so those
-  algorithms stayed commercially reusable; that exception is dissolved, not withdrawn — what
-  it granted for seven files now holds for all of them.)
+  retrieval modules kept a file-level Apache-2.0 grant so those
+  algorithms stayed commercially reusable; that exception was dissolved by the relicence, and
+  the retrieval package itself has since been removed — ADR-0068.)
 - **The patent grant is broad and contributor-wide.** Apache-2.0 §3 grants a patent licence
   from **every contributor**, for any purpose, terminating only if you initiate patent
   litigation alleging the software infringes (§3's defensive-termination clause). This is

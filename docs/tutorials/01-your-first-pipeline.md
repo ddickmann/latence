@@ -1,9 +1,15 @@
 # Tutorial 1 — Your first pipeline
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The stack in §2 is current; sample output further down that shows an `enrich` stage, a *Context enrichment* report section, `bm25-*` files or a `centrality` column is from before the removal.
+    The page is kept until it is rewritten.
+
 **What you will build.** A folder of four ordinary documents turned into an AI-ready corpus: chunked
 and PII-masked text with vectors, a knowledge graph whose entities are resolved across documents,
-BM25 term statistics, and a Quality Report that substantiates all of it. Then you will take the
-pipeline apart and see what each of the fourteen stages actually produced.
+and a Quality Report that substantiates all of it. Then you will take the
+pipeline apart and see what each of the thirteen stages actually produced.
 
 **Prerequisites.** A clone of the framework with `uv sync` run, and nothing else. This tutorial uses
 only the in-core reference Providers, so it needs **no network, no model downloads and no GPU**, and
@@ -157,13 +163,6 @@ stages:
     depends_on: [disambiguate]
     config:
       corpus_id: first-pipeline
-      graph_features: {provider: graph_features.pagerank, config: {}}
-
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [redact, graph]
-    config: {max_neighbors_per_entity: 4, max_triples: 6}
 
   - name: export_kg
     capability: export
@@ -174,12 +173,10 @@ stages:
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [enrich]
+    depends_on: [redact]
     config:
       basename: records
-      context_columns: true
       embedder: {provider: embedding.hashing, config: {dimension: 256}}
-      bm25: {provider: tokenizer.regex, config: {}}
 ```
 
 Read it once from the top. Every stage is the same four things: a `name`, the **Capability** it
@@ -190,11 +187,10 @@ claim, and the thing Tutorial 4 makes you do yourself.
 Three details worth pausing on:
 
 * **`depends_on` is a DAG, not a list.** `redact` depends on `content_screen`, not on `entities` —
-  redaction and extraction are independent branches over the same chunk stream. `enrich` waits for
-  both `redact` and `graph`, which is what lets the exported corpus be masked *and* graph-enriched
-  at once.
-* **`graph_features` and `bm25` are nested `{provider, config}` blocks.** A Provider can resolve
-  another Provider through the same registry, so optional signals bolt on without a new stage.
+  redaction and extraction are independent branches over the same chunk stream. `export_corpus`
+  reads `redact`, which is what makes the exported corpus masked.
+* **`embedder` is a nested `{provider, config}` block.** A Provider can resolve
+  another Provider through the same registry, so an optional signal bolts on without a new stage.
 * **`storage_uri` is an fsspec URI.** `file://./latence-out` here; `s3://bucket/prefix` works
   unchanged, and nothing else in the file changes.
 

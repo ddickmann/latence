@@ -15,14 +15,14 @@ each section depends only on the ones above it.
 
 ## Start here
 
-- [docs/agent-briefing.md](docs/agent-briefing.md): The structured briefing for coding agents — the mental model, every Provider available per Stage, the Pipeline YAML contract, the CLI, the output schema, retrieval wiring, and the six things that will burn you. Start here.
+- [docs/agent-briefing.md](docs/agent-briefing.md): The structured briefing for coding agents — the mental model, every Provider available per Stage, the Pipeline YAML contract, the CLI, the output schema, and the six things that will burn you. Start here.
 - [CONTEXT.md](CONTEXT.md): The canonical glossary. Use these terms exactly; it also lists the synonyms this project bans.
 - [README.md](README.md): The project front door — what it does, the 60-second quickstart, and what is and is not measured.
 
 ## Using the framework
 
-- [docs/quickstart.md](docs/quickstart.md): From a folder of documents to a queryable corpus, command by command.
-- [docs/tutorials/index.md](docs/tutorials/index.md): Five worked tutorials — first pipeline, reading the output, retrieval, bringing your own Provider, production.
+- [docs/quickstart.md](docs/quickstart.md): From a folder of documents to a corpus and a knowledge graph, command by command.
+- [docs/tutorials/index.md](docs/tutorials/index.md): Four worked tutorials — first pipeline, reading the output, bringing your own Provider, production.
 - [docs/reference/stage-contracts.md](docs/reference/stage-contracts.md): Generated Stage contracts — signatures, carriers, wiring rules, registered Providers. Regenerate with `latence contracts --write`.
 - [docs/providers/catalog.md](docs/providers/catalog.md): Every registered Provider with its verified weights-and-code licence, compute and footprint.
 - [docs/pipeline/index.md](docs/pipeline/index.md): What each Stage consumes and produces.
@@ -43,5 +43,5 @@ each section depends only on the ones above it.
 
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): Measured quality results, with the method and hardware on every row.
 - [PERF-RESULTS.md](PERF-RESULTS.md): Measured throughput envelopes, plus an explicit list of what is *not* yet measured.
-- [docs/guides/index.md](docs/guides/index.md): Task-focused operator guides — deployment, observability, secrets, incremental ingest, serving with Qdrant.
+- [docs/guides/index.md](docs/guides/index.md): Task-focused operator guides — deployment, observability, secrets, incremental ingest.
 - [docs/CONTINUITY.md](docs/CONTINUITY.md): Bus factor, fork posture, support lifetime. Start here if you are evaluating this for adoption.

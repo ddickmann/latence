@@ -1,5 +1,11 @@
 # Deployment: on-prem, VPC, and air-gapped
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The *Query time* row of the compute table, the measured serving latency and the *Serving the corpus — Qdrant* section describe components that no longer ship.
+    The page is kept until it is rewritten.
+
 Production deployment of the Latence pipeline. Everything here lives under `deploy/` and is
 **separate from the demo** (`demo/`, which is a CPU-only, offline, one-command showcase). This guide
 is grounded in what the pipeline actually needs: a **served vLLM OCR endpoint** (the SOTA scanned-
@@ -62,7 +68,7 @@ pipeline belongs to one of them:
 | **Deterministic CPU** — always local, no model | Source, intake/content screening, chunking, reference extraction, profiling, graph assembly + centrality, exports (Parquet/JSONL/TTL/GraphML, BM25 stats, hyperedge KV) | any CPU host |
 | **Learned, in-process** — GPU-accelerated, CPU-capable | GLiNER2 extraction + redaction, GLinker disambiguation, Granite embeddings, SPLADE | one GPU per worker, or CPU at lower throughput (measured envelopes: `PERF-RESULTS.md`) |
 | **Served over HTTP** — the endpoint seam | OCR (vLLM), optional LLM induction/relation extraction | wherever you host the endpoint; the pipeline host stays CPU |
-| **Query time** — after the pipeline | dense first stage (your ANN engine, e.g. [Qdrant](guides/serving-qdrant.md)), exact BM25 rescoring, graph traversal + hypergraph lanes, selectors | CPU; zero LLM calls online |
+| **Query time** — after the pipeline | dense first stage (your ANN engine, e.g. Qdrant), exact BM25 rescoring, graph traversal + hypergraph lanes, selectors | CPU; zero LLM calls online |
 
 The end-to-end scale point, measured (the e2e campaign's S3 stage, one 24 GB-class CUDA pod,
 `benchmark/sota-campaign/stages/s3-pipeline/metrics.json`): **60,766 documents → 297,548
@@ -72,7 +78,7 @@ The only LLM spend in that run was optional per-chunk schema induction on three 
 datasets — 247,944 calls, **$29.26 measured** ($0.000118/call); the text-native datasets ran
 hand-authored schemas at zero LLM cost. Query-time serving needs no GPU at all: the measured
 serving path (single-node Qdrant + the full graph-rescue composition) answers at 42–83 ms median
-per query on CPU ([the serving guide](guides/serving-qdrant.md) carries the full tables).
+per query on CPU.
 
 Incremental churn is also measured rather than promised: an add of 61 documents into a 609-doc
 corpus cost 8.4 min against 97.4 min for the full rebuild (11.6×), with the incremental export
@@ -188,7 +194,7 @@ The pipeline's Exports are files; serving them behind a real ANN engine is one l
 against a pinned single-node compose (`deploy/qdrant/docker-compose.yml`), and the served path's
 recall parity with brute force is **measured on full query sets**, not assumed. The verified
 settings (`--distance dot` at load, `search_params: {hnsw_ef: 512}` at query) and the parity
-tables live in **[Serving with Qdrant](guides/serving-qdrant.md)**; the loader's idempotency,
+tables were published in the serving guide removed with the tooling; the loader's idempotency,
 GDPR reconciliation and multi-tenancy contract are in
 [`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence/blob/main/packages/latence-sink-qdrant/README.md).
 

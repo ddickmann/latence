@@ -1,5 +1,11 @@
 # Tutorial 2 — Understanding the output
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The `context_header` / `kg_node_*` columns, the *signal sidecars* section and the references to a retrieval tutorial describe output that is no longer produced.
+    The page is kept until it is rewritten.
+
 **What you will build.** Nothing new — this tutorial builds *fluency*. By the end you will know
 what every emitted artifact contains, which field to reach for, and how to take a single edge in
 the knowledge graph and produce the exact source sentence that justifies it. That last skill is the
@@ -111,7 +117,7 @@ dimensions from `embedding.hashing`.
     against this Embedder, you are evaluating a lexical signal against a lexical signal and the
     answer is meaningless. Wire a real one — `embedding.sentence_transformers` with a Granite r2
     checkpoint — before drawing any conclusion about dense retrieval.
-    [Tutorial 3](03-retrieval.md) returns to this.
+    (The retrieval tutorial that returned to this was removed.)
 
 **`context_header`** — a JSON string holding the knowledge graph's projection onto this chunk. Open
 one:
@@ -415,6 +421,4 @@ Point at any number the pipeline produced and name the file it came from. Take a
 its sentence. Tell a signal column from a base one. Tell an honest gap (`skipped`, `UNVERIFIED`)
 from a claim.
 
-**Next:** [Retrieval](03-retrieval.md) — turn `records.parquet`, `bm25-stats.json` and
-`graph-edges.parquet` into a working four-signal query path, and see what each signal actually
-contributes.
+**Next:** [Bringing your own Provider](04-bringing-your-own-provider.md).

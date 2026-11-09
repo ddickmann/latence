@@ -1,5 +1,11 @@
 # The benchmark campaign wizard
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The campaign's `retrieval:` and `s5:` blocks and its `s5-retrieval` stage were removed; the campaign now ends at `s3-pipeline`.
+    The page is kept until it is rewritten.
+
 `latence-campaign` drives the framework's end-to-end SOTA benchmark campaign — acquire real
 public corpora, OCR them, push them through the full enterprise pipeline, then measure
 retrieval — as **gated, resumable stages** with filesystem done-probes and an atomic
@@ -27,7 +33,7 @@ blocked/failed stage, `0` success.
 The prompts cover: the campaign root, the dataset selection (from the known-dataset registry),
 the pod SSH target for GPU stages, the S3 induction mode, and the two headline retrieval
 choices (policy-gate mode, selector) — the full `retrieval:` block with measured defaults is
-documented in [Graph-rescue retrieval](graph-rescue-retrieval.md#configuring-it-from-the-campaign-wizard).
+documented in the graph-rescue retrieval guide (removed with the tooling).
 The `s5:` matrix block is flag-only (`--s5-datasets`, `--s5-legs`, `--s5-limit`, `--s5-fusion`):
 its default *is* the full matrix over the corpus selection, so every deviation is a deliberate
 narrowing rather than an answer worth interrogating up front.

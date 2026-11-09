@@ -1,5 +1,11 @@
 # Ticket 03 report — Incremental ingest: document churn without full rebuild
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. This is measured evidence of record: the pipeline it measured included the Context Enrichment and Hyperedge stages. The numbers are not re-measured.
+    The page is kept until it is rewritten.
+
 Status: **done — gate PASSED** (2026-08-13; every comparison identical, zero divergences,
 zero tolerances used)
 

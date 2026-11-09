@@ -22,7 +22,7 @@
 > Point it at **[`llms.txt`](./llms.txt)**, or hand it
 > **[`docs/agent-briefing.md`](./docs/agent-briefing.md)** directly. The briefing is written for
 > LLM agents: the mental model, every Provider available at each Stage, the pipeline YAML
-> contract, the CLI, the output schema, retrieval wiring, and the specific things that are easy
+> contract, the CLI, the output schema, and the specific things that are easy
 > to get wrong. It is structured so an agent can go from "never seen this repo" to a working
 > pipeline on your documents without reading the source.
 
@@ -99,11 +99,10 @@ is hidden in a proprietary index.
 
 | Artifact | What it is |
 |---|---|
-| `corpus.parquet` / `corpus.jsonl` | the RAG corpus — one row per chunk, with dense embedding, PII-masked text and denormalized KG columns |
-| `graph-nodes.parquet` | resolved canonical entities — plus PageRank centrality and community when graph features are wired |
+| `corpus.parquet` / `corpus.jsonl` | the processed corpus — one row per chunk, with PII-masked text and, when an Embedder is wired, a dense embedding |
+| `graph-nodes.parquet` | resolved canonical entities |
 | `graph-edges.parquet` | extracted + reference relations, **every edge carrying its Evidence** |
 | `graph.ttl` / `graph.graphml` | the same graph for RDF and graph-viz tooling |
-| `bm25-stats.json` + `bm25-postings.parquet` | index-time BM25 statistics whose term unit exactly matches the query-side rescorer |
 | `quality-report.json` + `quality-report.md` | the machine + human artifact that substantiates "AI-ready" |
 | `manifest.json` | the exact pipeline that produced this run, with credentials redacted |
 
@@ -136,24 +135,7 @@ licence. The reasoning behind each choice is written down: **68 architecture dec
 
 ---
 
-## The measured result
-
-80 IETF RFCs through the enterprise profile on a Blackwell GPU, then retrieval measured against a
-**live Qdrant** — no mocks anywhere in the measured path:
-
-| retrieval configuration | recall@10 · all 90 questions | recall@10 · the 7 multi-hop cases |
-|---|---|---|
-| dense only (Granite → Qdrant) | 0.644 | **0.000** |
-| BM25 only | 0.656 | **0.000** |
-| **fused — dense + BM25 + KG 2-hop + rerank** | **0.678** | **1.000** |
-
-Read honestly: across the broad set the aggregate lift is **+3 points**, because most questions are
-answerable by a single signal. The advantage is concentrated on the 7 of 90 (~8%) that genuinely
-require chaining evidence across documents — where single signals score zero. The defensible claim is
-not "fused is better everywhere"; it is that the graph unlocks a class of query that single
-retrievers structurally cannot answer. Method, the seven worked examples and the limitations are in
-[`results/dogfood-rfc/PROOF.md`](./results/dogfood-rfc/PROOF.md) and
-[`docs/DEEP-DIVE.md`](./docs/DEEP-DIVE.md).
+## What is measured
 
 Measured per-Stage throughput, with hardware, date and a reproduction command on every row — plus an
 explicit *not yet measured* list — is in [`PERF-RESULTS.md`](./PERF-RESULTS.md); measured quality
@@ -167,7 +149,7 @@ Pre-1.0, and specific about it.
 
 **Proven, and reproducible on a laptop:** the full suite green with `PYTHONHASHSEED=0`,
 `mypy --strict` over src *and* tests for every package, `bash scripts/verify-local.sh` exiting 0
-(secret scan, lint, types, suite, Provider conformance, nine end-to-end stack validations, the
+(secret scan, lint, types, suite, Provider conformance, eight end-to-end stack validations, the
 reproducible environment specs, the compatibility matrix and seven bake-off matrices), and
 byte-identical reruns — including a child process `SIGKILL`ed mid-checkpoint-write, resumed, and
 producing an export identical to an uninterrupted run. The **G1 profound-testing gate is signed
@@ -182,14 +164,14 @@ performance baseline and determinism, with residuals included:
   ablation) and **every value on it is still a `PENDING:` token**. A large staged GPU run has
   executed, but it is not *that* protocol, and a number from a different corpus or card would be
   worse than a missing one.
-- **SPLADE is implemented but unproven as a retrieval signal.** It loads into a live Qdrant as a real
-  named sparse vector; no retrieval-quality number exists for it.
 - **The graph's *necessity* is argued, not gated.** The eight necessity gates (closed-book, per-edge
-  necessity, DiRe, bridge leakage, adversarial distractors, …) are unimplemented. The RFC numbers
-  above measure a narrower thing: one corpus, 90 generated questions, single-passage gold.
+  necessity, DiRe, bridge leakage, adversarial distractors, …) are unimplemented.
 - **Scale is characterised, not eliminated.** The 100k / 1M-document envelopes are parked in
   `PERF-RESULTS.md` rather than previewed.
-- **Multi-vector / MUVERA ship as real but experimental, off by default,** naming no checkpoint.
+- **Query-time retrieval is out of scope.** The retrieval tooling was removed
+  ([ADR-0068](./docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md));
+  the framework produces the resolved graph and the processed corpus, and a consumer brings its
+  own retrieval engine.
 - **Nothing has been released.** The signing and SBOM machinery is built and tested; it has not yet
   produced a release. [`RELEASE-GATES.md`](./RELEASE-GATES.md) is the checklist, and it is
   machine-checked — `test_public_release_gate.py` fails under `LATENCE_RELEASE_CHECK=1` while any
@@ -206,7 +188,7 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down ra
 
 ```bash
 git clone https://github.com/ddickmann/latence && cd latence
-uv sync                                          # CPU-first env: core, demo, console, retrieval
+uv sync                                          # CPU-first env: core, demo, console, benchmark
 uv run latence --help
 uv pip install -e packages/latence-embedder-st   # add any opt-in Provider package by path
 ```
@@ -220,7 +202,6 @@ promise holds. There is no `latence` meta-package:
 ```bash
 pip install latence-core                # contracts, Capabilities, local Runner, Storage, CLI
 pip install latence-parser-pdfplumber   # + one package per Provider you actually want
-pip install latence-retrieval           # the stateless query-time library
 ```
 
 The full map is in [Install](./docs/getting-started/index.md).

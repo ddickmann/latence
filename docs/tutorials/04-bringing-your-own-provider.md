@@ -1,5 +1,11 @@
 # Tutorial 4 — Bringing your own Provider
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The worked example builds a `Tokenizer` Provider for the BM25 export, a Capability that no longer exists; the procedure (package, entry point, profile, conformance) is unchanged, but the example itself no longer runs as written.
+    The page is kept until it is rewritten.
+
 **What you will build.** A real Provider, in a package of your own, outside this repository:
 implement one method, declare an honest profile, register an entry point, pass the conformance
 suite, and wire it into a running pipeline. Then you will deliberately break it in three ways and
