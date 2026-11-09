@@ -11,17 +11,23 @@ ontology layer** from two input modalities:
 - (a) Databricks Unity Catalog, metric views, and warehouse metadata and usage;
 - (b) unstructured documents.
 
-**Done** when (draft; *Destination and domain model* refines it):
+**Done** when all seven checks hold (owner, 2026-11-09; *Destination and domain model*):
 
-1. Every concept, alias, binding, merge and axiom links to Evidence and to the actor that made
-   it (engine, model or human). A run replays byte-identically.
-2. Human decisions survive rebuilds and delta runs.
-3. On Databricks it emits UC-native overlays and proposals keyed on UC object ids, never a
-   parallel definition of something UC defines. It also emits open-standard exports.
-4. It runs standalone, and as a sidecar that feeds Metis's semantic catalog through one
-   declared seam.
-5. The upgraded text path beats the recorded baseline on quality and throughput.
-6. No retrieval code remains.
+1. **Trace.** 100% of Concepts, Entities, Bindings, merges and axioms link to at least one
+   Assertion and an Actor (engine, model or human). The same inputs run twice give
+   byte-identical output.
+2. **Curation survives.** A test set of human Decisions is 100% intact after a full rebuild and
+   after a delta run.
+3. **UC-native.** On Databricks it emits overlays and proposals keyed on UC object ids. Zero
+   elements redefine something UC defines. Open-standard exports validate (OWL 2 QL, SHACL,
+   SKOS).
+4. **One seam.** It runs standalone end to end, and Metis reads it through exactly one declared
+   interface.
+5. **Text path.** Strictly better than the recorded baseline on extraction F1, linking F1 and
+   documents per second.
+6. **No retrieval code remains.**
+7. **Resolution quality.** Auto-accept precision is at least 0.95 with its confidence stated,
+   on the warehouse side and on the text side. Review rate and expert minutes are reported.
 
 ## Notes
 
@@ -85,6 +91,7 @@ ontology layer** from two input modalities:
 
 - [ADR-0067 — Latence is re-scoped into a semantic-resolution and ontology engine, standalone and as a Metis sidecar](../../docs/adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md) — the direction above. Warehouse metadata is a new modality; the text path and Graph Completion stay.
 - [ADR-0068 — Query-time retrieval tooling is removed](../../docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) — retrieval, hyperedges and Context Enrichment go. Embedders stay as a resolution signal only.
+- [ADR-0069 — The semantic layer is a replay of an append-only ledger](../../docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md) and [Destination and domain model](issues/10-destination-and-domain-model.md) — two levels: Entities (the engine may accept merges in the calibrated band) and Concepts (classes, properties, measures; proposals a human approves). Assertions and Decisions are append-only and the layer is their replay. Bindings are keyed on UC ids, for Concepts and for Entity rows (the crosswalk). The engine never defines a table or metric; drafting new measures as proposals is in v1. Seven measurable Done checks.
 - [Inventory the carve-out](issues/07-carve-out-inventory.md) — no kept package imports a dropped one. Retrieval reaches core through about five import sites plus protocols, hyperedge contracts (`SCHEMA_VERSION` 21), 19 test files and 6 stacks. `graph_features` goes with retrieval; the embedders stay as a resolution signal.
 - [The landscape: who builds semantic and ontology layers](issues/06-landscape-and-positioning.md) — every rival traces answers, not semantic elements, and auto-drafting tools lose curation on rebuild. Positioning: a ledger of evidence and decisions that proposes into UC and exports open formats. Three demo claims: element-level trace and replay; curation that survives rebuilds; add-only proposals on UC.
 - [The state of the art in text extraction](issues/02-sota-text-extraction.md) — the glinker linker (73%) and per-chunk LLM induction are the bottlenecks, not extraction. GLiNER-Relex leads zero-shot relation extraction, and the GLiNER bi-encoder removes the label-count ceiling. Fabricated relations are fixed by requiring offset-grounded triples plus an entailment check. Bake-off shortlist: Relex + bi-encoder, then with an LLM checker, then a small-LLM extractor, with GLiNER 2.5 as the control.
