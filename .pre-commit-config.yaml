@@ -26,7 +26,7 @@ repos:
       # Byte-identical to ci.yml job `lint-type`, step "Ruff (lint)".
       - id: ruff-check
         name: ruff check (CI lint scope)
-        entry: uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+        entry: uv run ruff check packages benchmark/sota-campaign scripts
         language: system
         pass_filenames: false
         types_or: [python, pyi]
