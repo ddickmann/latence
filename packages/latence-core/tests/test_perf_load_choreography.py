@@ -163,12 +163,29 @@ def cores(monkeypatch: pytest.MonkeyPatch) -> Any:
     where in the sequence it lands. Pinning the count high holds the clamp inert so they assert
     exactly that; :func:`test_the_intra_op_cap_never_exceeds_the_host_core_count` pins it low and
     puts the clamp itself under test.
+
+    Pinning ``os.cpu_count`` alone is not enough: the DEFAULT cap is derived from
+    ``effective_cpu_count()``, which asks ``os.process_cpu_count`` and ``os.sched_getaffinity``
+    first (the affinity-aware answer). On a 4-vCPU runner those say 4 whatever ``cpu_count``
+    claims, so all three probes are pinned to the same count — and the real
+    ``effective_cpu_count`` still runs.
     """
 
     def _pin(n: int) -> None:
-        monkeypatch.setattr(os, "cpu_count", lambda: n)
+        _pin_core_probes(monkeypatch, n)
 
     return _pin
+
+
+def _pin_core_probes(monkeypatch: pytest.MonkeyPatch, n: int) -> None:
+    """Make every core-count probe ``effective_cpu_count`` consults answer ``n``.
+
+    ``raising=False`` because ``process_cpu_count`` is 3.13+ and ``sched_getaffinity`` is
+    Linux-only; setting the one a platform lacks just adds the attribute for this test.
+    """
+    monkeypatch.setattr(os, "cpu_count", lambda: n)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: n, raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(n)), raising=False)
 
 
 _MANY_CORES = 64  # the clamp is inert above the cap, so the cap alone is observable

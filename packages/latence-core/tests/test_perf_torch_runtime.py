@@ -275,8 +275,16 @@ _SKIPPED = DeviceDecision(device=None, skipped=True, reason="no CUDA device is a
 
 
 def _pin_cores(monkeypatch: pytest.MonkeyPatch, n: int) -> None:
-    """Pin the core count so ``threads=8`` is about the cap, not this machine (see choreography)."""
+    """Pin the core count so ``threads=8`` is about the cap, not this machine (see choreography).
+
+    Every probe ``effective_cpu_count`` consults is pinned, not just ``os.cpu_count``: the default
+    cap derives from the affinity-aware ``process_cpu_count`` / ``sched_getaffinity`` first, which
+    say 4 on a 4-vCPU runner whatever ``cpu_count`` claims. ``raising=False`` because neither probe
+    exists on every platform.
+    """
     monkeypatch.setattr(os, "cpu_count", lambda: n)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: n, raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(n)), raising=False)
 
 
 def test_st_load_runs_the_whole_sequence_in_order(
