@@ -40,7 +40,18 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
 
 - **Result files:** `results/estate_4k_with_baseline.json`, `results/historical_50k.json`, `results/estate_100k.json`, `results/estate_100k_acronym_cap.json`.
 - **The acronym cap** (commit `20c69f7`) is the version meant to scale. The REPORT shows both 100k results side by side.
-- **The 1M run has not finished.** Earlier attempts ran out of memory or disk on the Linux box. The fixes are in: DuckDB-side union, EM trained on a sample of at most 150k records, SQL passes, and the cap.
+- **The 1M run has not finished.** The latest attempt (2026-11-09, 4 CPUs, 15 GB RAM, code at
+  `20c69f7`) was killed for lack of memory: blocking ended after 74 s at 12.2 GB peak RSS, and
+  scoring then died. A count inside DuckDB shows why:
+  - 989,658 records give **29.5M candidate pairs** (about 30 per record), against 518k at 100k
+    records (about 5 per record). Union pair completeness is 0.898.
+  - Two passes produce almost all of them: `name_core` 15.9M and `first_tok+city` 14.5M.
+  - The pairs are pulled into pandas with string ids, which is what takes the memory.
+  - Part of the growth comes from the generator: it has about 1,400 name stems, so names collide
+    more as the estate grows. Real estates also have heavy name collisions, so this is worth
+    reporting, not hiding.
+  - The run needs the pod's RAM (64 GB or more). Keeping pairs in DuckDB or Arrow with integer
+    ids would cut the memory without changing the method.
 - **Part B (text)** has only a lexical baseline: top-1 accuracy 0.784, 0% on acronyms, and LTT abstained.
 
 ## Pod setup
