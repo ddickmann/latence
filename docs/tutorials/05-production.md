@@ -201,8 +201,9 @@ Four lines carry the story:
   carried forward unchanged. A ratio of 1.0 means the whole committed corpus was re-resolved. That
   is what a reconciliation does, and the first line then reads `(reconciled)` instead of
   `(incremental)`. On a corpus this small one document touches most of it.
-* **`entities: +0 created, 3 merged, 0 split`** — the new document mentioned Carol Nguyen and Acme,
-  and resolution merged those mentions into the existing nodes rather than creating duplicates.
+* **`entities: +0 created, 3 merged, 0 split`** — the new document mentioned Globex, Carol Nguyen
+  and Acme, and resolution merged those mentions into the existing nodes rather than creating
+  duplicates.
   Consistency with the base run comes from the corpus's **canonical type vocabulary**, which a delta
   *extends* rather than recomputes: a new type aliases into an existing canonical entry or appends a
   new one, and existing canonical types never churn.

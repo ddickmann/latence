@@ -453,7 +453,8 @@ records how many mentions and documents stand behind each node.
 
     That is the concrete reason production stacks run a learned zero-shot extractor
     (`fused_entity_relation.gliner2`) against a schema *induced per chunk*, rather than a term list
-    fixed up front. Tutorial 4 shows how a Provider like that plugs in behind this same seam.
+    fixed up front. Tutorial 4 shows how a Provider of your own plugs in behind a seam like
+    this one.
 
 ---
 
