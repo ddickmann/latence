@@ -84,3 +84,38 @@ places where the code and its own help text disagree. Each needs a fix or a deci
 - Items 8–11 are each reproduced, then fixed or recorded as intended.
 - Items 5 and 6 are closed by the docs-and-site rewrite or here.
 - Items 12–17 are each verified or reworded to what can be verified.
+
+## Progress (2026-11-10): the code leftovers
+
+Status stays `open`: items 5, 6 and 12–17 are documentation and are not done.
+
+- **2, done.** The reuse path is removed, not re-keyed: nothing current read a reused export.
+  `musique` and `hotpotqa` stay selectable; the stage has no pipeline for them and now lists
+  them as `not_processed`. **Left for the owner:** whether those two leave the dataset registry.
+  The committed August record of the stage no longer satisfies the stage's done-check for a
+  selection that includes them.
+- **3, done.** The `calibrate` command, its module, endpoints and page section are gone. The
+  gold-set, `stats` and `validate` parts are unchanged.
+- **4, done.** The help example names a capability that exists (`delta`); the diagram shows
+  the stages that exist.
+- **8, reproduced and fixed.** `latence run stacks/default.yaml` exited 0 after creating a
+  directory named `{STORAGE_URI}`. A Pipeline that still carries a `{UPPER_SNAKE}` placeholder
+  is now refused with a `ConfigError` before anything is written, by the local, Delta and
+  Airflow Runners; the CLI exits 2. Parsing a template is unchanged, so `stack validate`, the
+  tuner and the bake-offs still read the shipped files. **Known limits:** a missing source
+  folder still gives an empty run with exit 0; a legitimate config string of the form
+  `{UPPER_SNAKE}` would be refused (`{lower}`, `{{DOUBLED}}` and `\N{NAME}` are not).
+- **9, reproduced and fixed.** The manifest showed the chunk budget as redacted. A closed list
+  of five token-count keys is now shown, and only while the value is a number: `max_tokens`,
+  `min_tokens`, `overlap_tokens`, `max_new_tokens`, `microbatch_token_budget`. Every other key
+  containing `token` stays redacted. The last two keys go beyond what this ticket named.
+- **10, did not reproduce.** The dangling link was already gone. `RELEASE-GATES.md` is now
+  under the doc-truth link check, which fails on the page as it was before that fix.
+- **11, verified; wording corrected, behaviour unchanged.** The compose file, the chart's values
+  and install notes no longer say a run writes a knowledge graph, and the CronJob is no longer
+  called incremental (a second run with the same run id replays its checkpoints). The parsed
+  YAML of the changed files is identical before and after. **Not checked:** the Helm templates
+  were not rendered (no `helm` here).
+- **Gates on the final commit:** ruff, strict mypy on 30 packages and the full suite
+  (4,382 passed, 17 skipped) exit 0. `mkdocs build --strict` stops on the Mermaid URL check,
+  which needs a host this machine cannot reach. `scripts/verify-local.sh` was not run.
