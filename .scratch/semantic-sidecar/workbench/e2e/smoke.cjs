@@ -80,6 +80,8 @@ async function run(browser, base, name, viewport, colorScheme) {
   await page.waitForSelector('[data-testid="evidence"]');
   check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${tag} a pair does not scroll sideways`);
   await scan(page, `${name} pair`);
+  // Section headings keep their weight whatever reset the page around the workbench brings.
+  check(await page.locator("#rw-why").evaluate((h) => getComputedStyle(h).fontWeight === "600" && getComputedStyle(h).fontSize === "14px"), `${tag} section headings are 14px semibold`);
   await shot("2-pair");
   const first = page.url();
   await page.keyboard.press("a");
@@ -130,6 +132,9 @@ async function run(browser, base, name, viewport, colorScheme) {
   const firstA = page.locator('[data-testid="split-sheet"] [data-testid$="-A"]').first();
   await ((await firstB.getAttribute("aria-pressed")) === "true" ? firstA : firstB).click();
   check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${tag} the split dialog does not scroll sideways`);
+  // Let the confirm button finish its colour transition from disabled to enabled: scanned
+  // halfway, it reads as enabled with the disabled colours.
+  await page.waitForTimeout(250);
   await scan(page, `${name} split sheet`);
   await shot("3c-split");
   const splitting = await page.locator('[data-testid="split-sheet"] [data-testid="sheet-confirm"]');
