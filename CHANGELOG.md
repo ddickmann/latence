@@ -47,6 +47,14 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   `benchmark/official-data/` read a hyperedge export the current pipeline does not write. Their
   result files, question sets and export data stay as dated records, and each folder carries a
   note saying so.
+- **Seven more benchmark scripts that could no longer run, and the four test files of four of
+  them.** Under `benchmark/rfc/`: `run_benchmark.py` and `build_questions.py` imported
+  `latence_retrieval`, `sparse_terms.py` served only those two, and `make_report.py` rendered a
+  result file nothing writes any more. Under `benchmark/enterprise-gold/`: `run_eval.py`
+  imported `latence_retrieval`, and `run_pipeline.py` and `make_judgments.py` read a hyperedge
+  export the current pipeline does not write. The corpus, the gold set, the judgment and result
+  files and the pipeline configuration stay as dated records; each folder has a `README.md`
+  that says what was removed and what remains.
 
 ### Changed
 

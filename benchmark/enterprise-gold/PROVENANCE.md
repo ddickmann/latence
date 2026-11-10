@@ -2,6 +2,14 @@
 
 **Read this before citing any number produced against this set.**
 
+**These files are dated records.** Three scripts of this folder (`run_pipeline.py`,
+`make_judgments.py` and `run_eval.py`) were removed on 2026-11-10, together with the retrieval
+layer
+(`docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md`).
+None of them could run; `README.md` in this folder says why. The commands below that name them,
+and the `--hyperedges` and `--calibration` options of `latence-label validate`, are kept as the
+record of how the files were made in August 2026. They do not run on the current tree.
+
 ## What this is, plainly
 
 The corpus in `corpus/` and the gold set in `gold.jsonl` are **LLM-generated**. They were

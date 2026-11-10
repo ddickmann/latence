@@ -190,7 +190,9 @@ src = ["packages"]
 # red. Everything else in the repo (packages/, the campaign library, scripts/) IS in scope and
 # clean (ticket wayfinder-enterprise-serving/04). The scripts of benchmark/official,
 # benchmark/official-data and benchmark/musique-subset were removed with the retrieval layer on
-# 2026-11-10, so those folders hold no Python and are no longer listed.
+# 2026-11-10, so those folders hold no Python and are no longer listed. benchmark/rfc lost its
+# retrieval scripts the same day (benchmark/rfc/README.md); the corpus builder and the chart
+# script that remain there are the frozen scripts this entry still covers.
 exclude = [
     "benchmark/rfc",
     "scripts/_pod_probe_gliner.py",
