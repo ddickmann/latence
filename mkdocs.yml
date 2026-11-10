@@ -255,6 +255,7 @@ nav:
           - "0070 — Metis consumes the engine through one proposal file": adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md
           - "0071 — Warehouse metadata enters the Pipeline as Sources": adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md
           - "0072 — On Databricks the engine runs as jobs and keeps its state in Delta": adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md
+          - "0073 — The schema level is induced by voting signals and exported in W3C standards": adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md
       - Foundations & scope:
           - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
