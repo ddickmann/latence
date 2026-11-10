@@ -119,7 +119,8 @@ ontology layer** from two input modalities:
   - the resolution engine upgrade: matcher, calibration, constraints, scale;
   - ontology induction;
   - writers and UC write-back;
-  - the review surface;
+  - the review surface (a first clickable prototype exists: *Prototype: the expert resolution
+    workbench*, in `workbench/`; it waits for the owner's reaction);
   - the Databricks runner and its deployment;
   - the Metis integration;
   - the extraction Provider swap.

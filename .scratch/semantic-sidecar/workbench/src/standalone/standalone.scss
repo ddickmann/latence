@@ -1,0 +1,50 @@
+// The standalone app's page: Carbon's reset, its White and Gray 100 themes as CSS variables,
+// and the styles of the five Carbon components the workbench uses. A host that mounts the
+// workbench has all of this already and loads none of it from here.
+@use "@carbon/styles/scss/config" with ($css--font-face: false, $css--default-type: false);
+@use "@carbon/styles/scss/reset";
+@use "@carbon/styles/scss/themes";
+@use "@carbon/styles/scss/theme";
+@use "@carbon/styles/scss/components/button";
+@use "@carbon/styles/scss/components/checkbox";
+@use "@carbon/styles/scss/components/form";
+@use "@carbon/styles/scss/components/select";
+@use "@carbon/styles/scss/components/text-area";
+@use "@carbon/styles/scss/components/text-input";
+
+:root {
+  @include theme.theme(themes.$white);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    @include theme.theme(themes.$g100);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  @include theme.theme(themes.$g100);
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--cds-background);
+  color: var(--cds-text-primary);
+  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.sa-shell { display: flex; flex-direction: column; min-block-size: 100dvh; }
+.sa-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; block-size: 48px; flex: none;
+  padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right));
+  background: var(--cds-background-inverse); color: var(--cds-text-inverse);
+  font-size: 14px; line-height: 18px; letter-spacing: 0.16px;
+}
+.sa-name { font-weight: 600; white-space: nowrap; }
+.sa-crumbs { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; font-size: 12px; }
+.sa-theme {
+  font: inherit; font-size: 12px; color: inherit; background: none; border: 1px solid currentColor; padding: 4px 10px; cursor: pointer;
+  &:focus-visible { outline: 2px solid var(--cds-focus-inverse); outline-offset: 2px; }
+}
+.sa-shell .rw-root { --rw-offset: 48px; flex: 1; }
