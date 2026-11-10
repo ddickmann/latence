@@ -1,11 +1,5 @@
 # Deployment: on-prem, VPC, and air-gapped
 
-!!! warning "Written before the retrieval tooling was removed"
-    This page predates [ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
-    BM25 / sparse / multi-vector export signals and the Qdrant sink. The *Query time* row of the compute table, the measured serving latency and the *Serving the corpus — Qdrant* section describe components that no longer ship.
-    The page is kept until it is rewritten.
-
 Production deployment of the Latence pipeline. Everything here lives under `deploy/` and is
 **separate from the demo** (`demo/`, which is a CPU-only, offline, one-command showcase). This guide
 is grounded in what the pipeline actually needs: a **served vLLM OCR endpoint** (the SOTA scanned-
@@ -18,7 +12,6 @@ Contents:
 - [GPU requirements + the Blackwell note](#gpu-requirements--the-blackwell-note)
 - [Option A — Docker Compose (single box)](#option-a--docker-compose-single-box)
 - [Option B — Kubernetes / Helm (on-prem, VPC)](#option-b--kubernetes--helm-on-prem-vpc)
-- [Serving the corpus — Qdrant](#serving-the-corpus--qdrant)
 - [Orchestrators — the Airflow adapter](#orchestrators--the-airflow-adapter)
 - [Air-gapped deployment](#air-gapped-deployment)
 - [Observability + secrets](#observability--secrets)
@@ -27,20 +20,21 @@ Contents:
 
 ## What the pipeline depends on
 
-The pipeline itself (parse → chunk → screen → induce → extract → redact → disambiguate → graph →
-export) is a **CPU** process. Its SOTA quality comes from **served** models it calls over an
-OpenAI-compatible HTTP endpoint — the heavy models are **not** in the pipeline image:
+In these deploy artifacts the pipeline is a **CPU** process. The heavy models are **served**: the
+pipeline calls them over an OpenAI-compatible HTTP endpoint, and they are **not** in the pipeline
+image:
 
 * **vLLM OCR endpoint (required for the scanned-document path).** `parser.lighton_vllm` POSTs each
-  page-image to `{base_url}/v1/chat/completions` on a running vLLM server that serves
-  **LightOn-OCR-2** (`lightonai/LightOnOCR-2-1B`, Apache-2.0 weights **and** code). Pod-measured,
-  vLLM at concurrency is ~2.7× faster than optimised in-process transformers, which is why
-  production OCR is a warm server, not in-process (ADR-0030). The pipeline reaches it by
-  `base_url` — one config value.
+  page-image to the chat-completions route of a running vLLM server that serves
+  **LightOn-OCR-2** (`lightonai/LightOnOCR-2-1B`, Apache-2.0 weights **and** code). The pipeline
+  reaches it by `base_url`, the server's `/v1` root — one config value. Production OCR is a warm
+  server rather than an in-process model (ADR-0030); the pod measurement behind that choice
+  (vLLM at concurrency about 2.7× faster than optimised in-process transformers) is recorded in
+  [Serving LightOn-OCR with vLLM](serving-lighton-vllm.md).
 * **LLM endpoint (optional).** The endpoint LLM Providers (`relation.llm`, `entity.endpoint`, schema
   induction) call any OpenAI-compatible server — a local vLLM, OpenRouter, or an on-prem gateway —
   again by `base_url`. Off by default in the deploy artifacts.
-* **A text-layer corpus** needs **no** GPU at all: the in-core CPU parsers (`parser.pdfplumber` /
+* **A text-layer corpus** needs **no** GPU at all: the CPU parsers (`parser.pdfplumber` /
   `parser.document` / `parser.plaintext`) + the deterministic CPU spine run the whole pipeline with
   no served model. Use the served OCR path only for **scans / image-only pages**.
 
@@ -52,43 +46,52 @@ behind the vLLM server), so it is never skipped; it is *infra-gated* on the endp
 
 The pipeline image (`deploy/Dockerfile`) is therefore deliberately **torch-free**: it installs
 `latence-core` + the **light** endpoint Provider clients (each pulls only the `openai` client and,
-for OCR, a pure-Python rasteriser) + the observability extra. No CUDA stack lands in the pipeline
-image — that is the whole point of the served path.
+for OCR, the `pypdfium2` + `pillow` page rasteriser) + the observability extra. No CUDA stack lands
+in the pipeline image — that is the whole point of the served path.
 
 ## What runs where — the cloud-agnostic compute story
 
 Nothing in the framework names a cloud. Storage is one fsspec seam (`file://`, `s3://`, `gs://`,
-`abfs://` — same code, one config key), models are reached either in process or over an
-OpenAI-compatible `base_url`, and the serving store is a `RetrievalBackend` adapter. "Runs in
-your environment" therefore decomposes into exactly three compute shapes, and each stage of the
-pipeline belongs to one of them:
+`abfs://` — same code, one config key), and models are reached either in process or over an
+OpenAI-compatible `base_url`. "Runs in your environment" therefore decomposes into exactly three
+compute shapes, and each stage of the pipeline belongs to one of them:
 
 | Compute shape | Stages | Hardware |
 | --- | --- | --- |
-| **Deterministic CPU** — always local, no model | Source, intake/content screening, chunking, reference extraction, profiling, graph assembly + centrality, exports (Parquet/JSONL/TTL/GraphML, BM25 stats, hyperedge KV) | any CPU host |
-| **Learned, in-process** — GPU-accelerated, CPU-capable | GLiNER2 extraction + redaction, GLinker disambiguation, Granite embeddings, SPLADE | one GPU per worker, or CPU at lower throughput (measured envelopes: `PERF-RESULTS.md`) |
+| **Deterministic CPU** — always local, no model | Source, intake/content screening, chunking, reference extraction, profiling, type consolidation, exact-surface and cascade disambiguation, graph assembly, exports (the corpus as JSONL/Parquet; the graph as Parquet/TTL/GraphML) | any CPU host |
+| **Learned, in-process** — GPU-accelerated | GLiNER2 extraction + redaction and Granite embeddings (`compute="either"`: they also run on CPU, at lower throughput); GLinker disambiguation (`compute="gpu"`: skipped-with-flag on a CPU-only host) | one GPU per worker (measured envelopes: `PERF-RESULTS.md`) |
 | **Served over HTTP** — the endpoint seam | OCR (vLLM), optional LLM induction/relation extraction | wherever you host the endpoint; the pipeline host stays CPU |
-| **Query time** — after the pipeline | dense first stage (your ANN engine, e.g. Qdrant), exact BM25 rescoring, graph traversal + hypergraph lanes, selectors | CPU; zero LLM calls online |
 
-The end-to-end scale point, measured (the e2e campaign's S3 stage, one 24 GB-class CUDA pod,
-`benchmark/sota-campaign/stages/s3-pipeline/metrics.json`): **60,766 documents → 297,548
-chunks / 3.4M entity mentions / 900,583 hyperedges / 731,266 PII findings**, with per-dataset
-wall times from 0.19 h (609 news articles) to 1.29 h (1,261 OCR'd documents, LLM induction on).
-The only LLM spend in that run was optional per-chunk schema induction on three of five
-datasets — 247,944 calls, **$29.26 measured** ($0.000118/call); the text-native datasets ran
-hand-authored schemas at zero LLM cost. Query-time serving needs no GPU at all: the measured
-serving path (single-node Qdrant + the full graph-rescue composition) answers at 42–83 ms median
-per query on CPU.
+Embeddings are a resolution signal ([Embedders](embedders.md)): `disambiguation.embedding` and
+the opt-in merge rungs of `disambiguation.glinker` and `type_consolidation.cascade` use an
+Embedder, and a corpus export attaches a vector per row only when its `embedder` block is set.
+Query-time retrieval is not part of the framework
+([ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)):
+the exports are files, and serving them is the job of whatever engine you load them into.
 
-Incremental churn is also measured rather than promised: an add of 61 documents into a 609-doc
-corpus cost 8.4 min against 97.4 min for the full rebuild (11.6×), with the incremental export
-**byte-identical** to the rebuild — see [Incremental ingest](guides/incremental-ingest.md).
+**A dated scale record.** The benchmark campaign's pipeline stage ran on a CUDA pod in August 2026
+(`benchmark/sota-campaign/stages/s3-pipeline/metrics.json`, completed 2026-08-06, one dataset
+re-run 2026-08-09): 60,766 documents → 297,548 chunks / 3.4M entity mentions / 731,266 PII
+findings. The four datasets that record a wall time took between 0.19 h (609 news articles) and
+1.29 h (1,261 OCR'd documents, LLM induction on). The only LLM spend was optional per-chunk
+schema induction on three of five datasets: 247,944 calls at a measured $0.000118 per call, about
+$29.26; the text-native datasets ran hand-authored schemas at zero LLM cost. That pipeline
+included Context Enrichment, hyperedges, graph features and a BM25 export, all since removed, so
+the wall times include work the current pipeline no longer does. Nothing has been re-measured
+since the removal.
+
+Incremental churn was measured on 2026-08-13 with the same earlier pipeline, on CPU: adding 61
+documents to a 548-document base cost 8.4 min against 97.4 min for the full rebuild of the final
+corpus (11.6×), and the incremental export was **byte-identical** to the rebuild. The record is
+[the ticket-03 report](evidence/enterprise-serving-03-incremental-ingest.md); the mechanism, and
+the test that holds the equivalence today, are in
+[Incremental ingest](guides/incremental-ingest.md).
 
 ## GPU requirements + the Blackwell note
 
-The **vLLM OCR server** needs a GPU. LightOn-OCR-2-1B is a compact 1B vision-language model; a
-single modern data-center GPU (Hopper H100 / Ada L40S / Ampere A100, CUDA ≥ 12.6) serves it
-comfortably. The production serve recipe (LightOn's official, cudagraphs ON):
+The **vLLM OCR server** needs a GPU. LightOn-OCR-2-1B is a 1B vision-language model, and the
+compose file and the Helm chart request one GPU for it. Their defaults are the serve recipe for
+mainstream cards (Hopper / Ada / Ampere), with cudagraphs ON:
 
 ```bash
 vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0.90 \
@@ -114,8 +117,9 @@ Mainstream GPUs (Hopper / Ada / Ampere) need none of this.
 
 In the compose file this is one uncommented `environment:` line; in the Helm chart it is one
 `vllmOcr.extraEnv` entry (below). On a CUDA-13 / Blackwell host prefer the pinned serving
-environment `deploy/env/served-ocr-server/` outright — its `serve.sh` exports the variable for you,
-alongside the `--gpu-memory-utilization 0.72` / `--max-num-seqs 16` the live 519-page run needed.
+environment `deploy/env/served-ocr-server/` outright. Its `serve.sh` sets the variable itself when
+the GPU reports compute capability 12.0 or higher, or when the capability cannot be read, and it
+defaults to the `--gpu-memory-utilization 0.72` / `--max-num-seqs 16` the live 519-page run needed.
 
 An **optional LLM server** (if you enable it) has its own GPU need sized to the model you pick
 (default `Qwen/Qwen2.5-7B-Instruct` → one ~24 GB GPU at bf16).
@@ -133,20 +137,23 @@ docker compose up --build
 
 * `vllm-ocr` serves LightOn-OCR-2 on a GPU (needs the NVIDIA Container Toolkit). Its HF cache is
   persisted to `./hf-cache` so a restart does not re-download.
-* `pipeline` runs `deploy/stacks/served-ocr.yaml` over `./corpus`, writing the RAG corpus, the KG
-  (Parquet/TTL/GraphML), and the Quality Report to `./out`.
+* `pipeline` runs `deploy/stacks/served-ocr.yaml` over `./corpus` and writes under `./out`: the
+  chunked corpus (`corpus.jsonl` and `corpus.parquet`) and the Quality Report. The shipped stack
+  ends at the corpus export. It has no extraction, redaction or graph Stage, so it writes no
+  knowledge graph; add those Stages to the stack file to get one.
 * The optional LLM server: `docker compose --profile llm up --build`, then point the relevant stages
   at `http://vllm-llm:8000/v1` (see the comments in `deploy/stacks/served-ocr.yaml`).
 
 Requires a GPU host with the NVIDIA Container Toolkit for `vllm-ocr`. A **text-only** corpus needs no
-GPU: swap the Parse stage for `parser.pdfplumber` and you can drop the `vllm-ocr` service entirely.
+GPU: swap the Parse stage for `parser.pdfplumber`, remove the `pipeline` service's `depends_on`
+entry, and you can drop the `vllm-ocr` service entirely.
 
 ## Option B — Kubernetes / Helm (on-prem, VPC)
 
 The chart (`deploy/helm/latence/`) deploys: a pipeline **Job** (one-shot) or **CronJob**
-(recurring incremental runs), the vLLM OCR **Deployment + Service** (GPU-scheduled), an optional LLM
-Deployment, a **ConfigMap** holding the rendered stack YAML, a **referenced Secret** for endpoint
-keys, and **PVCs** for the corpus/output and the HF model cache.
+(the same command on a schedule), the vLLM OCR **Deployment + Service** (GPU-scheduled), an
+optional LLM Deployment, a **ConfigMap** holding the rendered stack YAML, a **referenced Secret**
+for endpoint keys, and **PVCs** for the corpus/output and the HF model cache.
 
 ```bash
 # Render + inspect first (no cluster needed):
@@ -156,7 +163,7 @@ helm template rel deploy/helm/latence
 helm install latence deploy/helm/latence -n latence --create-namespace \
   -f my-values.yaml
 
-# Recurring incremental runs instead:
+# The same run on a schedule instead (read the run-id note below first):
 helm install latence deploy/helm/latence -n latence --create-namespace \
   --set pipeline.kind=cronjob --set pipeline.schedule="0 2 * * *"
 ```
@@ -165,7 +172,8 @@ Key values (full list in `deploy/helm/latence/values.yaml`):
 
 | Value | Default | Purpose |
 | --- | --- | --- |
-| `pipeline.kind` | `job` | `job` (one-shot) or `cronjob` (scheduled incremental re-runs). |
+| `pipeline.kind` | `job` | `job` (one-shot) or `cronjob` (the same `latence run` on a schedule). |
+| `pipeline.runId` | `run-0001` | The `--run-id` every Job or CronJob run passes. |
 | `pipeline.schedule` | `0 2 * * *` | CronJob cron; `concurrencyPolicy: Forbid` keeps WIP=1 (no overlapping runs). |
 | `stack.yaml` | served-OCR stack | The pipeline, rendered into a ConfigMap. Parse `base_url` is force-set to the in-cluster OCR Service. |
 | `stack.ocrBaseUrl` | "" (in-cluster) | Override to target an **external** OCR endpoint (then `vllmOcr.enabled=false`). |
@@ -184,19 +192,18 @@ The pipeline pod runs as the image's **non-root** uid `10001` (`podSecurityConte
 makes the PVCs writable by it). Stage your corpus into the data PVC at `/data/corpus` (e.g. an
 init step, an NFS export, or an `existingClaim` pre-populated out of band).
 
+**The run id is fixed, so a scheduled run is a resume.** Both the Job and the CronJob run
+`latence run /etc/latence/stack.yaml --run-id <pipeline.runId>`. The Runner treats a reused run id
+as a resume: a Stage whose checkpoint already exists on the data PVC is not run again. A CronJob
+run after the first therefore replays the finished run and does **not** pick up documents added
+since. The chart has no template that runs `latence delta`. To ingest new documents on a schedule,
+run `latence delta` against the same stack and storage from your own CronJob or orchestrator
+([Incremental ingest](guides/incremental-ingest.md)), or give each run a fresh `pipeline.runId`
+and accept a full re-run.
+
 **GPU scheduling.** The OCR/LLM Deployments carry a `nodeSelector` + `tolerations` for GPU nodes and
 request `nvidia.com/gpu`. The defaults match the common `nvidia.com/gpu.present` label and the
 `nvidia.com/gpu` taint the NVIDIA GPU Operator applies — change them to your cluster's convention.
-
-## Serving the corpus — Qdrant
-
-The pipeline's Exports are files; serving them behind a real ANN engine is one loader command
-against a pinned single-node compose (`deploy/qdrant/docker-compose.yml`), and the served path's
-recall parity with brute force is **measured on full query sets**, not assumed. The verified
-settings (`--distance dot` at load, `search_params: {hnsw_ef: 512}` at query) and the parity
-tables were published in the serving guide removed with the tooling; the loader's idempotency,
-GDPR reconciliation and multi-tenancy contract are in
-[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence/blob/main/packages/latence-sink-qdrant/README.md).
 
 ## Orchestrators — the Airflow adapter
 
@@ -230,9 +237,10 @@ in an air-gapped VPC you **pre-cache** it.
 
 2. **Turn off phone-home.** For the pipeline image and any in-process learned Provider, the runtime
    already sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` with `HF_HOME=/data/hf-cache`. For
-   the vLLM servers, set `HF_HUB_OFFLINE=1` (add it to `vllmOcr`/`vllmLlm` env, or the compose
-   service env) so vLLM loads only from the pre-cached snapshot and never resolves online. Leave
-   `HF_TOKEN` **unset** in air-gapped mode.
+   the vLLM servers, set `HF_HUB_OFFLINE=1` (add it to `vllmOcr.extraEnv`, or to the compose
+   service's `environment:`) so vLLM loads only from the pre-cached snapshot and never resolves
+   online. The chart's optional LLM Deployment has no `extraEnv` value; set the variable in its
+   template if you enable it. Leave `HF_TOKEN` **unset** in air-gapped mode.
 
 3. **Mirror the container images.** Pull `vllm/vllm-openai:<pinned>` and your built `latence:prod`
    into your internal registry and set `image.repository` / `vllmOcr.image.repository` accordingly
@@ -259,8 +267,8 @@ local. Nothing leaves the VPC.
 
 Everything above is the **served** path: the heavy models live behind an HTTP endpoint and the
 pipeline image carries no `torch`. When you instead need the learned Providers **in process**
-(GLiNER2 extraction, learned PII redaction, GLinker disambiguation, Granite r2 embeddings, SPLADE
-sparse), the environment itself becomes the hard part — `torch` churn ABI-breaks prebuilt wheels,
+(GLiNER2 extraction, learned PII redaction, GLinker disambiguation, Granite r2 embeddings), the
+environment itself becomes the hard part — `torch` churn ABI-breaks prebuilt wheels,
 the GLiNER family and the OCR model disagree on the `transformers` major, and PEP 668 blocks naive
 installs.
 
