@@ -14,7 +14,7 @@ framework? Start with [Getting Started](../getting-started/index.md) and
 
 - :material-file-refresh: **[Incremental ingest](incremental-ingest.md)**
   Document churn without a full rebuild: `latence delta` / `retract` / `purge`, O(changed)
-  extraction, exact corpus-level recompute — equivalence to a full rebuild proven on real data.
+  extraction, exact corpus-level recompute — equivalence to a full rebuild held by a test.
 
 - :material-tune: **[Tune a stack per device](../tuning.md)**
   Auto-tune batch sizes and device knobs per host with `latence tune`.
@@ -23,8 +23,8 @@ framework? Start with [Getting Started](../getting-started/index.md) and
   Compare Providers on a Capability — quality, throughput, license, and cost in one table.
 
 - :material-flag-checkered: **[The e2e campaign wizard](benchmark-campaign.md)**
-  `latence-campaign`: gated, resumable benchmark stages from corpus acquisition through the
-  full pipeline to measured retrieval — byte-identical configs, license lanes enforced.
+  `latence-campaign`: gated, resumable benchmark stages from corpus acquisition through OCR
+  to the full pipeline — byte-identical configs, license lanes enforced.
 
 </div>
 
