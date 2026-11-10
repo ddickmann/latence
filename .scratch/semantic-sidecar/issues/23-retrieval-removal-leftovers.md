@@ -119,3 +119,83 @@ Status stays `open`: items 5, 6 and 12–17 are documentation and are not done.
 - **Gates on the final commit:** ruff, strict mypy on 30 packages and the full suite
   (4,382 passed, 17 skipped) exit 0. `mkdocs build --strict` stops on the Mermaid URL check,
   which needs a host this machine cannot reach. `scripts/verify-local.sh` was not run.
+
+## Progress (2026-11-10, documentation)
+
+Status stays `open`; the owner closes it. Items 5, 6 and 12–17 are worked through below. The
+owner's question left under item 2 is answered first.
+
+- **2, the registry question, decided and done.** `musique` and `hotpotqa` left
+  `KNOWN_DATASETS`. A test, red before the change, requires every registry name to have a
+  `CORPUS_PLAN` entry and a place in `PROCESS_ORDER`. Removed with them: the `local-reference`
+  kind and its fetcher, the `attribution` lane, and the `not_processed` bookkeeping. The
+  manifest keeps `publishable`; it is `False` for every remaining lane. Eight scripts under
+  `benchmark/official/`, `benchmark/official-data/` and `benchmark/musique-subset/` could not
+  run and are deleted; their result files, question sets and export data stay, and each folder
+  has a note. The three `official-data` scripts imported nothing removed; they read a hyperedge
+  export no pipeline writes, and each fails with `FileNotFoundError` on a clean clone. Their
+  rubric text is copied into `PROVENANCE.md`.
+- **5, done.** `ROADMAP.md` is rewritten. Each "built" line was checked against the registered
+  Providers, the CLI and the modules it names. "Next" restates ADR-0067 and ADR-0069 to
+  ADR-0073 as intentions. A new test fails on the earlier page: a paragraph that names a
+  removed capability must say it is gone. The page is in the link roster.
+- **6, done.** Both anatomy chapters are rewritten where they described removed features, the
+  warning blocks are gone, and the new test covers both. Every `file:line` reference was
+  re-read: 31 of 72 corrected in chapter 2; in chapter 3, 7 of 17 corrected and one removed
+  with its passage.
+  `test_setup_wizard_knobs.py` passes on the old and the new chapter 3.
+- **12, `docs/deployment.md`.**
+  - (a) The compose and Helm commands were checked by reading `deploy/docker-compose.yml`,
+    `values.yaml` and the templates: the `llm` profile, `pipeline.kind`, `pipeline.schedule`
+    and every key of the values table exist as written. **Not executed:** no `helm` and no
+    docker daemon here.
+  - (b) The "~24 GB" sizing had no source. The page now gives the defaults the compose file and
+    the chart set, and the weight size that follows from the 7,615,616,512 parameters the
+    model's public card lists.
+  - (c) `huggingface_hub` 2.4.0 installs `hf` and no `huggingface-cli`. The step uses `hf`.
+  - (d) The 2.7× figure has no measurement record. The serving guide states it without one, and
+    `PERF-RESULTS.md` lists the comparison as pending. Reworded here and in tutorial 5. **Still
+    stated without a record** in `docs/serving-lighton-vllm.md`,
+    `docs/TUTORIAL-fresh-pod-walkthrough.md` and the `latence-parser-lighton-vllm` package
+    (README, `pyproject.toml`, two docstrings).
+  - (e) The `airflow-dag` job exists in `ci-heavy.yml` and fails unless both real `build_dag`
+    tests pass. The paragraph now names the tests and says that none starts a scheduler.
+- **13, `docs/tutorials/05-production.md` §6.** Checked against `placement.py`, `tune/` and
+  `cli.py`. Four sentences reworded. Pinned by `test_placement.py`
+  (`test_no_cuda_device_is_a_failure_not_a_skip`,
+  `test_weights_resident_on_cuda_are_not_mistaken_for_gpu_work`,
+  `test_a_model_loading_provider_absent_from_learned_providers_is_still_probed`),
+  `test_tune.py` (`test_picks_the_fastest_correct_setting`,
+  `test_rejects_inference_time_compile_crash_named_compile_failure`,
+  `test_rejects_a_knob_that_changes_output`,
+  `test_implausible_speedup_guard_flags_a_leaked_cold_baseline`,
+  `test_overlay_NOT_applied_on_fingerprint_mismatch_falls_back_to_defaults`) and `test_cli.py`
+  (`test_cli_run_tuned_*`). **Not covered by any test:** the real probe behind `latence tune`
+  and the CLI wrappers of `tune` and `env placement`.
+- **14, `docs/tutorials/04-bringing-your-own-provider.md` §8.** The four helper descriptions
+  match `providers/adapter.py`, `test_adapter_base.py` and `test_e2e_adapter_base.py`. None was
+  wrong; each now states the defaults and error cases the source has.
+- **15, `docs/anatomy/index.md`.** Licences and dates match the profiles. The rationale column
+  now holds what each profile declares and what the campaign record says. The corpus rows
+  follow `CORPUS_PLAN` and the stage code. The Gemma sentence follows
+  `THIRD-PARTY-LICENSES.md`: no Provider here is backed by Gemma.
+- **16, `docs/BENCHMARKS-E2E.md`.** No ADR, evidence page or research note cites a source for
+  the Hits@1 range. The number and the error rate derived from it are removed.
+- **17, `docs/guides/benchmark-campaign.md`.** Checked against `stages.py`, `cli.py`, the three
+  stage modules, the pod worker and the campaign tests. Three statements changed; the rest
+  hold. No stage was run against a pod.
+
+**Found on the way, not fixed.**
+
+- Removed config keys are accepted in silence. `graph.canonical`, `export.jsonl_parquet` and
+  `export.knowledge_graph` ignore `hyperedges`, `context_columns` and `hyperedge_kv`.
+  `latence stack check` reports only `graph_features` and `bm25`.
+- `latence tune` maps `ner.endpoint` to the endpoint knob family. The registered name is
+  `entity.endpoint`, so that Provider is never swept.
+- `benchmark/enterprise-gold/run_eval.py` and `benchmark/rfc/run_benchmark.py` import
+  `latence_retrieval` and cannot run. They are outside the three folders this pass covered.
+- `latence-campaign run <stage> --fresh` does not redo a stage whose artifacts are intact.
+- The campaign wizard's budget prompt says the run blocks at the cap. The stage converts the
+  cap into a call budget; calls past it fail open.
+- `benchmark/corpus/test_manifest.py` has two failing tests. The file is outside
+  `pytest packages` and was not touched.
