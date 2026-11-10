@@ -65,5 +65,5 @@ its layer job's verified keys and joins, the review of its own library, and cert
 **The UC rule.** Everything Metis consumes is keyed on UC object ids. A change UC should own
 goes upstream as a proposal a human applies; Metis sees it only once it is in UC.
 
-This satisfies Done check 4 (exactly one declared interface to Metis). The ADR is written once
-the retrieval removal is merged, because both touch the Decision Log counts.
+This satisfies Done check 4 (exactly one declared interface to Metis). Recorded as
+[ADR-0070](../../../docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md).
