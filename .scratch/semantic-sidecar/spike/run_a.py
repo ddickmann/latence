@@ -400,6 +400,7 @@ def run(
     export_groups: int = 150,
     export_graph: Path | None = None,
     export_graph_entities: int = 400,
+    dump: Path | None = None,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes)."""
@@ -547,6 +548,21 @@ def run(
             export_graph.parent.mkdir(parents=True, exist_ok=True)
             export_graph.write_text(json.dumps(graph, indent=1, default=str))
 
+    if dump is not None:
+        # Everything a second implementation has to reproduce: each pair's probability and
+        # band, and both cluster assignments. Compared by equivalence.py.
+        dump.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            dump,
+            l=cand.l.to_numpy().astype(str), r=cand.r.to_numpy().astype(str),
+            p_raw=p_raw, p=p, band=band.astype(str), veto=veto,
+            ids=np.array(ids, dtype=str),
+            machine=np.array([pred_machine[i] for i in ids], dtype=str),
+            expert=np.array([pred_expert[i] for i in ids], dtype=str),
+            accept_at=np.array([np.nan if bands.accept_at is None else bands.accept_at]),
+            reject_below=np.array([np.nan if bands.reject_below is None else bands.reject_below]),
+        )
+
     result: dict[str, Any] = {
         "dataset": dataset,
         "path": str(path),
@@ -608,6 +624,7 @@ def main() -> None:
     ap.add_argument("--n-ltt2", type=int, default=1500)
     ap.add_argument("--export-review", type=Path, default=None, help="write the review-band items for the workbench")
     ap.add_argument("--export-groups", type=int, default=150, help="review groups to export, highest priority first")
+    ap.add_argument("--dump", type=Path, default=None, help="write every pair's probability and band and both cluster assignments (.npz), for equivalence.py")
     ap.add_argument("--export-graph", type=Path, default=None, help="write the resolved graph for the workbench (needs --export-review)")
     ap.add_argument("--export-graph-entities", type=int, default=400, help="organisations to carry in full in the graph export")
     a = ap.parse_args()
@@ -615,7 +632,7 @@ def main() -> None:
         a.dataset, a.path, a.n_cal, a.n_ltt, a.seed, a.baseline_max, a.reject_target,
         rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
         export_review=a.export_review, export_groups=a.export_groups,
-        export_graph=a.export_graph, export_graph_entities=a.export_graph_entities,
+        export_graph=a.export_graph, export_graph_entities=a.export_graph_entities, dump=a.dump,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))
