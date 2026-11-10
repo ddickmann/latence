@@ -70,13 +70,14 @@ is not comparable to anything.
 
 ## 2. Link prediction
 
-**The honest ceiling, stated before the number:** on automatically-extracted open-schema KGs, SOTA
-Hits@1 is **0.26–0.31**. Unfiltered top-1 densification means roughly 7 in 10 added edges are wrong —
-and a false edge does not merely fail to help, it **manufactures a spurious path** between
-entities the corpus never connected. `graph_completion.ultra` therefore emits an inferred edge
-only above a precision-targeted threshold (`target_precision`, default 0.9), calibrated on a
-held-out split of **our own** graph's edges, never on FB15k-237. Inferred edges are marked as
-such and counted separately in the Quality Report.
+**What the scorer does, stated before any number:** a predicted edge that is false does not
+merely fail to help, it **adds a path** between entities the corpus never connected. So
+`graph_completion.ultra` does not emit its top-ranked predictions as they come. It emits an
+inferred edge only above a precision-targeted threshold (`target_precision`, default 0.9),
+calibrated on a held-out split of the run's **own** graph edges, not on a public benchmark
+graph. When no threshold reaches the target, it emits nothing. Inferred edges are marked as such
+and counted separately in the Quality Report. How precise the admitted edges are on a real graph
+is what the table below is for, and it is not measured yet.
 
 | Metric | Value |
 |---|---:|
