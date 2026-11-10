@@ -382,9 +382,10 @@ Concretely:
 
 * **The OCR endpoint** — `parser.lighton_vllm` rasterises each page and POSTs the image to a running
   vLLM server serving `lightonai/LightOnOCR-2-1B` (Apache-2.0 weights *and* code). The pipeline
-  reaches it by `base_url`: one config value. Production OCR is a warm server because, measured
-  on a pod, vLLM at concurrency was about 2.7× faster than optimised in-process transformers
-  ([Serving LightOn-OCR with vLLM](../serving-lighton-vllm.md)).
+  reaches it by `base_url`: one config value. Production OCR is a warm server rather than an
+  in-process model (ADR-0030); the serve recipe is in
+  [Serving LightOn-OCR with vLLM](../serving-lighton-vllm.md). The two paths have not been
+  measured against each other on one machine: `PERF-RESULTS.md` lists that comparison as pending.
 * **The schema-induction LLM** — any OpenAI-compatible server: a local vLLM, an on-prem gateway,
   OpenRouter. Also just a `base_url`.
 * **A text-layer corpus needs no GPU at all.** The CPU parsers plus the deterministic spine run the
@@ -425,10 +426,17 @@ to measure the allocator:
 uv run latence env placement deploy/env/gpu-learned/environment.yaml
 ```
 
-This drives one real inference through every model-loading Provider the environment's stack
-instantiates and reads torch's CUDA allocator around the call. A Provider that allocated zero CUDA
-bytes fails, however correct its output. A missing CUDA device is a **failure, never a skip** — this
-command is meaningful only inside an installed GPU environment, and it refuses to pretend otherwise.
+For every model-loading Provider the environment's stack instantiates, this drives one warm-up
+inference, then a second one, and reads torch's CUDA allocator around the second. The Provider
+passes if that inference allocated at least one byte of CUDA memory above what was already
+resident. Weights parked on the GPU are resident, so they do not count; a forward pass that ran on
+the CPU allocates nothing above them and fails, however correct its output. The set of Providers
+is derived from the packages the environment installs and then joined with its declared
+`learned_providers`, so leaving a Provider out of that list does not exempt it.
+
+A missing CUDA device is a **failure, never a skip**, and so is a Provider that cannot be built
+or raises while driven. The command exits 1 on any finding. It is meaningful only inside an
+installed GPU environment.
 
 ### Tune the device you actually have
 
@@ -436,15 +444,27 @@ command is meaningful only inside an installed GPU environment, and it refuses t
 uv run latence tune stacks/gpu-sota.yaml --sample 8 --repeats 3
 ```
 
-For each heavy Provider in the stack, `tune` sweeps `dtype` / `quantize` / `compile` / `batch_size`
-/ `ocr_batch_size` / `max_concurrency` over a small real sample under a **hard correctness gate**:
-any setting that crashes — including an inference-time `BackendCompilerFailed`, which only shows up
-at inference and not at compile — or that changes output versus the fp32 baseline is **rejected**.
-It picks the fastest eligible setting per Provider and writes a device-fingerprinted
-`tuned/<device>.yaml` plus a report listing winners **and rejected knobs**.
+`tune` knows a fixed list of heavy Providers and, for each one the stack names, sweeps the
+knobs that apply to it: `dtype`, `compile` and `batch_size` for the GLiNER encoders and the
+sentence-transformers Embedder, `quantize` as well for the two GLiNER2 Providers, `dtype`,
+`compile` and `ocr_batch_size` for the OCR parsers, and `max_concurrency` alone for the endpoint
+Providers. A Provider outside that list is not swept, and an Embedder that appears only nested
+inside another Stage's config is recorded as not tunable through that stack. The sample is the
+corpus bundled for stack validation, not your documents.
 
-Every throughput in that report is the median of seeded timed runs on that device. Nothing is
-extrapolated.
+The sweep runs under a **hard correctness gate**. The baseline (fp32, no compile, batch 1) is
+probed first. Any other setting that crashes — including an inference-time
+`BackendCompilerFailed`, which only shows up at inference and not at compile — or whose
+checkpoint bytes differ from the baseline's is **rejected**. `tune` picks the fastest eligible
+setting per Provider, writes a device-fingerprinted `tuned/<device>.yaml`, and prints a report
+listing winners **and rejected knobs**. The file lands in a `tuned/` directory two levels above
+the stack file, which for `stacks/gpu-sota.yaml` is the repository root; `--out` names another
+place.
+
+Each throughput in that report is the sample size divided by the median duration of the timed
+runs (`--repeats`), taken after an untimed warm-up. Nothing is extrapolated. A winner more than
+100 times faster than its baseline is treated as a measurement fault: the baseline is timed
+again, and the speedup is marked suspect if the ratio holds.
 
 ```bash
 uv run latence run gpu.stack.yaml --tuned tuned/<device>.yaml
@@ -452,9 +472,11 @@ uv run latence run gpu.stack.yaml --tuned tuned/<device>.yaml
 
 Pass your own stack here, not one of the files under `stacks/`: those carry `{STORAGE_URI}` and
 `{CORPUS_DIR}` placeholders that only the `stack validate`, `tune` and `bake-off` harnesses fill
-in. The overlay applies **only** when the tuned config's `device_fingerprint` matches the host. A
-mismatch warns and falls back to stack defaults — a tuning measured on one card is never silently
-applied to another.
+in. The overlay applies **only** when the tuned config's `device_fingerprint` matches the host. On
+a match, each winning knob is merged into the config of the Stage that names that Provider, or
+into a nested `embedder` block that does. A mismatch prints a warning and runs the stack as
+written — a tuning measured on one card is never silently applied to another. A `--tuned` path
+that does not exist exits 2.
 
 ---
 
