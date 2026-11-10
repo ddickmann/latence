@@ -51,7 +51,7 @@ and `approve` is an explicit operator sign-off, never automatic:
 | --- | --- | --- |
 | `s1-corpus` | Acquires the selected public datasets under their **machine-enforced license lanes** (a research-only corpus requires `--accept-non-commercial`; an unverifiable one is refused unconditionally) | `stages/s1-corpus/metrics.json` + the corpus manifest, with per-dataset counts |
 | `s2-ocr` | OCRs the PDF corpora (`ohr_bench`, `vidoseek`, `uda`) into markdown with served LightOn-OCR-2, page boundaries carried in a `.pagemap.json` sidecar beside each document; the text-native datasets are recorded as skipped | `stages/s2-ocr/metrics.json` + a spot-check directory of sampled pages |
-| `s3-pipeline` | Generates one pipeline YAML per dataset from the `s3:` block and runs it on the pod: chunking, optional per-chunk label induction, fused entity and relation extraction, redaction, profiling, type consolidation, disambiguation, graph assembly, the knowledge-graph export and the corpus export with embeddings | `stages/s3-pipeline/metrics.json`, folded from each dataset's Quality Report |
+| `s3-pipeline` | Generates one pipeline YAML per dataset from the `s3:` block and runs it on the pod: intake screening, parsing, chunking, content screening, optional label induction (per chunk by default), fused entity and relation extraction, redaction, profiling, type consolidation, disambiguation, graph assembly, the knowledge-graph export and the corpus export with embeddings | `stages/s3-pipeline/metrics.json`, folded from each dataset's Quality Report |
 
 The registry holds five datasets: `wiki2multihop`, `multihop_rag`, `ohr_bench`, `vidoseek`
 and `uda`. Each has an acquisition plan in `s1-corpus` and a pipeline in `s3-pipeline`.
@@ -85,6 +85,9 @@ that opens the next gate.
 
 A blocked stage records its reason in `STATE.json`, and `status` renders it. Blocked is
 terminal: fix the cause, then re-run that stage with `latence-campaign run <stage> --fresh`.
+`--fresh` resets the recorded status and nothing else. The done-probe is still consulted first,
+so a stage whose artifacts are intact is marked done again without running; remove the artifacts
+to force the work to be redone.
 
 Inside a stage, the work itself is resumable. The OCR worker skips every document it has
 already written. Each pipeline run uses a fixed run id (`s3-<dataset>-v1`), and re-invoking
@@ -106,7 +109,9 @@ export. Three consequences:
   Both have since left the registry. The done-probes of `s1-corpus` and `s3-pipeline` compare
   the recorded dataset names with the current selection, so the committed records do not
   satisfy them for any selection the wizard now accepts.
-* The five files under `s3-pipeline/pipelines/` are the configurations that run used. They
-  name an `enrich` Stage and config keys the current code rejects, so `latence stack check`
-  fails on them. Running `s3-pipeline` again (`--fresh`) regenerates them in the current
-  shape.
+* The five files under `s3-pipeline/pipelines/` are the configurations that run used. Each
+  declares an `enrich` Stage whose Capability no longer exists, so the file does not load and
+  `latence stack check` fails on it. They also carry removed config keys. With the `enrich`
+  Stage taken out, `stack check` reports two of them as errors (`graph_features`, `bm25`);
+  the Providers ignore the others (`hyperedges`, `hyperedge_kv`, `context_columns`) without a
+  message. When `s3-pipeline` runs again it writes the five files in the current shape.
