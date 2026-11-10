@@ -27,7 +27,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The pages held to the rule. A page joins this list when it has been rewritten against the
 #: tree, in the same change, so the entry is red before the rewrite and green after it.
-_PAGES = ("ROADMAP.md",)
+_PAGES = (
+    "ROADMAP.md",
+    "docs/anatomy/02-extraction-and-privacy.md",
+)
 
 #: What a paragraph must say when it names a removed capability.
 _SAYS_GONE = re.compile(r"\bremoved\b|no longer|earlier pipeline|ADR-0068", re.IGNORECASE)
