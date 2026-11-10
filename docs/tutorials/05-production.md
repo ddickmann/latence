@@ -316,10 +316,11 @@ grep -rl "Master Services Agreement" latence-out documents || echo "no match"
 
 Three things a purge leaves that you should know about:
 
-* **A ledger entry.** The Corpus Version manifests
-  (`latence-out/_latence/corpus/wal/v*/version.json`) still name the document's id and content
-  hash, and the Version that first added it still records its file name. None of the document's
-  text is there, but a file name can itself be sensitive.
+* **A suppression tombstone.** The Corpus Version manifests
+  (`latence-out/_latence/corpus/wal/v*/version.json`) keep the document's content-addressed id as
+  a `deleted` entry and nothing else about it: its file name and content hash are erased from
+  every Version. The id is a one-way hash of the erased bytes, and it is what stops a Source that
+  still serves the file from bringing the document back.
 * **No export.** The earlier run directories went with the purge, exports included, and the purge
   run keeps only its Quality Report. Run `latence delta` to write the current export.
 * **Your downstream copies.** The framework erases what is on its own Storage. A warehouse table

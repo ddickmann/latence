@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 from latence_core.contracts import (
     ChunkRecord,
     CorpusVersion,
+    DeltaKind,
     DisambiguationRecord,
     DocumentRecord,
     EntityMention,
@@ -423,6 +424,62 @@ class CorpusStore:
             }
         )
         self._storage.write_atomic(version_uri, reconciled.model_dump_json().encode("utf-8"))
+
+    def expunge_document_listings(self, document_ids: set[str]) -> int:
+        """Remove what every Version's manifest says about ``document_ids`` (the Purge step that
+        follows :meth:`expunge_records`). Returns the number of manifests rewritten.
+
+        A :class:`~latence_core.contracts.CorpusVersion` lists its delta's documents, and each
+        entry carries the document's ``file_name`` and ``content_hash``. A file name can itself be
+        personal data, so a hard erasure that left those entries in ``wal/v<N>/version.json`` had
+        erased the document's text and kept its name. For each purged document:
+
+        * every entry that lists it as a live document (ADDED / UPDATED / UNCHANGED) is dropped,
+          in every committed Version, and with it the file name and the content hash;
+        * every DELETED entry keeps only the content-addressed ``document_id`` (its ``file_name``
+          is blanked; a DELETED entry never carries a ``content_hash``). That id is the
+          suppression tombstone: it is a one-way hash of the erased bytes, and it is what keeps a
+          Source that still serves the file from silently re-ingesting it
+          (``DeltaRunner._prior_deletions``). Dropping it would trade a retained hash for the
+          risk of the erased document coming back.
+
+        The live-document entries can go because the tombstone no longer has anything to shadow:
+        the manifest walk (``DeltaRunner._manifest_of``) only resurrects a document some older
+        Version still lists. Counts and the fingerprint are untouched (they describe records and
+        live documents, not the listing). A staged ``version.json`` in an abandoned transaction
+        is rewritten the same way and for the same reason as its ``records.jsonl``: it is never
+        read back, but it is a file on disk that names the document.
+        """
+
+        def _scrub(version: int) -> int:
+            uri = self._wal.staged_uri(version, _VERSION_NAME)
+            if not self._storage.exists(uri):
+                return 0
+            corpus_version = CorpusVersion.model_validate_json(self._storage.read_text(uri))
+            entries = []
+            changed = False
+            for entry in corpus_version.delta.entries:
+                if entry.document_id not in document_ids:
+                    entries.append(entry)
+                elif entry.kind is DeltaKind.DELETED:
+                    changed = changed or bool(entry.file_name)
+                    entries.append(entry.model_copy(update={"file_name": ""}))
+                else:
+                    changed = True  # a live listing: dropped whole
+            if not changed:
+                return 0
+            scrubbed = corpus_version.model_copy(
+                update={"delta": corpus_version.delta.model_copy(update={"entries": entries})}
+            )
+            self._storage.write_atomic(uri, scrubbed.model_dump_json().encode("utf-8"))
+            return 1
+
+        rewritten = 0
+        for version in self._wal.committed_versions():
+            rewritten += _scrub(version)
+        for version in self._wal.abandoned_versions():
+            rewritten += _scrub(version)
+        return rewritten
 
     # -- serialisation ------------------------------------------------------
 

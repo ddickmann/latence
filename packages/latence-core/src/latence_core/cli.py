@@ -1515,9 +1515,12 @@ def purge(
 ) -> None:
     """Hard-delete documents (Purge — GDPR / right-to-be-forgotten erasure).
 
-    DESTRUCTIVE and NON-RECOVERABLE: unlike a Retraction, NOTHING is retained — the on-disk source
-    file(s), every derived record across ALL Corpus Versions, and the run artifacts are physically
-    erased. Guarded by a confirmation prompt; pass ``--yes`` to skip it. Give ids via ``--doc``
+    DESTRUCTIVE and NON-RECOVERABLE: unlike a Retraction, nothing of the document is retained —
+    the on-disk source file(s), every derived record across ALL Corpus Versions, the run artifacts,
+    and the file name and content hash every Corpus Version listed it under are physically erased.
+    One thing stays, on purpose: the document's content-addressed id, as a suppression tombstone
+    (a one-way hash of the erased bytes) so a Source that still serves the file cannot bring it
+    back. Guarded by a confirmation prompt; pass ``--yes`` to skip it. Give ids via ``--doc``
     (repeatable) and/or ``--docs-file``.
     """
     _configure_logging(verbose)

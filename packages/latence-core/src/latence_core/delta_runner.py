@@ -435,6 +435,10 @@ class DeltaRunner:
             # read of an abandoned staging file can resurrect the erased content. The head Version
             # the commit above just wrote already omits them.
             store.expunge_records(set(deleted))
+            # ...and what every Version's manifest still SAYS about them: the file name and the
+            # content hash go, and only the content-addressed id stays, as the suppression
+            # tombstone that keeps the erased document from being re-ingested.
+            store.expunge_document_listings(set(deleted))
             self._purge_run_artifacts(pipeline)
         return self._attach_churn(pipeline, run_id, report, churn)
 

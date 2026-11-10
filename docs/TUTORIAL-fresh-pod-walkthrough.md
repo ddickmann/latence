@@ -1046,9 +1046,12 @@ The retracted records still live in the version that preceded the retraction —
 
 ### 8.4 `latence purge` — hard delete (GDPR / right-to-be-forgotten)
 
-The irreversible one. Unlike a retraction, **nothing is retained**: the on-disk source file, every
-derived record across **all** Corpus Versions (and any abandoned WAL residue), and the run artifacts
-are physically erased. Because it is destructive and non-recoverable, `purge` prompts for
+The irreversible one. Unlike a retraction, **nothing of the document is retained**: the on-disk
+source file, every derived record across **all** Corpus Versions (and any abandoned WAL residue),
+the run artifacts, and the file name and content hash each Corpus Version listed it under are
+physically erased. One thing stays on purpose: the document's content-addressed id, a one-way hash
+of the erased bytes, kept as a suppression tombstone so a Source that still serves the file cannot
+bring it back. Because it is destructive and non-recoverable, `purge` prompts for
 confirmation; pass `--yes` to skip it in a script.
 
 ```bash
