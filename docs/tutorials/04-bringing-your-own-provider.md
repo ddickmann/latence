@@ -608,10 +608,10 @@ in-core Providers satisfy their Capabilities without it. Its four helpers:
 
 | Helper | Does |
 | --- | --- |
-| `self.device` | Resolves `config["device"]` (`auto`/`cpu`/`cuda`) against your profile. A `compute="gpu"` adapter on a CPU-only host sees the **skip** decision, never a fabricated device. Placement stays your job. |
-| `self.batched(items, run_batch)` | Groups the input into `config["batch_size"]` chunks and calls your `run_batch`, degrading to one-item calls when your profile says `batch=False`. Deterministic input-order output; the input is consumed one batch at a time. |
-| `with self.guard("<op>"):` | Turns a native exception into the right typed `LatenceError`. The message carries the provider, the op and the native exception's **type name** — never its message, which could echo record content. |
-| `carry_provenance` / `rebase_offsets` / `resolve_pages` | Map a native library's output back onto the input's Provenance and true document offsets, reusing the `OffsetIndex` and `PageIndexResolver` seams rather than a hand-rolled mapper. |
+| `self.device` | The `DeviceDecision` resolved once, at construction, from `config["device"]` (`auto`/`cpu`/`cuda`, default `auto`) and your profile. A `compute="gpu"` adapter on a CPU-only host sees the **skip** decision, never a fabricated device. An unknown device string is a `ConfigError`. Placement stays your job. |
+| `self.batched(items, run_batch)` | Groups the input into `config["batch_size"]` chunks (default 32) and calls your `run_batch` once per chunk. With `batch=False` in your profile, or no profile, it calls `run_batch` with one item at a time. Outputs are yielded in the order `run_batch` returns them; the input is consumed one batch at a time. A `batch_size` that is not an int of at least 1 is a `ConfigError`. |
+| `with self.guard("<op>"):` | Turns a native exception into a typed `LatenceError`: a `ConfigError` when its type is listed in your class's `config_exceptions` (empty by default), a `ProviderError` otherwise. A `LatenceError` raised inside the block passes through unchanged. The message carries the provider, the op and the native exception's **type name** — never its message, which could echo record content. |
+| `carry_provenance` / `rebase_offsets` / `resolve_pages` | `carry_provenance` copies the source's Provenance, overriding only the offset and page fields you pass, and returns its Classification unchanged. `rebase_offsets` turns a chunk-local span into document offsets through the chunk's `OffsetMap` (`OffsetIndex`), or by adding the chunk's start when there is no map. `resolve_pages` resolves a document span to pages through `PageIndexResolver`, and raises `PageSliceMissingError` when the chunk carries no page spans. |
 
 Full walkthrough: [Writing an adapter with `AdapterBase`](../writing-an-adapter.md). The shipping
 template to copy is [`parser.pdfplumber`](../reference/example-provider.md), the first Wave-1 adapter
