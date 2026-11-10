@@ -64,3 +64,8 @@ Agreed before any model arm runs. Full table, reasons and run order are in
   synthetic or public data.
 - Runtime: a Runpod pod, 1× L40S 48 GB with at least 64 GB system RAM (owner, 2026-11-08;
   replaces the M3).
+
+**Related bar (owner, 2026-11-10, *Evaluation and the acceptance bars*).** For v1 the
+precision bar gets a guard: on the synthetic estate the machine alone must find at least 60% of
+the true matches while holding 0.95 precision. The spike's go/no-go bars above are unchanged;
+its report states the machine-only recall next to that guard.
