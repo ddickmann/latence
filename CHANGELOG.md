@@ -158,6 +158,14 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   turns the cap into a per-dataset limit on induction calls from an estimated price per call; a
   chunk past the limit gets no call and keeps the configured labels, and the run continues. The
   behaviour is unchanged; the prompt, the help text and the campaign guide now say this.
+- **The two failing tests of `benchmark/corpus/test_manifest.py` were stale, and are corrected.**
+  `manifest.py` states the modern-OOXML limit per format (`docx`, `xlsx`, `pptx`, each thin
+  below 1,000 files), which is the threshold `fetch_corpus.sh` sizes its axes against. The tests
+  still described one combined bucket: one required a mention of a source the tree names
+  nowhere else, the other expected no limit for a corpus with no `.pptx` at all. The module is
+  unchanged. The tests now assert the per-format wording, the negative control uses a corpus
+  that holds all three formats, and two tests pin the per-format rule and its threshold. No
+  gate runs this file; it is run by hand.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept
