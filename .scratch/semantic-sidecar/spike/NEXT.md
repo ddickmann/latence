@@ -37,21 +37,41 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
 | Splink `historical_50k` (public) | 50,578 | 0.971 | 0.868 | 0.904 | 0.874 | no reject band; 21.7% review; pair completeness 0.694 |
 | Estate 100k, before the acronym cap | 98,971 | 0.979 (LB 0.978) | 0.867 | 0.961 | 0.799 | union pair completeness 0.931; 37 s; 1.9 GB |
 | Estate 100k, with the acronym cap | 98,971 | 0.990 | 0.858 | 0.956 | n/a | union pair completeness 0.915; 22 s; 1.6 GB |
+| Estate 1M, 5,000 labels | 989,658 | none certified | 0 (nothing merged) | 0.833 | 0.738 | union pair completeness 0.898; 72 s; 5.4 GB |
+| Estate 1M, 50,000 labels | 989,658 | 0.980 (LB 0.980) | 0.857 | 0.857 | 0.738 | no review band left; 83 s; 5.5 GB |
 
 - **Result files:** `results/estate_4k_with_baseline.json`, `results/historical_50k.json`, `results/estate_100k.json`, `results/estate_100k_acronym_cap.json`.
 - **The acronym cap** (commit `7c9f590`) is the version meant to scale. The REPORT shows both 100k results side by side.
-- **The 1M run has not finished.** The latest attempt (2026-11-09, 4 CPUs, 15 GB RAM, code at
-  `7c9f590`) was killed for lack of memory: blocking ended after 74 s at 12.2 GB peak RSS, and
-  scoring then died. A count inside DuckDB shows why:
-  - 989,658 records give **29.5M candidate pairs** (about 30 per record), against 518k at 100k
-    records (about 5 per record). Union pair completeness is 0.898.
-  - Two passes produce almost all of them: `name_core` 15.9M and `first_tok+city` 14.5M.
-  - The pairs are pulled into pandas with string ids, which is what takes the memory.
-  - Part of the growth comes from the generator: it has about 1,400 name stems, so names collide
-    more as the estate grows. Real estates also have heavy name collisions, so this is worth
-    reporting, not hiding.
-  - The run needs the pod's RAM (64 GB or more). Keeping pairs in DuckDB or Arrow with integer
-    ids would cut the memory without changing the method.
+- **The 1M run finished on 2026-11-10** (989,658 records, 4 CPUs, 15 GB RAM, no GPU): 72 s end
+  to end at 5.4 GB peak RSS, about 13,700 records per second and 1.26M pairs per second through
+  the matcher. Before, blocking alone took 12.2 GB and scoring died. What changed is how pairs
+  and clusters are held (integer arrays, the prediction table left in DuckDB, one sorted
+  neighbour table for the clusterer), not the method: on the 12k estate, the 100k estate and
+  the public 50k set the rewrite gives the same pairs, bands and clusterings as the code before
+  it (`test_equivalence.py`, `equivalence.py`).
+  - **The candidate set:** 29.5M pairs, about 30 per record, against 5 per record at 100k.
+    Union pair completeness is 0.898. Two passes produce almost all of it: `name_core` 15.9M
+    and `first_tok+city` 14.5M. Part of the growth comes from the generator (about 1,400 name
+    stems, so names collide more as the estate grows); real estates also have heavy name
+    collisions, so this is reported, not hidden.
+  - **With the label budget used so far (5,000 labelled pairs) no accept band is certified.**
+    Learn-then-Test abstains, and the machine alone merges nothing. The cause is the candidate
+    set: only 2.8% of candidate pairs are true matches at 1M, against 16% at 100k, so 3,000
+    uniformly drawn test labels hold about 84 matches, fewer than the 100 pairs the test needs
+    above a threshold before it may certify it.
+  - **With 50,000 labelled pairs the bars are met:** accept at 0.505, realised auto-accept
+    precision 0.980 (Wilson lower bound 0.980), machine-only pairwise precision 0.986 and
+    recall 0.758 (F1 0.857). 150,000 labels give the same. No review band is left at either.
+  - **Where the recall goes:** 10% of true pairs are never candidates, and the reject band's
+    1% tolerance, applied to 28.8M rejected pairs, lets through 0.53% of them as missed
+    matches, about 153,000 pairs or 17% of all true pairs.
+  - **What this means for the design (ticket 13):** uniform labelling over candidate pairs does
+    not scale; 50,000 labels is about 280 hours of review at 20 s each, and 97% of those labels
+    are obvious non-matches. Labels have to be drawn where the scores are uncertain or high,
+    with the test adjusted for that sampling, and the reject tolerance has to be stated
+    against true pairs, not against rejected pairs. Neither is built.
+  - **Result files:** `results/estate_1m.json` (5,000 labels), `results/estate_1m_labels_50k.json`,
+    `results/estate_1m_labels_150k.json`.
 - **Part B (text)** has only a lexical baseline: top-1 accuracy 0.784, 0% on acronyms, and LTT abstained.
 
 ## Pod setup
@@ -83,7 +103,7 @@ python generate_text.py --out data/text_2k
 python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet('data/historical_50k.parquet')"
 ```
 
-`run_scale.sh` runs all of Part A in sequence. Its 1M step is the open one.
+`run_scale.sh` runs all of Part A in sequence. Its 1M step now also runs on a 15 GB machine.
 
 ## Exports for the workbench prototype (ticket 22)
 

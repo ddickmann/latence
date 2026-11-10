@@ -69,3 +69,27 @@ Agreed before any model arm runs. Full table, reasons and run order are in
 precision bar gets a guard: on the synthetic estate the machine alone must find at least 60% of
 the true matches while holding 0.95 precision. The spike's go/no-go bars above are unchanged;
 its report states the machine-only recall next to that guard.
+
+## Progress (2026-11-10): the structured side at 10^6 records
+
+Status stays `open`: the go/no-go needs the model arms, which need the GPU machine.
+
+- **Throughput: met on a small machine.** 989,658 records run end to end in 72 s at 5.4 GB peak
+  memory on 4 CPUs with no GPU. The earlier attempt died at 12 GB. Pairs and clusters are now
+  held as integer arrays; the method is unchanged, and three datasets give the same pairs,
+  bands and clusterings before and after the change.
+- **Precision at the label budget used so far: not certified.** With 5,000 uniformly drawn
+  labelled pairs, Learn-then-Test abstains at 10^6 and the machine alone merges nothing. Only
+  2.8% of candidate pairs are true matches at this size (16% at 10^5), so the labelled sample
+  holds too few matches to certify any accept threshold.
+- **Precision with ten times the labels: met.** With 50,000 labelled pairs the realised
+  auto-accept precision is 0.980 and the machine alone finds 75.8% of the true pairs at
+  pairwise precision 0.986, above the 60% guard.
+- **Two design consequences for *The upgrade of the resolution engine*:** labels have to be
+  drawn where the scores are informative, not uniformly over candidate pairs, with the test
+  adjusted for that sampling; and the reject tolerance has to be stated against true pairs
+  (1% of 28.8M rejected pairs is 17% of all true pairs).
+- **Not measured:** any model arm, the text side beyond its lexical baseline, and a real
+  (non-synthetic) estate at this size.
+
+Details and result files: [`../spike/NEXT.md`](../spike/NEXT.md).
