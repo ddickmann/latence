@@ -21,7 +21,6 @@ import resource
 import sys
 import time
 import unicodedata
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +30,12 @@ import numpy as np
 import pandas as pd
 
 from er import (
-    ConstrainedClusterer,
+    ArrayClusterer,
+    NeighbourTable,
     fit_isotonic,
     human_minutes,
     learn_then_test_bands,
     pairwise_and_bcubed,
-    plain_closure,
     wilson_lower,
 )
 from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, stage_two, uncertain_region
@@ -149,13 +148,13 @@ def _pairs_on(con: duckdb.DuckDBPyConnection, keys: list[str]) -> tuple[str, int
     """SQL selecting (l, r) for records sharing every key in ``keys``; keys over BLOCK_CAP skipped."""
     k = " || '|' || ".join(f"CAST({c} AS VARCHAR)" for c in keys)
     nn = " AND ".join(f"{c} IS NOT NULL" for c in keys)
-    con.execute(f"CREATE OR REPLACE TEMP TABLE kk AS SELECT unique_id, {k} AS bk FROM recs WHERE {nn}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE kk AS SELECT rid, {k} AS bk FROM recs WHERE {nn}")
     skipped = con.execute(
         f"SELECT count(*) FROM (SELECT bk FROM kk GROUP BY bk HAVING count(*) > {BLOCK_CAP})"
     ).fetchall()[0][0]
     sql = f"""WITH ok AS (SELECT bk FROM kk GROUP BY bk HAVING count(*) BETWEEN 2 AND {BLOCK_CAP}),
-        kok AS (SELECT unique_id, bk FROM kk WHERE bk IN (SELECT bk FROM ok))
-        SELECT a.unique_id AS l, b.unique_id AS r FROM kok a JOIN kok b USING (bk) WHERE a.unique_id < b.unique_id"""
+        kok AS (SELECT rid, bk FROM kk WHERE bk IN (SELECT bk FROM ok))
+        SELECT a.rid AS l, b.rid AS r FROM kok a JOIN kok b USING (bk) WHERE a.rid < b.rid"""
     return sql, int(skipped)
 
 
@@ -167,8 +166,8 @@ def _acronym_pairs(con: duckdb.DuckDBPyConnection) -> tuple[str, int]:
         f"SELECT count(*) FROM (SELECT acr_key FROM recs WHERE acr_key IS NOT NULL GROUP BY acr_key HAVING count(*) > {BLOCK_CAP})"
     ).fetchall()[0][0]
     sql = f"""WITH okk AS (SELECT acr_key FROM recs WHERE acr_key IS NOT NULL GROUP BY acr_key HAVING count(*) <= {BLOCK_CAP})
-        SELECT least(a.unique_id, b.unique_id) AS l, greatest(a.unique_id, b.unique_id) AS r
-        FROM recs a JOIN recs b ON a.acr_first = b.acr_key AND a.unique_id <> b.unique_id
+        SELECT least(a.rid, b.rid) AS l, greatest(a.rid, b.rid) AS r
+        FROM recs a JOIN recs b ON a.acr_first = b.acr_key AND a.rid <> b.rid
         WHERE a.acr_first IS NOT NULL AND b.acr_key IN (SELECT acr_key FROM okk)
           AND (a.city_n = b.city_n OR a.city_n IS NULL OR b.city_n IS NULL)"""
     return sql, int(skipped)
@@ -176,22 +175,40 @@ def _acronym_pairs(con: duckdb.DuckDBPyConnection) -> tuple[str, int]:
 
 def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> tuple[str, int]:
     con.execute(
-        "CREATE OR REPLACE TEMP TABLE toks AS SELECT DISTINCT unique_id, unnest(string_split(name_core, ' ')) AS t FROM recs"
+        "CREATE OR REPLACE TEMP TABLE toks AS SELECT DISTINCT rid, unnest(string_split(name_core, ' ')) AS t FROM recs"
     )
     sql = f"""WITH rare AS (SELECT t FROM toks WHERE length(t) >= 4 GROUP BY t HAVING count(*) BETWEEN 2 AND {max_df}),
-        tr AS (SELECT unique_id, t FROM toks WHERE t IN (SELECT t FROM rare))
-        SELECT a.unique_id AS l, b.unique_id AS r FROM tr a JOIN tr b USING (t) WHERE a.unique_id < b.unique_id"""
+        tr AS (SELECT rid, t FROM toks WHERE t IN (SELECT t FROM rare))
+        SELECT a.rid AS l, b.rid AS r FROM tr a JOIN tr b USING (t) WHERE a.rid < b.rid"""
     return sql, 0
 
 
-def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Run every blocking pass, then union them. Counting and the union happen in DuckDB: at 1e6
-    records the candidate set is ~10^7 rows, which pure-Python bookkeeping cannot hold."""
-    del gold  # gold is read from the records' own `cluster` column, inside the database
-    con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "threads": os.cpu_count() or 4})
+def record_numbers(unique_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Number the records 0..n-1 in the order of their ids.
+
+    Returns ``(rid, ids)``: ``rid[row]`` is the number of the record in that row, and ``ids[k]``
+    is the id of record ``k``. Numbering in id order keeps every comparison the pair SQL makes
+    (``l < r``, ``ORDER BY l, r``) the same as it was on the ids themselves, so the candidate
+    pairs and their order do not change; they only stop being strings.
+    """
+    order = np.argsort(unique_ids.astype(str), kind="stable")
+    rid = np.empty(len(order), dtype=np.int32)
+    rid[order] = np.arange(len(order), dtype=np.int32)
+    return rid, unique_ids[order]
+
+
+def block(df: pd.DataFrame, passes: dict[str, list[str]]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Run every blocking pass, then union them. Returns the candidate pairs as two integer
+    arrays ``(l, r)`` of record numbers (``df.rid``), sorted, each pair once with ``l < r``.
+
+    Counting and the union happen in DuckDB, and only the two integer columns come back: at 1e6
+    records the candidate set is about 3 x 10^7 pairs, which as a frame of string ids took 12 GB.
+    """
+    os.makedirs("out/duckdb_tmp", exist_ok=True)
+    con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "threads": os.cpu_count() or 4, "temp_directory": "out/duckdb_tmp"})
     con.register("recs_df", df)
     con.execute("CREATE TABLE recs AS SELECT * FROM recs_df")
-    con.execute("CREATE TABLE cand_all (l VARCHAR, r VARCHAR, pass VARCHAR)")
+    con.execute("CREATE TABLE cand_all (l INTEGER, r INTEGER)")
     stats: dict[str, Any] = {}
     gold_pairs = int(
         con.execute("SELECT coalesce(sum(n * (n - 1) / 2), 0) FROM (SELECT count(*) n FROM recs GROUP BY cluster)").fetchall()[0][0]
@@ -200,7 +217,7 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
     def completeness(table: str) -> int:
         return int(
             con.execute(
-                f"""SELECT count(*) FROM {table} c JOIN recs a ON c.l = a.unique_id JOIN recs b ON c.r = b.unique_id
+                f"""SELECT count(*) FROM {table} c JOIN recs a ON c.l = a.rid JOIN recs b ON c.r = b.rid
                 WHERE a.cluster = b.cluster"""
             ).fetchall()[0][0]
         )
@@ -214,27 +231,25 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
         else:
             sql, skipped = _pairs_on(con, keys)
         con.execute(f"CREATE OR REPLACE TEMP TABLE pass_t AS SELECT DISTINCT l, r FROM ({sql})")
-        con.execute(f"INSERT INTO cand_all SELECT l, r, '{name}' FROM pass_t")
+        con.execute("INSERT INTO cand_all SELECT l, r FROM pass_t")
         stats[name] = {
             "pairs": int(con.execute("SELECT count(*) FROM pass_t").fetchall()[0][0]),
             "pair_completeness": completeness("pass_t") / gold_pairs if gold_pairs else 1.0,
             "keys_skipped_over_cap": skipped,
             "secs": round(time.time() - t, 2),
         }
-    con.execute(
-        """CREATE TABLE cand AS SELECT l, r, string_agg(DISTINCT pass, ',' ORDER BY pass) AS pass
-        FROM cand_all GROUP BY l, r ORDER BY l, r"""
-    )
-    passes_of = con.execute("SELECT l, r, pass FROM cand ORDER BY l, r").df()
+    con.execute("CREATE TABLE cand AS SELECT DISTINCT l, r FROM cand_all")
+    pairs = con.execute("SELECT l, r FROM cand ORDER BY l, r").fetchnumpy()
+    left, right = pairs["l"].astype(np.int32), pairs["r"].astype(np.int32)
     n = len(df)
     stats["_union"] = {
-        "pairs": len(passes_of),
+        "pairs": len(left),
         "pair_completeness": completeness("cand") / gold_pairs if gold_pairs else 1.0,
-        "reduction_ratio": 1 - len(passes_of) / (n * (n - 1) / 2),
+        "reduction_ratio": 1 - len(left) / (n * (n - 1) / 2),
         "gold_pairs": gold_pairs,
     }
     con.close()
-    return passes_of, stats
+    return left, right, stats
 
 
 # --------------------------------------------------------------------------------------------
@@ -243,11 +258,22 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
 
 
 def score(
-    df: pd.DataFrame, cand: pd.DataFrame, kind: str, detail: dict[str, Any] | None = None
+    df: pd.DataFrame,
+    left: np.ndarray,
+    right: np.ndarray,
+    kind: str,
+    detail: dict[str, Any] | None = None,
+    ids: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Splink match probability per candidate pair. Pass a dict as ``detail`` to also get the
-    per-field evidence a reviewer is shown: it receives the trained ``model`` and the full
-    ``pred`` frame (gamma and Bayes-factor columns per comparison)."""
+    """Splink match probability per candidate pair, in the order of ``left`` / ``right``.
+
+    Splink is given the record number as its ``unique_id``, the prediction table stays in DuckDB
+    (which spills to disk above its memory limit), and only the probability column is read back.
+    Pass a dict as ``detail`` to also get the per-field evidence a reviewer is shown: it receives
+    the trained ``model`` and the full ``pred`` frame (gamma and Bayes-factor columns per
+    comparison) with its two id columns translated back through ``ids``. That frame is only
+    affordable on a small estate.
+    """
     import splink.comparison_library as cl
     from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 
@@ -257,8 +283,15 @@ def score(
         else ["unique_id", "first_name", "surname", "dob", "birth_place", "postcode_fake", "occupation", "gender"]
     )
     os.makedirs("out/duckdb_tmp", exist_ok=True)
-    db = DuckDBAPI(duckdb.connect(config={"memory_limit": DUCKDB_MEM, "temp_directory": "out/duckdb_tmp"}))
-    sdf = db.register(df[cols].copy())
+    con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "temp_directory": "out/duckdb_tmp"})
+    db = DuckDBAPI(con)
+
+    def numbered(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame[cols].copy()
+        out["unique_id"] = frame["rid"].to_numpy()
+        return out
+
+    sdf = db.register(numbered(df))
     if kind == "org":
         comparisons = [
             cl.JaroWinklerAtThresholds("name_core", [0.97, 0.9, 0.8]).configure(term_frequency_adjustments=True),
@@ -286,6 +319,9 @@ def score(
     settings = SettingsCreator(
         link_type="dedupe_only", comparisons=comparisons, blocking_rules_to_generate_predictions=prior_rules
     )
+    # Training keeps the records' own ids: it runs on at most TRAIN_MAX records, and Splink's
+    # sampling during training depends on the id values, so numbering them would train a
+    # slightly different model.
     train_df = df[cols]
     if len(df) > TRAIN_MAX:  # EM over a seeded sample (usual practice); scoring uses every record
         train_df = df[cols].sample(n=TRAIN_MAX, random_state=0)
@@ -298,35 +334,50 @@ def score(
     model = trainer.misc.save_model_to_json()
     if detail is not None:  # keeps gamma_* and bf_* per comparison; probabilities are unchanged
         model["retain_intermediate_calculation_columns"] = True
+    else:  # the prediction table carries ids and scores only, not a copy of every compared value
+        model["retain_matching_columns"] = False
     linker = Linker(sdf, model, log_level=40)
-    bp = cand[["l", "r"]].rename(columns={"l": "join_key_l", "r": "join_key_r"})
-    bp.insert(0, "match_key", "0")
-    linker.table_management.register_blocked_pairs_for_predict(db.register(bp))
-    full = linker.inference.predict().as_pandas_dataframe()
+    con.register("cand_arrays", pd.DataFrame({"i": np.arange(len(left), dtype=np.int64), "l": left, "r": right}))
+    con.execute("CREATE TABLE cand_i AS SELECT i, l, r FROM cand_arrays")
+    con.unregister("cand_arrays")
+    blocked = con.sql("SELECT '0' AS match_key, l AS join_key_l, r AS join_key_r FROM cand_i")
+    linker.table_management.register_blocked_pairs_for_predict(db.register(blocked))
+    pred = linker.inference.predict()
     if detail is not None:
+        full = pred.as_pandas_dataframe()
+        if ids is not None:
+            for side in ("unique_id_l", "unique_id_r"):
+                full[side] = ids[full[side].to_numpy()]
         detail["model"], detail["pred"] = model, full
-    pred = full[["unique_id_l", "unique_id_r", "match_probability"]]
-    m = cand.merge(pred, left_on=["l", "r"], right_on=["unique_id_l", "unique_id_r"], how="left")
-    return m["match_probability"].fillna(0.0).to_numpy()
+    scored = con.execute(
+        f"""SELECT coalesce(p.match_probability, 0.0) AS mp
+        FROM cand_i c LEFT JOIN {pred.physical_name} p ON p.unique_id_l = c.l AND p.unique_id_r = c.r
+        ORDER BY c.i"""
+    ).fetchnumpy()["mp"]
+    con.close()
+    return np.asarray(scored, dtype=np.float64)
 
 
-def vetoes(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
-    """Hard negatives the scorer must never override (ADR-0046's guards, as vetoes)."""
+def _codes(values: np.ndarray) -> np.ndarray:
+    """Each value as a small integer, -1 where it is absent."""
+    codes, _ = pd.factorize(pd.Series(values, dtype=object), use_na_sentinel=True)
+    return codes.astype(np.int32)
+
+
+def vetoes(by_record: pd.DataFrame, left: np.ndarray, right: np.ndarray, kind: str) -> np.ndarray:
+    """Hard negatives the scorer must never override (ADR-0046's guards, as vetoes).
+
+    ``by_record`` is the normalised frame in record-number order, so row ``k`` is record ``k``.
+    A veto is "both sides present and different"; an absent value is never "different".
+    """
     if kind != "org":
-        return np.zeros(len(cand), dtype=bool)
-    idx = df.set_index("unique_id")
-    num = idx["num_tokens"]
-    reg = idx["reg_norm"]
-    et = idx["entity_type"]
-    nl, nr = num.reindex(cand.l).to_numpy(), num.reindex(cand.r).to_numpy()
-    rl, rr = reg.reindex(cand.l).to_numpy(), reg.reindex(cand.r).to_numpy()
-    el, er_ = et.reindex(cand.l).to_numpy(), et.reindex(cand.r).to_numpy()
-    def conflict(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-        # Both sides present AND different. NaN/None means "absent", never "different".
-        xa, ya = pd.Series(xs), pd.Series(ys)
-        return (xa.notna() & ya.notna() & (xa != ya)).to_numpy()
-
-    return conflict(nl, nr) | conflict(rl, rr) | conflict(el, er_)
+        return np.zeros(len(left), dtype=bool)
+    out = np.zeros(len(left), dtype=bool)
+    for col in ("num_tokens", "reg_norm", "entity_type"):
+        c = _codes(by_record[col].to_numpy())
+        cl, cr = c[left], c[right]
+        out |= (cl >= 0) & (cr >= 0) & (cl != cr)
+    return out
 
 
 # --------------------------------------------------------------------------------------------
@@ -384,6 +435,26 @@ def _load_scorers(names: list[str], question: str, instruction: str) -> dict[str
     return {n: make[n]() for n in names}
 
 
+def band_masks(p: np.ndarray, bands: Any) -> tuple[np.ndarray, np.ndarray]:
+    """``Bands.band`` for a whole array: (accepted, rejected). What is neither is in review."""
+    acc = np.zeros(len(p), dtype=bool) if bands.accept_at is None else p >= bands.accept_at
+    rej = np.zeros(len(p), dtype=bool) if bands.reject_below is None else (p < bands.reject_below) & ~acc
+    return acc, rej
+
+
+def components(n: int, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Plain transitive closure over the given pairs: each record's component, named by its
+    smallest member. What connected components at a threshold does, with no constraints."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    graph = coo_matrix((np.ones(len(left), dtype=np.int8), (left, right)), shape=(n, n))
+    _count, comp = connected_components(graph, directed=False)
+    first = np.full(comp.max() + 1 if n else 0, n, dtype=np.int64)
+    np.minimum.at(first, comp, np.arange(n))
+    return first[comp].astype(np.int32)
+
+
 def run(
     dataset: str,
     path: Path,
@@ -410,33 +481,40 @@ def run(
     raw = pd.read_parquet(path)
     kind = "org" if dataset == "estate" else "person"
     df = normalise_org(raw) if kind == "org" else normalise_person(raw)
-    gold = dict(zip(df.unique_id, df.cluster.astype(str)))
-    ids = list(df.unique_id)
+    # Records are numbered in id order; pairs, labels and clusters are arrays over those numbers.
+    # `ids[k]` is the id of record k. Ids come back only where a person or a file reads them.
+    rid, ids = record_numbers(df.unique_id.to_numpy())
+    df["rid"] = rid
+    n = len(df)
+    by_record = df.iloc[np.argsort(rid, kind="stable")]
+    gold_codes = _codes(by_record.cluster.astype(str).to_numpy())
+    gold = dict(zip(ids.tolist(), by_record.cluster.astype(str).tolist()))
     timings: dict[str, float] = {"normalise": time.time() - t0}
 
     t = time.time()
-    cand, block_stats = block(df, ORG_PASSES if kind == "org" else PERSON_PASSES, gold)
+    left, right, block_stats = block(df, ORG_PASSES if kind == "org" else PERSON_PASSES)
+    n_pairs = len(left)
     timings["block"] = time.time() - t
     _stage("block", t0)
 
     t = time.time()
     detail: dict[str, Any] | None = {} if export_review else None
-    p_raw = score(df, cand, kind, detail)
+    p_raw = score(df, left, right, kind, detail, ids)
     timings["score_splink"] = time.time() - t
     _stage("score", t0)
-    veto = vetoes(df, cand, kind)
-    cl_of = pd.Series(gold)
-    y = (cl_of.reindex(cand.l).to_numpy() == cl_of.reindex(cand.r).to_numpy()).astype(int)
+    veto = vetoes(by_record, left, right, kind)
+    y = (gold_codes[left] == gold_codes[right]).astype(int)
 
     # Labelled samples a reviewer would provide: uniform over candidate pairs, disjoint halves.
     rng = np.random.default_rng(seed)
-    order = rng.permutation(len(cand))
+    order = rng.permutation(n_pairs)
     cal_idx, ltt_idx = order[:n_cal], order[n_cal : n_cal + n_ltt]
+    del order
     iso = fit_isotonic(p_raw[cal_idx], y[cal_idx])
     p = iso.predict(p_raw)
     p[veto] = 0.0
     bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=delta, reject_target=reject_target)
-    band = np.array([bands.band(x) for x in p])
+    acc, rej = band_masks(p, bands)
     _stage("bands", t0)
 
     stage2_info: dict[str, Any] | None = None
@@ -445,7 +523,7 @@ def run(
         unc = np.where(uncertain_region(p, bands, veto))[0]
         cols = ORG_TEXT_COLS if kind == "org" else PERSON_TEXT_COLS
         text_of = {r["unique_id"]: record_text(r, cols) for r in raw.to_dict("records")}
-        pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(cand.l.to_numpy()[unc], cand.r.to_numpy()[unc])]
+        pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(ids[left[unc]].tolist(), ids[right[unc]].tolist())]
         if scorers is None:
             import models as M
 
@@ -460,8 +538,8 @@ def run(
         order2 = np.random.default_rng(seed + 1).permutation(len(unc))
         cal2, ltt2 = order2[:n_cal2], order2[n_cal2 : n_cal2 + n_ltt2]
         s2 = stage_two(p[unc], sc, y[unc], cal2, ltt2, target=0.95, delta=delta, reject_target=reject_target)
-        band2 = np.array([s2.bands.band(x) for x in s2.p2])
-        band[unc] = band2
+        acc2, rej2 = band_masks(s2.p2, s2.bands)
+        acc[unc], rej[unc] = acc2, rej2
         p[unc] = s2.p2  # the cluster-level check reads the better-informed probability
         timings["rescore"] = time.time() - t
         _stage("rescore", t0)
@@ -473,58 +551,62 @@ def run(
             "accept_at": s2.bands.accept_at,
             "reject_below": s2.bands.reject_below,
             "delta_per_stage": delta,
-            "moved": {b: int((band2 == b).sum()) for b in ("accept", "review", "reject")},
-            "accept_precision_realised": float(y[unc][band2 == "accept"].mean()) if (band2 == "accept").any() else float("nan"),
-            "reject_true_match_rate": float(y[unc][band2 == "reject"].mean()) if (band2 == "reject").any() else float("nan"),
+            "moved": {"accept": int(acc2.sum()), "review": int((~acc2 & ~rej2).sum()), "reject": int(rej2.sum())},
+            "accept_precision_realised": float(y[unc][acc2].mean()) if acc2.any() else float("nan"),
+            "reject_true_match_rate": float(y[unc][rej2].mean()) if rej2.any() else float("nan"),
             "scorer_secs": sc_times,
             "pairs_per_s": {n: (len(unc) / v if v > 0 else float("inf")) for n, v in sc_times.items()},
         }
-    acc, rev, rej = band == "accept", band == "review", band == "reject"
+    rev = ~acc & ~rej
 
     # Realised quality of the bands on ALL candidate pairs (full gold): does the guarantee hold?
     acc_prec = float(y[acc].mean()) if acc.any() else float("nan")
     rej_match_rate = float(y[rej].mean()) if rej.any() else float("nan")
 
-    # Scored neighbours of every record: the evidence the cluster-level check reads.
-    adj: dict[str, dict[str, float]] = defaultdict(dict)
-    for a_, b_, pv in zip(cand.l.to_numpy(), cand.r.to_numpy(), p):
-        adj[a_][b_] = float(pv)
-        adj[b_][a_] = float(pv)
+    # Scored neighbours of every record: the evidence the cluster-level check reads. A merge
+    # must never cross a veto or a strong reject; with the simulated expert, nor a pair the
+    # expert called different.
+    never = veto | (rej & (p < 0.02))
+    table = NeighbourTable(n, left, right, p, {"machine": never, "expert": never | (rev & (y == 0))})
+    accepted = np.where(acc)[0]
+    accepted = accepted[np.argsort(-p[accepted], kind="stable")]  # first- and second-stage accepts
 
     # Constrained clustering.
-    def cluster(with_expert: bool) -> tuple[dict[str, str], dict[str, int]]:
-        cc = ConstrainedClusterer(ids)
-        ls, rs = cand.l.to_numpy(), cand.r.to_numpy()
-        for i in np.where(veto | (rej & (p < 0.02)))[0]:
-            if cc.find(ls[i]) != cc.find(rs[i]):
-                cc.add_cannot_link(ls[i], rs[i])
+    def cluster(with_expert: bool) -> tuple[np.ndarray, dict[str, int]]:
+        cc = ArrayClusterer(n, table, "expert" if with_expert else "machine")
         if with_expert:  # the simulated expert resolves the review band from gold
-            for i in np.where(rev & (y == 0))[0]:
-                if cc.find(ls[i]) != cc.find(rs[i]):
-                    cc.add_cannot_link(ls[i], rs[i])
             for i in np.where(rev & (y == 1))[0]:
-                cc.try_union(ls[i], rs[i])
-        for i in np.where(acc)[0][np.argsort(-p[acc], kind="stable")]:  # first- and second-stage accepts
-            cc.try_union_checked(ls[i], rs[i], adj)
-        return cc.clusters(), {
+                cc.try_union(int(left[i]), int(right[i]))
+        for i in accepted:
+            cc.try_union_checked(int(left[i]), int(right[i]))
+        return cc.label.copy(), {
             "merges": cc.merges,
             "blocked_merges": cc.blocked_merges,
             "blocked_by_linkage": cc.blocked_by_linkage,
         }
 
+    def as_clusters(labels: np.ndarray) -> dict[str, str]:
+        """record id -> cluster name, the form the metrics and the exports read."""
+        return dict(zip(ids.tolist(), ids[labels].tolist()))
+
     t = time.time()
-    pred_machine, cs_m = cluster(False)
-    pred_expert, cs_e = cluster(True)
-    pred_closure = plain_closure(ids, zip(cand.l[p_raw >= 0.95], cand.r[p_raw >= 0.95]))
+    labels_machine, cs_m = cluster(False)
+    labels_expert, cs_e = cluster(True)
+    pred_machine, pred_expert = as_clusters(labels_machine), as_clusters(labels_expert)
+    confident = p_raw >= 0.95
+    pred_closure = as_clusters(components(n, left[confident], right[confident]))
     timings["cluster"] = time.time() - t
     _stage("cluster", t0)
 
     # Review effort: pairs, and connected groups the workbench would show as one item.
-    rev_groups = len({x for x in plain_closure(
-        set(cand.l[rev]) | set(cand.r[rev]), zip(cand.l[rev], cand.r[rev])
-    ).values()}) if rev.any() else 0
+    rev_groups = int(len(np.unique(components(n, left[rev], right[rev])[left[rev]]))) if rev.any() else 0
 
-    if export_review is not None and detail is not None:
+    band = None
+    if export_review is not None or dump is not None:  # names of bands and ids, for people and files
+        band = np.where(acc, "accept", np.where(rej, "reject", "review"))
+        cand = pd.DataFrame({"l": ids[left], "r": ids[right]})
+
+    if export_review is not None and detail is not None and band is not None:
         from review_export import build_review_export
 
         export = build_review_export(
@@ -548,7 +630,7 @@ def run(
             export_graph.parent.mkdir(parents=True, exist_ok=True)
             export_graph.write_text(json.dumps(graph, indent=1, default=str))
 
-    if dump is not None:
+    if dump is not None and band is not None:
         # Everything a second implementation has to reproduce: each pair's probability and
         # band, and both cluster assignments. Compared by equivalence.py.
         dump.parent.mkdir(parents=True, exist_ok=True)
@@ -556,9 +638,9 @@ def run(
             dump,
             l=cand.l.to_numpy().astype(str), r=cand.r.to_numpy().astype(str),
             p_raw=p_raw, p=p, band=band.astype(str), veto=veto,
-            ids=np.array(ids, dtype=str),
-            machine=np.array([pred_machine[i] for i in ids], dtype=str),
-            expert=np.array([pred_expert[i] for i in ids], dtype=str),
+            ids=ids.astype(str),
+            machine=ids[labels_machine].astype(str),
+            expert=ids[labels_expert].astype(str),
             accept_at=np.array([np.nan if bands.accept_at is None else bands.accept_at]),
             reject_below=np.array([np.nan if bands.reject_below is None else bands.reject_below]),
         )

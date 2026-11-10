@@ -255,6 +255,103 @@ class ConstrainedClusterer:
         return {i: self.find(i) for i in self.parent}
 
 
+class NeighbourTable:
+    """Every record's scored neighbours, as sorted arrays.
+
+    At 10^6 records the candidate set is about 3 x 10^7 pairs. A dictionary of dictionaries of
+    them, and a Python set of every strong negative, do not fit in memory; three flat arrays do.
+    Records are the integers 0..n-1. ``start[i]:start[i+1]`` is record ``i``'s slice of ``dst``
+    (the neighbour), ``p`` (the pair's probability) and each array in ``flags`` (per-pair marks,
+    for example "a merge must never cross this pair"). Every pair appears under both its ends.
+    """
+
+    def __init__(self, n: int, left: np.ndarray, right: np.ndarray, p: np.ndarray, flags: dict[str, np.ndarray]) -> None:
+        src = np.concatenate([left, right])
+        order = np.argsort(src, kind="stable")
+        self.dst = np.concatenate([right, left])[order].astype(np.int32)
+        self.p = np.concatenate([p, p])[order].astype(np.float64)
+        self.flags = {name: np.concatenate([f, f])[order] for name, f in flags.items()}
+        self.start = np.zeros(n + 1, dtype=np.int64)
+        np.cumsum(np.bincount(src, minlength=n), out=self.start[1:])
+
+
+class ArrayClusterer:
+    """The decisions of :class:`ConstrainedClusterer`, over integer records and a NeighbourTable.
+
+    Two things differ in how it is held, nothing in what it decides:
+
+    - A cannot-link is a flagged pair in the table (``hard``), not an entry in a per-cluster set.
+      ``ConstrainedClusterer`` refuses a merge when a cannot-link has one end in each cluster;
+      this refuses it when a flagged pair has one end in each cluster. That is the same test.
+    - ``label[i]`` is record ``i``'s cluster, kept flat: a merge relabels the smaller cluster.
+
+    ``test_array_clusterer.py`` runs both on the same random inputs and requires the same
+    partition and the same counters.
+    """
+
+    def __init__(self, n: int, table: NeighbourTable, hard: str) -> None:
+        self.label = np.arange(n, dtype=np.int32)
+        self._members: dict[int, list[int]] = {}  # clusters of two or more; a singleton is implicit
+        self.table = table
+        self.hard = table.flags[hard]
+        self.blocked_merges = 0
+        self.blocked_by_linkage = 0
+        self.merges = 0
+
+    def members(self, cluster: int) -> list[int]:
+        return self._members.get(cluster) or [cluster]
+
+    def _crossing(self, ca: int, cb: int) -> tuple[np.ndarray, np.ndarray]:
+        """Probability and hard flag of every scored pair with one end in each cluster."""
+        ma, mb = self.members(ca), self.members(cb)
+        small, other = (ma, cb) if len(ma) <= len(mb) else (mb, ca)
+        t = self.table
+        ps: list[np.ndarray] = []
+        hs: list[np.ndarray] = []
+        for x in small:
+            s, e = t.start[x], t.start[x + 1]
+            sel = self.label[t.dst[s:e]] == other
+            ps.append(t.p[s:e][sel])
+            hs.append(self.hard[s:e][sel])
+        if len(ps) == 1:
+            return ps[0], hs[0]
+        return np.concatenate(ps), np.concatenate(hs)
+
+    def _merge(self, ca: int, cb: int) -> None:
+        ma, mb = self.members(ca), self.members(cb)
+        if len(ma) < len(mb):
+            ca, cb, ma, mb = cb, ca, mb, ma
+        self.label[mb] = ca
+        self._members[ca] = ma + mb
+        self._members.pop(cb, None)
+        self.merges += 1
+
+    def try_union(self, a: int, b: int) -> bool:
+        ca, cb = int(self.label[a]), int(self.label[b])
+        if ca == cb:
+            return True
+        if self._crossing(ca, cb)[1].any():
+            self.blocked_merges += 1
+            return False
+        self._merge(ca, cb)
+        return True
+
+    def try_union_checked(self, a: int, b: int, *, min_mean: float = 0.5, strong_negative: float = 0.05) -> bool:
+        """The cluster-level check of ``ConstrainedClusterer.linkage_ok``, then the merge."""
+        ca, cb = int(self.label[a]), int(self.label[b])
+        if ca == cb:
+            return True
+        ps, hard = self._crossing(ca, cb)
+        if ps.size and (ps.min() < strong_negative or math.fsum(ps.tolist()) / ps.size < min_mean):
+            self.blocked_by_linkage += 1
+            return False
+        if hard.any():
+            self.blocked_merges += 1
+            return False
+        self._merge(ca, cb)
+        return True
+
+
 def plain_closure(ids: Iterable[str], edges: Iterable[tuple[str, str]]) -> dict[str, str]:
     """Unconstrained transitive closure (what connected components at a threshold does)."""
     cc = ConstrainedClusterer(ids)
