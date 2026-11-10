@@ -58,6 +58,19 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **The front door says what the code does today, then the direction, marked as not built.**
+  `README.md` and the docs-site home page now run in one order: what it is, quick start, what is
+  built, status, and a section *Where this is going* that opens with "Nothing in this section is
+  built" and states the re-scope of ADR-0067 and ADR-0069 to ADR-0073. The README no longer lists
+  the G1 crash test as reproducible from the tree (its harness was never committed; it is cited
+  as the dated record it is), no longer says `verify-local.sh` exits 0 where `RELEASE-GATES.md`
+  keeps that box open, and drops the bullet on retrieval-era necessity gates. `CONTEXT.md` gains
+  a section *Decided, not yet in code* with the vocabulary ADR-0069 fixed (Ledger, Assertion,
+  Locator, Decision, Actor, Concept, Entity, Binding, accept band), each marked, and says how the
+  new Entity sits beside the existing uses of the word. It says the review and reject bands are
+  not fixed by an accepted decision. `llms.txt` and `docs/agent-briefing.md` follow. A new test
+  holds the order, the sentence and the markers, and fails when the first record type of the
+  re-scope appears in the source tree; the five pages also join the removed-capability page rule.
 - **The repository moved to `ddickmann/latence`, and 200 references to the old slug moved with
   it.** Publication is from a repository created clean rather than from one whose history had been
   rewritten, so no unreachable-but-uncollected objects survive anywhere. Two of the 71 files

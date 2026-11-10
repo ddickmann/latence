@@ -1,8 +1,8 @@
 # Latence Framework
 
-> A model-agnostic, cloud-agnostic Python framework that turns messy enterprise documents into
-> AI-ready data: a PII-handled, embedded, provenance-carrying RAG corpus and an evidence-linked
-> knowledge graph, written as plain Parquet files you own.
+> A model-agnostic, cloud-agnostic Python framework that reads documents and writes a PII-masked
+> corpus that carries its provenance and a knowledge graph that carries its evidence, as plain
+> files you own.
 
 The core names **Capabilities** — narrow typed interfaces like `Parser`, `EntityExtractor`,
 `PIIDetector` — and never names a model. **Providers** fulfil them as installable plugins, so
@@ -16,8 +16,9 @@ each section depends only on the ones above it.
 ## Start here
 
 - [docs/agent-briefing.md](docs/agent-briefing.md): The structured briefing for coding agents — the mental model, every Provider available per Stage, the Pipeline YAML contract, the CLI, the output schema, and the six things that will burn you. Start here.
-- [CONTEXT.md](CONTEXT.md): The canonical glossary. Use these terms exactly; it also lists the synonyms this project bans.
-- [README.md](README.md): The project front door — what it does, the 60-second quickstart, and what is and is not measured.
+- [CONTEXT.md](CONTEXT.md): The canonical glossary. Use these terms exactly; it also lists the synonyms this project bans. Its last section holds terms that are decided and not yet in code.
+- [README.md](README.md): The project front door — what the code does today, the quick start, what is and is not proven, and the decided direction.
+- [ROADMAP.md](ROADMAP.md): What is built, what is next and known limitations. The project was re-scoped (ADR-0067); the "next" part is decided and not built.
 
 ## Using the framework
 

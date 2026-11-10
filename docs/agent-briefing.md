@@ -25,12 +25,19 @@ Two ground rules, both load-bearing:
 
 ## 1 · What the framework does
 
-Point it at messy documents. Get back two portable deliverables, as plain files:
+Point it at documents. Get back two portable deliverables, as plain files:
 
-- a **RAG corpus** — one row per chunk, PII-masked, embedded, carrying provenance to the exact
-  character offset and source page;
+- a **corpus** — one row per chunk, PII-masked, carrying provenance to the exact character
+  offset and source page, with an embedding column when an Embedder is wired;
 - a **knowledge graph** — resolved canonical entities and the relations between them, every edge
   carrying the sentence it came from.
+
+This page describes what runs today. The project has been re-scoped
+([ADR-0067](adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md));
+none of that work is built, and the repository's
+[`ROADMAP.md`](https://github.com/ddickmann/latence/blob/main/ROADMAP.md) lists it. Do not
+describe a re-scope term (Assertion, Decision, Concept, Binding, ledger) as something the code
+has.
 
 ```
 corpus folder ──► latence setup ──► latence.stack.yaml ──► latence process
@@ -179,8 +186,11 @@ JSON rather than trusting this table.
 
 The schema authority is the Pydantic model in
 `packages/latence-core/src/latence_core/pipeline.py`. Both `Pipeline` and `Stage` are
-`extra="forbid"` — **any unknown key is a hard error**, which means a typo fails loudly at
-`stack check` rather than being ignored.
+`extra="forbid"` — **any unknown key at those two levels is a hard error**, which means a typo
+fails loudly at `stack check` rather than being ignored. A Stage's `config` is different: it is a
+free mapping that the Provider reads, and a key the Provider does not read is not an error. The
+one exception is the nine keys ADR-0068 removed (`REMOVED_CONFIG_KEYS` in the same file):
+`stack check` reports them and a run refuses a Pipeline that carries one.
 
 | Top-level key | Required | Default | Notes |
 |---|---|---|---|

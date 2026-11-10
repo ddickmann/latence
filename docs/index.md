@@ -1,32 +1,60 @@
 # Latence Framework
 
-**Turn messy, siloed enterprise data into high-quality, AI-ready data — model-agnostic and cloud-agnostic.**
+**Documents in. A corpus that carries its provenance and a knowledge graph that carries its
+evidence out, as plain files.**
 
-Latence is a pipeline framework that takes documents from where they live (a folder, an
-object store, a source system) all the way to two portable, AI-ready deliverables: a
-**RAG-ready corpus** and a **knowledge graph**, both written as files (ADR-0017). It
-defines the *stack and orchestration contracts*; the concrete models and infrastructure
-are the adopter's choice.
+Latence is a Python framework that reads documents from where they live (a folder, an object
+store, a source system) and writes two things as files: a corpus in which every chunk carries its
+source page and character offsets, and a knowledge graph in which every edge carries the text it
+was extracted from. A Redaction Stage masks PII, and the corpus export writes the masked text.
 
-- **Model-agnostic.** The framework never names a model. It names **Capabilities** —
-  narrow, typed interfaces like `Parser`, `EntityExtractor`, `PIIDetector` — and lets
-  **Providers** (an in-process model, a remote endpoint, a cloud service) fulfil them as
-  plugins. See [Capability protocols with provider plugins](adr/0004-capability-protocols-with-provider-plugins.md).
+The framework names no model. Each Stage depends on a narrow typed interface, a **Capability**,
+and a **Provider** package supplies the model behind it.
+
+This page describes what the code does today. The project has been re-scoped, and that work is
+not built: see [Where this is going](#where-this-is-going).
+
+## Quick start
+
+CPU-only, offline, no credentials:
+
+```bash
+git clone https://github.com/ddickmann/latence && cd latence
+uv sync
+uv run latence-demo        # runs the whole pipeline on a bundled corpus; exits non-zero on drift
+```
+
+Then on your own documents:
+
+```bash
+uv run latence setup       # guided wizard: writes a validated stack config
+uv run latence process     # runs it
+```
+
+The [quickstart](quickstart.md) walks through each step and says what a correct result looks
+like.
+
+## What is built
+
+- **Model-agnostic.** The framework names **Capabilities**, narrow typed interfaces like
+  `Parser`, `EntityExtractor` and `PIIDetector`, and lets **Providers** (an in-process model, a
+  remote endpoint, a cloud service) fulfil them as plugins. See
+  [Capability protocols with provider plugins](adr/0004-capability-protocols-with-provider-plugins.md).
 - **Cloud-agnostic.** Storage is an [fsspec seam](adr/0009-fsspec-storage-seam.md); the
   same Pipeline runs on a laptop or as an Airflow DAG through a swappable
-  [Runner](adr/0003-stage-library-with-pluggable-runners.md). Two Runners ship today — the
-  built-in local one and `latence-runner-airflow`; other substrates (Databricks Workflows,
+  [Runner](adr/0003-stage-library-with-pluggable-runners.md). Two Runners ship today: the
+  built-in local one and `latence-runner-airflow`. Other substrates (Databricks Workflows,
   plain containers) are seam-compatible follow-ons, not shipped adapters.
 - **CPU-first, offline by default.** Every Stage ships a deterministic, dependency-light
   reference Provider that runs on a laptop with no GPU and no network
   ([ADR-0007](adr/0007-cpu-first-reference-providers.md)). GPU serving is an upgrade path,
   not a prerequisite.
-- **Honest about licensing.** Reference Providers ship **permissive weights only**;
+- **Licences are declared per Provider.** Reference Providers ship **permissive weights only**;
   restricted-license models are opt-in ([ADR-0012](adr/0012-permissive-only-reference-providers-gemma-opt-in.md)).
   Every Provider declares a [`ProviderProfile`](reference/providers.md) with its verified
   weights-and-code license, compute, and footprint.
 
-## The pipeline at a glance
+### The pipeline at a glance
 
 ```mermaid
 flowchart LR
@@ -39,7 +67,7 @@ flowchart LR
     Graph -. optional .-> Completion["Graph Completion"]
     Graph --> Export
     Completion --> Export
-    Export --> Corpus["RAG corpus (files)"]
+    Export --> Corpus["Corpus (files)"]
     Export --> KG["Knowledge graph (files)"]
 ```
 
@@ -56,6 +84,57 @@ A **Pipeline** is a DAG of **Stages** over a set of input documents, declared on
 executable by any **Runner**. Every record at every Stage carries immutable
 **Provenance** back to its source, and each run emits a first-class
 [**Quality Report**](adr/0008-quality-report-as-first-class-artifact.md).
+
+### What the repository contains
+
+| | |
+| --- | --- |
+| **Packages** | 30 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
+| **Decisions** | 72 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0073 (0040 was never issued). |
+| **Runners** | Two shipped: the built-in local Runner and `latence-runner-airflow`. |
+| **Outputs** | A corpus and a knowledge graph, as files: Parquet, JSONL, TTL, GraphML. |
+
+## Status
+
+Pre-1.0, one maintainer, nothing released. The suite, strict typing over source and tests, and
+Provider conformance run on every change. Throughput is measured per Stage on named hardware
+([performance results](perf-results.md)), and the quality suites are on the
+[benchmarks page](BENCHMARKS.md). A Stage with no row there has not been measured.
+
+Not proven: the pinned end-to-end benchmark protocol has not been run
+([its page](BENCHMARKS-E2E.md) holds placeholders), extraction and resolution quality have no
+current measurement, and scale beyond the measured envelopes is open. Query-time retrieval is
+out of scope: that tooling was removed
+([ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)).
+The repository's
+[README](https://github.com/ddickmann/latence#status) has the full list.
+
+## Where this is going
+
+**Nothing in this section is built.** It states decisions that are recorded and accepted.
+
+The project was re-scoped in November 2026
+([ADR-0067](adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md)).
+It is to become an engine that builds a traceable semantic and ontology layer: canonical
+concepts, their names and aliases, the relations between them, and the bindings that tie them to
+physical data. Turning documents into a corpus and a graph stays, as one input path of that
+engine. The name stays Latence.
+
+- The layer is rebuilt by replaying an append-only ledger of statements and decisions, so a
+  human decision survives every rebuild
+  ([ADR-0069](adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md)).
+- Warehouse metadata becomes an input, and row values are compared inside the customer's own
+  workspace
+  ([ADR-0071](adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md),
+  [ADR-0072](adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md)).
+- Classes, properties and constraints are proposals that a human approves, exported in W3C
+  standards
+  ([ADR-0073](adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md)).
+- A consuming agent harness reads the result through one declared seam
+  ([ADR-0070](adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).
+
+The [roadmap](https://github.com/ddickmann/latence/blob/main/ROADMAP.md) lists this work in
+priority order, next to what the current code lacks for each item.
 
 ## Find your reading path
 
@@ -153,15 +232,6 @@ and you should not need to hunt for anything else.
 
 </div>
 
-## What the repository actually contains
-
-| | |
-| --- | --- |
-| **Packages** | 30 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
-| **Decisions** | 72 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0073 (0040 was never issued). |
-| **Runners** | Two shipped: the built-in local Runner and `latence-runner-airflow`. |
-| **Deliverables** | A RAG corpus and a knowledge graph, as files — Parquet, JSONL, TTL, GraphML ([ADR-0017](adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md)). |
-
 ## Install
 
 Nothing is published to PyPI — the distribution channel is the signed GitHub Release
@@ -193,5 +263,5 @@ Provider packages, so the core stays lean. Step-by-step: the
     ([`COMMERCIAL.md`](https://github.com/ddickmann/latence/blob/main/COMMERCIAL.md)).
     Ownership and the personally-owned posture are unchanged
     ([ADR-0001](adr/0001-open-source-core-owned-personally.md)). See the
-    [README](https://github.com/ddickmann/latence) for the marketing overview,
+    [README](https://github.com/ddickmann/latence) for the overview,
     and the [Decision Log](adr/index.md) for the reasoning behind every seam.

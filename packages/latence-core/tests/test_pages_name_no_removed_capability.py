@@ -26,11 +26,19 @@ from _removed_capabilities import lines_naming_a_removed_capability
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The pages held to the rule. A page joins this list when it has been rewritten against the
-#: tree, in the same change, so the entry is red before the rewrite and green after it.
+#: tree, in the same change. The first three entries were red before their rewrite and green
+#: after it. The five front-door pages below them joined with their rewrite on 2026-11-10 and
+#: were already green: the removal slice had taken the names out, and what the rewrite changed
+#: was how the pages frame the product. They are listed so that the names cannot come back.
 _PAGES = (
     "ROADMAP.md",
     "docs/anatomy/02-extraction-and-privacy.md",
     "docs/anatomy/03-corpus-to-knowledge-graph.md",
+    "README.md",
+    "docs/index.md",
+    "CONTEXT.md",
+    "llms.txt",
+    "docs/agent-briefing.md",
 )
 
 #: What a paragraph must say when it names a removed capability.

@@ -1,6 +1,8 @@
 # Latence Framework
 
-A model-agnostic, cloud-agnostic framework that turns messy, siloed enterprise data into high-quality, AI-ready data — from document parsing through NER, relation extraction, PII handling, enrichment, and disambiguation to corpus-level knowledge graphs. The framework defines the stack and orchestration contracts; the concrete models and infrastructure are the adopter's choice.
+A model-agnostic, cloud-agnostic framework that reads documents and writes a corpus that carries its Provenance and a knowledge graph that carries its Evidence: parsing, entity and relation extraction, PII redaction, disambiguation and graph assembly. The framework defines the stack and orchestration contracts; the concrete models and infrastructure are the adopter's choice.
+
+This glossary has two parts. Everything down to *Decided, not yet in code* names something the code does today. That last section holds the vocabulary of the re-scope (ADR-0067, ADR-0069 to ADR-0073), which is decided and not built.
 
 ## Language
 
@@ -31,7 +33,7 @@ Whether a page map's boundaries were MEASURED (the Parser segmented the source, 
 _Avoid_: page source, page confidence (it is not a score — it is provenance of the boundaries)
 
 **Chunk**:
-The Stage that splits parsed documents into retrieval-sized pieces while preserving offsets, page alignment, Provenance, and Classification.
+The Stage that splits parsed documents into smaller pieces (by token budget, by sentence window or by page) while preserving offsets, page alignment, Provenance, and Classification.
 _Avoid_: Enrichment (banned project-wide — it meant chunking in superpod and feature computation in dataset-intelligence)
 
 **Entity Extraction**:
@@ -40,7 +42,7 @@ _Avoid_: Extraction (unqualified)
 
 **Relation Extraction**:
 The Stage that finds typed relations between entity mentions within a document.
-_Avoid_: Ontology (reserved exclusively for formal ontology induction, a post-v1 plugin)
+_Avoid_: Ontology (reserved for the schema level of the re-scope: classes, their hierarchy, properties and constraints. Nothing in the code builds one; see *Decided, not yet in code*)
 
 **Redaction**:
 The Stage that detects PII and produces masked/replaced variants of the text.
@@ -108,7 +110,7 @@ A full recompute of all blocks, triggered when a drift metric crosses a threshol
 _Avoid_: Full rebuild, refresh
 
 **Retraction**:
-The default deletion disposition — a soft tombstone: the document and its derived records are excluded from every Export, the knowledge graph, and the RAG corpus, but retained for audit and rollback, with affected clusters re-resolved.
+The default deletion disposition — a soft tombstone: the document and its derived records are excluded from every Export, the knowledge graph, and the exported corpus, but retained for audit and rollback, with affected clusters re-resolved.
 _Avoid_: Soft delete, archive
 
 **Purge**:
@@ -134,3 +136,48 @@ _Avoid_: Seed record, raw record (unqualified), pre-parsed document
 **Raw document**:
 A source document as first read by Source — its bytes plus stamped Provenance and Classification, before any Parse decoding — carried as a ParserInput. Contrast the DocumentRecord, which is the *parsed* (markdown) form the Parser produces.
 _Avoid_: Blob, payload, input record (unqualified)
+
+## Decided, not yet in code
+
+The re-scope (ADR-0067) fixed the vocabulary below in ADR-0069. ADR-0070 to ADR-0073 use it. **No code implements any of these terms.** No record type, Stage or file in the repository carries them. They are here so that pages and discussions use one word for one thing before the first slice is built. Each entry is taken from the decision text and is marked *decided, not yet in code*.
+
+**Ledger**:
+The append-only record of Assertions and Decisions, and the engine's one source of truth. Nothing in the semantic layer exists without at least one Assertion behind it, and the layer anyone reads is a deterministic replay of the ledger. A correction is a new Decision, never an edit of an old record.
+_Status_: decided (ADR-0069), not yet in code.
+_Avoid_: Audit log (a log records that something changed; it cannot rebuild the layer)
+
+**Assertion**:
+One statement harvested from one source. It always carries a Locator and the Actor that produced it.
+_Status_: decided (ADR-0069), not yet in code.
+
+**Locator**:
+Where an Assertion came from: a text span, a Unity Catalog object, a query, a lineage edge or a value sketch.
+_Status_: decided (ADR-0069), not yet in code. Today a record points at its source through Provenance, which requires a file and character offsets.
+
+**Decision**:
+An accept, reject, merge, split or edit made on top of Assertions, with its Actor and the evidence it used. A human Decision outranks the engine and is never overwritten by a later run.
+_Status_: decided (ADR-0069), not yet in code. Today the merge log records what the resolver decided; no record type holds a person's accept or reject.
+
+**Actor**:
+Who produced an Assertion or made a Decision: the engine (rules and calibrated bands), a model (with its name and version) or a human.
+_Status_: decided (ADR-0069), not yet in code.
+
+**Concept**:
+A schema-level element: a class, a property or relation, or a measure or dimension. A Concept is only ever a proposal until a human approves it.
+_Status_: decided (ADR-0069, ADR-0073), not yet in code. Today the type vocabulary is a flat list of canonical types with their aliases.
+
+**Entity**:
+One canonical real-world thing, made by merging records and mentions. Entities form the instance level.
+_Status_: decided (ADR-0069), not yet in code.
+_Not to be confused with_ the two ways the Stages above already use the word. An *entity mention* is a typed span of text that Entity Extraction finds. A *canonical entity* is what Disambiguation produces from mentions and what Graph Assembly writes as a node. Both meanings stay, and the Stage names stay. The ADR-0069 Entity is the second meaning widened: it also merges warehouse records, it is rebuilt by replaying the Ledger, and it can carry a Binding. Until that is built, write "mention" for a span and "canonical entity" for a node, and keep the capitalised "Entity" for the ADR-0069 sense.
+
+**Binding**:
+A tie from the semantic layer to a Unity Catalog object, keyed on the object's id and carrying a role (for example *defines*, *identifies*, *measures*). A *Concept binding* ties a Concept to a table, column or metric-view measure. An *Entity binding* ties an Entity to the rows that represent it.
+_Status_: decided (ADR-0069), not yet in code.
+
+**Accept band**:
+The calibrated band inside which the engine may accept an instance-level merge or link by itself. Outside it the engine accepts nothing alone, and a model's verdict accepts nothing by itself either.
+_Status_: decided (ADR-0069), not yet in code. Today the resolvers merge on rules and configured thresholds, and no band exists.
+
+**Review band**, **reject band**:
+Not fixed by an accepted decision. ADR-0069 names only the accept band. Splitting what lies outside it into a band a person reviews and a band that is dropped is a candidate design that has not become an ADR. Do not write either term as decided.
