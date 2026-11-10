@@ -28,9 +28,14 @@ image:
   page-image to the chat-completions route of a running vLLM server that serves
   **LightOn-OCR-2** (`lightonai/LightOnOCR-2-1B`, Apache-2.0 weights **and** code). The pipeline
   reaches it by `base_url`, the server's `/v1` root — one config value. Production OCR is a warm
-  server rather than an in-process model (ADR-0030); the pod measurement behind that choice
-  (vLLM at concurrency about 2.7× faster than optimised in-process transformers) is recorded in
-  [Serving LightOn-OCR with vLLM](serving-lighton-vllm.md).
+  server rather than an in-process model (ADR-0030); the serve recipe is in
+  [Serving LightOn-OCR with vLLM](serving-lighton-vllm.md). The two paths have not been measured
+  against each other on one machine: `PERF-RESULTS.md` lists that comparison as pending. Each
+  path has one record of its own. The in-process ladder in `PERF-RESULTS.md` reached about 151
+  pages per hour on one RTX 2000 Ada. The served run of the August 2026 benchmark campaign
+  recorded 2.2 to 2.5 pages per second on its pod
+  (`benchmark/sota-campaign/stages/s2-ocr/metrics.json`). The hardware and the corpus differ, so
+  the two figures are not a ratio.
 * **LLM endpoint (optional).** The endpoint LLM Providers (`relation.llm`, `entity.endpoint`, schema
   induction) call any OpenAI-compatible server — a local vLLM, OpenRouter, or an on-prem gateway —
   again by `base_url`. Off by default in the deploy artifacts.
@@ -121,8 +126,12 @@ environment `deploy/env/served-ocr-server/` outright. Its `serve.sh` sets the va
 the GPU reports compute capability 12.0 or higher, or when the capability cannot be read, and it
 defaults to the `--gpu-memory-utilization 0.72` / `--max-num-seqs 16` the live 519-page run needed.
 
-An **optional LLM server** (if you enable it) has its own GPU need sized to the model you pick
-(default `Qwen/Qwen2.5-7B-Instruct` → one ~24 GB GPU at bf16).
+An **optional LLM server** (if you enable it) has its own GPU need, sized to the model you pick.
+The compose file and the chart default to `Qwen/Qwen2.5-7B-Instruct`, served at bfloat16 with
+`--gpu-memory-utilization=0.85` and `--max-model-len=8192`, and request one GPU for it. That
+model's card lists 7.62 billion parameters, which at two bytes each is about 15 GB for the weights
+alone. The serving cache comes on top and grows with the context length and the number of
+concurrent requests.
 
 ## Option A — Docker Compose (single box)
 
@@ -207,15 +216,25 @@ request `nvidia.com/gpu`. The defaults match the common `nvidia.com/gpu.present`
 
 ## Orchestrators — the Airflow adapter
 
-`latence-runner-airflow` runs the identical Stages as an Airflow DAG (`build_dag`) — the proof
-that the Runner seam (ADR-0003/0030) really is pluggable. Its honest status: **tested, not yet
-operated**. The in-process topological driver (an Airflow-shaped executor + XCom stand-in) runs
-in every test environment; the real `build_dag` structure tests run in CI's heavy lane against a
-constraints-pinned `apache-airflow` install (`.github/workflows/ci-heavy.yml`, `airflow-dag`
-job). No production Airflow deployment of the framework has been stood up yet — treat the
-adapter as a verified seam you finish operationalising in your own Airflow, not a turnkey
-deployment artifact. The Compose/Helm paths above are the deployment shapes this guide stands
-behind end-to-end.
+`latence-runner-airflow` runs the identical Stages as an Airflow DAG (`build_dag`), the second
+Runner behind the seam of ADR-0003/0030. Its status is **tested, not operated**, and the tests
+are of two kinds:
+
+* **Without Airflow installed**, in every test environment. The adapter's in-process driver runs
+  the same per-Stage callable in topological order with an XCom stand-in.
+  `packages/latence-runner-airflow/tests/test_airflow_runner.py` asserts that it exports the same
+  record ids and text as the local Runner, that it writes no local checkpoints, and that a
+  failing Stage fails the run.
+* **With `apache-airflow` installed**, in CI's heavy lane (`.github/workflows/ci-heavy.yml`,
+  job `airflow-dag`, Airflow 2.9.3 under its official constraints file). Two tests in
+  `test_airflow_dag_path.py` build the real `DAG`: one checks its tasks and that the report task
+  sits downstream of every sink, the other calls each operator's callable in order and checks
+  that the exports and the Quality Report are written. The job fails if either is skipped.
+
+No test starts an Airflow scheduler or executor, and the repository holds no record of a run
+under one. Treat the adapter as a tested seam to finish in your own Airflow, not as a turnkey
+deployment artifact. The Compose and Helm paths above are the deployment shapes this guide
+describes end to end.
 
 ## Air-gapped deployment
 
@@ -227,10 +246,13 @@ in an air-gapped VPC you **pre-cache** it.
    Face (or from an internal mirror), download the weights into what will become `HF_HOME`:
 
    ```bash
-   pip install 'huggingface_hub[cli]'
-   HF_HOME=/mnt/hf-cache huggingface-cli download lightonai/LightOnOCR-2-1B
+   pip install huggingface_hub
+   HF_HOME=/mnt/hf-cache hf download lightonai/LightOnOCR-2-1B
    # (and your LLM model if you enable the LLM server)
    ```
+
+   `hf` is the command current `huggingface_hub` releases install. Older releases installed it
+   as `huggingface-cli`, with the same `download` subcommand.
 
    Then copy `/mnt/hf-cache` onto the `hf-cache` PVC (or bake it into a PV the cluster mounts). The
    vLLM servers mount it at `/data/hf-cache` (`HF_HOME=/data/hf-cache` is set on those pods).
