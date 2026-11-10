@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The single-page labeling UI — one static HTML document, no external assets (ticket 21).
 
-Served verbatim by :mod:`latence_benchmark.labeling.server` at ``/``. The page asks
-``/api/state`` which mode the server runs in and renders either the gold-set flow
-(document browser + span marking by text selection) or the calibration flow (one
-Hyperedge card at a time, 1/2/3 judgment keys). Everything is inline — a strict
-no-external-assets page that works on ``127.0.0.1`` with no network at all.
+Served verbatim by :mod:`latence_benchmark.labeling.server` at ``/``. The page renders the
+gold-set flow: a document browser and span marking by text selection. Everything is inline —
+a strict no-external-assets page that works on ``127.0.0.1`` with no network at all.
 
 Span offsets: each chunk's text is rendered as a SINGLE text node (``textContent``) with
 ``white-space: pre-wrap``, so a browser selection inside one chunk maps 1:1 onto character
@@ -77,28 +75,6 @@ PAGE = """<!DOCTYPE html>
   .hint { color: var(--dim); font-size: 12px; margin-top: 10px; }
   kbd { background: var(--panel2); border: 1px solid #2b3646; border-radius: 4px;
         padding: 0 5px; font-family: ui-monospace, monospace; font-size: 11px; }
-  /* calibration */
-  #cal { max-width: 860px; margin: 0 auto; padding: 20px; }
-  #cal .tau { background: var(--panel); border: 1px solid #232d3b; border-radius: 8px;
-              padding: 14px 16px; font-size: 16px; white-space: pre-wrap; }
-  #cal h3 { color: var(--dim); font-size: 12px; text-transform: uppercase;
-            letter-spacing: 0.06em; margin: 18px 0 6px; }
-  #cal pre { background: var(--panel); border: 1px solid #232d3b; border-radius: 8px;
-             padding: 10px 12px; overflow-x: auto; font-size: 12px; margin: 0; }
-  .ent { display: inline-block; background: var(--panel2); border: 1px solid #2b3646;
-         border-radius: 12px; padding: 2px 10px; margin: 2px 4px 2px 0; font-size: 12px;
-         font-family: ui-monospace, monospace; }
-  #judge { display: flex; gap: 10px; margin-top: 18px; }
-  #judge button { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #2b3646;
-                  background: var(--panel2); color: var(--text); cursor: pointer;
-                  font: inherit; }
-  #judge button.j-correct.sel { background: var(--good); color: #08101c; }
-  #judge button.j-incorrect.sel { background: var(--bad); color: #08101c; }
-  #judge button.j-partial.sel { background: var(--warn); color: #08101c; }
-  #nav { display: flex; gap: 10px; margin-top: 14px; align-items: center;
-         color: var(--dim); }
-  #nav button { background: var(--panel2); border: 1px solid #2b3646; color: var(--text);
-                border-radius: 6px; padding: 6px 14px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -131,7 +107,7 @@ function renderCoverage(cov) {
   $("warning").textContent = cov.warning || "";
 }
 
-/* ---------------- gold-set mode ---------------- */
+/* ---------------- gold set ---------------- */
 const gold = { docs: [], activeDoc: null, chunks: {}, spans: [] };
 
 async function goldInit() {
@@ -270,99 +246,8 @@ function message(text, isErr) {
   box.className = isErr ? "err" : "ok";
 }
 
-/* ---------------- calibration mode ---------------- */
-const cal = { rows: [], judgments: {}, index: 0 };
-
-async function calInit() {
-  $("title").textContent = "latence-label — γ calibration";
-  $("main").innerHTML = '<div id="content"><div id="cal">' +
-    '<div id="pos" class="hint"></div><div class="tau" id="tau"></div>' +
-    '<h3>Entities</h3><div id="ents"></div>' +
-    '<h3>Relations</h3><pre id="rels"></pre>' +
-    '<div id="judge">' +
-    '<button class="j-correct" data-j="correct">1 · correct</button>' +
-    '<button class="j-incorrect" data-j="incorrect">2 · incorrect</button>' +
-    '<button class="j-partial" data-j="partial">3 · partial</button></div>' +
-    '<label for="note">Note (optional, <kbd>n</kbd>)</label><input type="text" id="note">' +
-    '<div id="nav"><button id="prev">&larr; prev</button>' +
-    '<button id="next">next &rarr;</button><span id="msg"></span></div>' +
-    '<p class="hint"><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> judge + advance · ' +
-    '<kbd>&larr;</kbd>/<kbd>&rarr;</kbd> navigate</p></div></div>';
-  const data = await api("/api/hyperedges");
-  cal.rows = data.hyperedges;
-  cal.judgments = data.judgments;
-  cal.index = cal.rows.findIndex(r => !(r.hyperedge_id in cal.judgments));
-  if (cal.index < 0) cal.index = 0;
-  document.querySelectorAll("#judge button").forEach(btn =>
-    btn.addEventListener("click", () => judge(btn.dataset.j)));
-  $("prev").addEventListener("click", () => move(-1));
-  $("next").addEventListener("click", () => move(1));
-  document.addEventListener("keydown", (e) => {
-    if (document.activeElement === $("note")) {
-      if (e.key === "Enter") { e.preventDefault(); $("note").blur(); }
-      return;
-    }
-    if (e.key === "1") judge("correct");
-    else if (e.key === "2") judge("incorrect");
-    else if (e.key === "3") judge("partial");
-    else if (e.key === "ArrowLeft") move(-1);
-    else if (e.key === "ArrowRight") move(1);
-    else if (e.key === "n") { e.preventDefault(); $("note").focus(); }
-  });
-  renderCal();
-}
-
-function calProgress() {
-  const judged = Object.keys(cal.judgments).length;
-  $("progress").textContent = judged + " / " + cal.rows.length + " judged";
-}
-
-function renderCal() {
-  calProgress();
-  const row = cal.rows[cal.index];
-  if (!row) { $("tau").textContent = "no hyperedges loaded"; return; }
-  const extras = [];
-  if (row.gamma !== null) extras.push("γ=" + row.gamma.toFixed(3));
-  if (row.support !== null) extras.push("support=" + row.support);
-  if (row.arity !== null) extras.push("arity=" + row.arity);
-  $("pos").textContent = (cal.index + 1) + " / " + cal.rows.length + " — " +
-    row.hyperedge_id + (extras.length ? "  ·  " + extras.join("  ") : "");
-  $("tau").textContent = row.tau_text;
-  $("ents").innerHTML = row.entity_node_ids.map(e => "<span class='ent'>" + esc(e) + "</span>")
-    .join("") || "<span class='hint'>none</span>";
-  let rels = row.relations_json;
-  try { rels = JSON.stringify(JSON.parse(rels), null, 2); } catch (err) { /* show raw */ }
-  $("rels").textContent = rels;
-  const current = cal.judgments[row.hyperedge_id];
-  document.querySelectorAll("#judge button").forEach(btn =>
-    btn.classList.toggle("sel", !!current && current.judgment === btn.dataset.j));
-  $("note").value = current && current.note ? current.note : "";
-}
-
-async function judge(value) {
-  const row = cal.rows[cal.index];
-  if (!row) return;
-  try {
-    const body = JSON.stringify({ hyperedge_id: row.hyperedge_id, judgment: value,
-                                  note: $("note").value.trim() });
-    const saved = await api("/api/judgments", { method: "POST",
-      headers: { "Content-Type": "application/json" }, body });
-    cal.judgments[row.hyperedge_id] = saved.judgment;
-    message("saved", false);
-    move(1);
-  } catch (err) { message(err.message, true); }
-}
-
-function move(delta) {
-  cal.index = Math.min(Math.max(cal.index + delta, 0), Math.max(cal.rows.length - 1, 0));
-  renderCal();
-}
-
 /* ---------------- boot ---------------- */
-api("/api/state").then((state) => {
-  if (state.mode === "gold") return goldInit();
-  return calInit();
-}).catch((err) => { $("main").textContent = "failed to load state: " + err.message; });
+goldInit().catch((err) => { $("main").textContent = "failed to load: " + err.message; });
 </script>
 </body>
 </html>

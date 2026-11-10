@@ -4,41 +4,41 @@
 
 Offline throughout: the corpus fixture reproduces the real S1 export row shape
 (``records.jsonl`` lines carrying ``record_id`` / ``content`` / ``masked_content`` /
-``provenance.document_id``), and the calibration fixture writes a parquet with the exact
-column set of the S9 export's ``graph-hyperedges.parquet``. The HTTP handler is driven by
-the stdlib client against a loopback server on an ephemeral port — no browser.
+``provenance.document_id``). The HTTP handler is driven by the stdlib client against a
+loopback server on an ephemeral port — no browser.
+
+The harness once had a second mode that served a judgment UI over a hyperedge parquet. No
+pipeline writes that file any more, so the mode is gone; the last section pins its absence.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import latence_benchmark.labeling as labeling
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from latence_benchmark.labeling import (
-    JUDGMENTS,
     Corpus,
     GoldQuestion,
     SpanIntegrityError,
     SupportingFact,
-    append_judgment,
     append_question,
     coverage,
     load_corpus,
     load_gold,
-    load_hyperedges,
-    load_judgments,
     question_id,
-    validate_calibration,
     validate_gold,
 )
 from latence_benchmark.labeling.cli import main as label_main
-from latence_benchmark.labeling.server import CalibrationSession, GoldSession, make_server
+from latence_benchmark.labeling.server import GoldSession, make_server
+from latence_benchmark.labeling.ui import PAGE
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -127,55 +127,6 @@ def _fact(
         char_end=end,
         text=chunk.text[start:end] if text is None else text,
     )
-
-
-HYPEREDGE_SCHEMA = pa.schema(
-    [
-        ("hyperedge_id", pa.string()),
-        ("entity_node_ids", pa.string()),
-        ("relations", pa.string()),
-        ("tau_text", pa.string()),
-        ("token_cost", pa.int64()),
-        ("token_counter", pa.string()),
-        ("gamma", pa.float64()),
-        ("support", pa.int64()),
-        ("has_relations", pa.bool_()),
-        ("arity", pa.int64()),
-        ("member_mention_ids", pa.string()),
-        ("merged_sources", pa.string()),
-        ("properties", pa.string()),
-        ("evidence", pa.string()),
-    ]
-)
-
-
-@pytest.fixture
-def hyperedges_parquet(tmp_path: Path) -> Path:
-    rows = [
-        {
-            "hyperedge_id": f"he-{i}",
-            "entity_node_ids": json.dumps([f"node-{i}", "node-x"]),
-            "relations": json.dumps([{"label": "founded", "confidence": 0.9}]),
-            "tau_text": f"Sentence {i} about node-{i} and node-x.",
-            "token_cost": 12,
-            "token_counter": "whitespace",
-            "gamma": 0.25 * i,
-            "support": i,
-            "has_relations": True,
-            "arity": 2,
-            "member_mention_ids": "[]",
-            "merged_sources": "[]",
-            "properties": "{}",
-            "evidence": "{}",
-        }
-        for i in range(3)
-    ]
-    path = tmp_path / "graph-hyperedges.parquet"
-    table = pa.Table.from_pylist(rows, schema=HYPEREDGE_SCHEMA)
-    # cast, not type-ignore: pyarrow is dynamically typed in this repo's mypy config, and
-    # an ignore would flip to "unused" in environments where pyarrow is absent.
-    cast("Any", pq).write_table(table, path)
-    return path
 
 
 # -- corpus loading ---------------------------------------------------------
@@ -351,65 +302,6 @@ def test_coverage_empty_set_has_no_warning() -> None:
     assert cov.total == 0 and cov.warning is None and cov.one_hop_share == 0.0
 
 
-# -- calibration mode -------------------------------------------------------
-
-
-def test_hyperedges_load_from_export_schema(hyperedges_parquet: Path) -> None:
-    rows = load_hyperedges(hyperedges_parquet)
-    assert [r.hyperedge_id for r in rows] == ["he-0", "he-1", "he-2"]
-    assert rows[1].tau_text == "Sentence 1 about node-1 and node-x."
-    assert rows[1].entity_node_ids == ("node-1", "node-x")
-    assert rows[1].gamma == 0.25
-    assert json.loads(rows[1].relations_json) == [{"label": "founded", "confidence": 0.9}]
-
-
-def test_judgment_format_round_trip_and_resume(tmp_path: Path, hyperedges_parquet: Path) -> None:
-    out = tmp_path / "judgments.jsonl"
-    known = {r.hyperedge_id for r in load_hyperedges(hyperedges_parquet)}
-    append_judgment(out, known, "he-0", "correct")
-    append_judgment(out, known, "he-1", "partial", note="entity set too wide")
-    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    assert lines[0] == {"hyperedge_id": "he-0", "judgment": "correct"}
-    assert lines[1] == {"hyperedge_id": "he-1", "judgment": "partial", "note": "entity set too wide"}
-    # Resume + correction: re-judging appends and the loader keeps the last word.
-    append_judgment(out, known, "he-0", "incorrect")
-    judgments = load_judgments(out)
-    assert judgments["he-0"].judgment == "incorrect"
-    assert len(judgments) == 2
-
-
-def test_judgment_vocabulary_and_unknown_id_rejected(
-    tmp_path: Path, hyperedges_parquet: Path
-) -> None:
-    out = tmp_path / "judgments.jsonl"
-    known = {r.hyperedge_id for r in load_hyperedges(hyperedges_parquet)}
-    assert JUDGMENTS == ("correct", "incorrect", "partial")
-    with pytest.raises(ValueError, match="judgment must be one of"):
-        append_judgment(out, known, "he-0", "maybe")
-    with pytest.raises(ValueError, match="unknown hyperedge_id"):
-        append_judgment(out, known, "he-99", "correct")
-    assert not out.exists()
-
-
-def test_validate_calibration_accept_and_reject(tmp_path: Path, hyperedges_parquet: Path) -> None:
-    out = tmp_path / "judgments.jsonl"
-    known = {r.hyperedge_id for r in load_hyperedges(hyperedges_parquet)}
-    append_judgment(out, known, "he-0", "correct")
-    assert validate_calibration(out, known) == []
-    out.write_text(
-        out.read_text(encoding="utf-8")
-        + json.dumps({"hyperedge_id": "he-77", "judgment": "correct"})
-        + "\n"
-        + json.dumps({"hyperedge_id": "he-1", "judgment": "sorta"})
-        + "\n",
-        encoding="utf-8",
-    )
-    errors = validate_calibration(out, known)
-    assert len(errors) == 2
-    assert any("unknown hyperedge_id" in e for e in errors)
-    assert any("malformed" in e for e in errors)
-
-
 # -- HTTP handler (stdlib client, no browser) --------------------------------
 
 
@@ -489,39 +381,6 @@ def test_gold_server_serves_page_state_documents_and_saves(
     assert status == 409 and "already labeled" in error["error"]
 
 
-def test_calibration_server_lists_and_records(
-    hyperedges_parquet: Path, tmp_path: Path
-) -> None:
-    session = CalibrationSession.open(load_hyperedges(hyperedges_parquet), tmp_path / "j.jsonl")
-    server = make_server(session, port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    conn = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-    try:
-        status, state = _request(conn, "GET", "/api/state")
-        assert status == 200 and state["mode"] == "calibration" and state["total"] == 3
-
-        status, listing = _request(conn, "GET", "/api/hyperedges")
-        assert status == 200 and len(listing["hyperedges"]) == 3
-
-        body = {"hyperedge_id": "he-2", "judgment": "partial", "note": "over-merged"}
-        status, saved = _request(conn, "POST", "/api/judgments", body)
-        assert status == 200 and saved["judged"] == 1
-        assert load_judgments(tmp_path / "j.jsonl")["he-2"].note == "over-merged"
-
-        status, error = _request(conn, "POST", "/api/judgments", {"hyperedge_id": "he-2", "judgment": "meh"})
-        assert status == 400 and "judgment must be one of" in error["error"]
-
-        # Gold-only endpoints do not exist in calibration mode.
-        status, error = _request(conn, "GET", "/api/documents")
-        assert status == 404
-    finally:
-        conn.close()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
 # -- CLI --------------------------------------------------------------------
 
 
@@ -543,29 +402,6 @@ def test_cli_validate_gate_accept_and_reject(
     assert "mismatch" in err and "FAIL" in err
 
 
-def test_cli_validate_covers_calibration_sidecar(
-    tmp_path: Path, export_dir: Path, corpus: Corpus, hyperedges_parquet: Path
-) -> None:
-    gold_path = tmp_path / "gold.jsonl"
-    facts = [_fact(corpus, "chunk-a1", 0, 5), _fact(corpus, "chunk-b1", 0, 6)]
-    append_question(gold_path, corpus, "With sidecar?", 2, facts)
-    judgments = tmp_path / "judgments.jsonl"
-    known = {r.hyperedge_id for r in load_hyperedges(hyperedges_parquet)}
-    append_judgment(judgments, known, "he-0", "correct")
-    argv = [
-        "validate",
-        "--export-dir", str(export_dir),
-        "--gold", str(gold_path),
-        "--hyperedges", str(hyperedges_parquet),
-        "--calibration", str(judgments),
-    ]
-    assert label_main(argv) == 0
-    judgments.write_text(
-        json.dumps({"hyperedge_id": "he-404", "judgment": "correct"}) + "\n", encoding="utf-8"
-    )
-    assert label_main(argv) == 1
-
-
 def test_cli_stats_prints_coverage_and_warning(
     tmp_path: Path, corpus: Corpus, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -574,3 +410,76 @@ def test_cli_stats_prints_coverage_and_warning(
     assert label_main(["stats", "--gold", str(gold_path)]) == 0
     out = capsys.readouterr().out
     assert "questions labeled: 1" in out and "WARNING" in out and "1-hop share 100%" in out
+
+
+# -- the removed hyperedge calibration mode ----------------------------------
+
+
+def test_calibrate_is_not_a_command(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        label_main(["calibrate", "--hyperedges", "graph-hyperedges.parquet", "--out", "j.jsonl"])
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'calibrate'" in capsys.readouterr().err
+
+
+def test_validate_takes_no_hyperedge_arguments(
+    tmp_path: Path, export_dir: Path, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gold_path = tmp_path / "gold.jsonl"
+    facts = [_fact(corpus, "chunk-a1", 0, 5), _fact(corpus, "chunk-b1", 0, 6)]
+    append_question(gold_path, corpus, "No sidecar any more?", 2, facts)
+    base = ["validate", "--export-dir", str(export_dir), "--gold", str(gold_path)]
+    for extra in (["--hyperedges", "graph-hyperedges.parquet"], ["--calibration", "j.jsonl"]):
+        with pytest.raises(SystemExit) as excinfo:
+            label_main([*base, *extra])
+        assert excinfo.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+    # The gold gate itself is untouched.
+    assert label_main(base) == 0
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["gold", "--help"], ["validate", "--help"]])
+def test_help_names_no_hyperedge_mode(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        label_main(argv)
+    assert excinfo.value.code == 0
+    text = capsys.readouterr().out.lower()
+    assert "hyperedge" not in text
+    assert "calibrat" not in text
+
+
+def test_the_page_carries_no_calibration_flow() -> None:
+    page = PAGE.lower()
+    assert "hyperedge" not in page
+    assert "calibration" not in page
+    assert "/api/judgments" not in page
+
+
+def test_the_package_has_no_calibration_module() -> None:
+    assert importlib.util.find_spec("latence_benchmark.labeling.calibration") is None
+    removed = {
+        "JUDGMENTS",
+        "HyperedgeJudgment",
+        "HyperedgeRow",
+        "append_judgment",
+        "load_hyperedges",
+        "load_judgments",
+        "validate_calibration",
+    }
+    assert removed.isdisjoint(labeling.__all__)
+    for name in sorted(removed):
+        assert not hasattr(labeling, name)
+
+
+def test_the_server_has_no_hyperedge_endpoints(
+    gold_server: tuple[HTTPConnection, Path],
+) -> None:
+    conn, _gold_path = gold_server
+    status, error = _request(conn, "GET", "/api/hyperedges")
+    assert status == 404 and "no such endpoint" in error["error"]
+    status, error = _request(
+        conn, "POST", "/api/judgments", {"hyperedge_id": "he-0", "judgment": "correct"}
+    )
+    assert status == 404 and "no such endpoint" in error["error"]

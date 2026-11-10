@@ -6,9 +6,8 @@ No framework, no external assets, no new dependency: the whole interface is
 :data:`latence_benchmark.labeling.ui.PAGE` at ``/`` plus a small JSON API under ``/api/``.
 The server binds loopback only — this is a single-labeler local tool, never a service.
 
-Every write goes through the verified append paths
-(:func:`latence_benchmark.labeling.goldset.append_question` /
-:func:`latence_benchmark.labeling.calibration.append_judgment`), so a span that does not
+Every write goes through the verified append path
+(:func:`latence_benchmark.labeling.goldset.append_question`), so a span that does not
 round-trip against the corpus is rejected with a 400 before a byte hits the gold file.
 """
 
@@ -22,12 +21,6 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-from latence_benchmark.labeling.calibration import (
-    HyperedgeJudgment,
-    HyperedgeRow,
-    append_judgment,
-    load_judgments,
-)
 from latence_benchmark.labeling.goldset import (
     Corpus,
     GoldQuestion,
@@ -55,7 +48,7 @@ class ApiError(Exception):
 
 @dataclass
 class GoldSession:
-    """Gold-set mode state: the loaded corpus + the resumable gold file."""
+    """The session state: the loaded corpus + the resumable gold file."""
 
     corpus: Corpus
     out_path: Path
@@ -151,58 +144,10 @@ class GoldSession:
             }
 
 
-@dataclass
-class CalibrationSession:
-    """Calibration mode state: the Hyperedge rows + the resumable judgment file."""
-
-    hyperedges: list[HyperedgeRow]
-    out_path: Path
-    judgments: dict[str, HyperedgeJudgment] = field(default_factory=dict)
-    lock: Lock = field(default_factory=Lock)
-
-    @classmethod
-    def open(cls, hyperedges: list[HyperedgeRow], out_path: Path) -> CalibrationSession:
-        return cls(hyperedges=hyperedges, out_path=out_path, judgments=load_judgments(out_path))
-
-    def state(self) -> dict[str, Any]:
-        return {
-            "mode": "calibration",
-            "out": str(self.out_path),
-            "total": len(self.hyperedges),
-            "judged": len(self.judgments),
-        }
-
-    def listing(self) -> dict[str, Any]:
-        return {
-            "hyperedges": [h.to_json() for h in self.hyperedges],
-            "judgments": {k: j.to_json() for k, j in self.judgments.items()},
-        }
-
-    def save(self, body: dict[str, Any]) -> dict[str, Any]:
-        try:
-            hyperedge_id = str(body["hyperedge_id"])
-            judgment = str(body["judgment"])
-            note = str(body.get("note", ""))
-        except (KeyError, TypeError) as exc:
-            raise ApiError(400, f"malformed judgment payload: {exc}") from exc
-        known = {h.hyperedge_id for h in self.hyperedges}
-        with self.lock:
-            try:
-                record = append_judgment(self.out_path, known, hyperedge_id, judgment, note)
-            except ValueError as exc:
-                raise ApiError(400, str(exc)) from exc
-            self.judgments.pop(record.hyperedge_id, None)
-            self.judgments[record.hyperedge_id] = record
-            return {"judgment": record.to_json(), "judged": len(self.judgments)}
-
-
-Session = GoldSession | CalibrationSession
-
-
 class LabelingHandler(BaseHTTPRequestHandler):
     """Routes ``/`` (the page) and ``/api/*`` (JSON) onto the session object."""
 
-    def __init__(self, session: Session, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, session: GoldSession, *args: Any, **kwargs: Any) -> None:
         self.session = session
         super().__init__(*args, **kwargs)
 
@@ -239,18 +184,14 @@ class LabelingHandler(BaseHTTPRequestHandler):
                 self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             elif parsed.path == "/api/state":
                 self._send_json(200, self.session.state())
-            elif parsed.path == "/api/documents" and isinstance(self.session, GoldSession):
+            elif parsed.path == "/api/documents":
                 self._send_json(200, self.session.documents())
-            elif parsed.path == "/api/document" and isinstance(self.session, GoldSession):
+            elif parsed.path == "/api/document":
                 query = parse_qs(parsed.query)
                 document_id = (query.get("document_id") or [""])[0]
                 self._send_json(200, self.session.document(document_id))
-            elif parsed.path == "/api/questions" and isinstance(self.session, GoldSession):
+            elif parsed.path == "/api/questions":
                 self._send_json(200, self.session.existing())
-            elif parsed.path == "/api/hyperedges" and isinstance(
-                self.session, CalibrationSession
-            ):
-                self._send_json(200, self.session.listing())
             else:
                 self._send_json(404, {"error": f"no such endpoint: GET {parsed.path}"})
         except ApiError as exc:
@@ -260,9 +201,7 @@ class LabelingHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_body()
-            if (parsed.path == "/api/questions" and isinstance(self.session, GoldSession)) or (
-                parsed.path == "/api/judgments" and isinstance(self.session, CalibrationSession)
-            ):
+            if parsed.path == "/api/questions":
                 self._send_json(200, self.session.save(body))
             else:
                 self._send_json(404, {"error": f"no such endpoint: POST {parsed.path}"})
@@ -270,7 +209,7 @@ class LabelingHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": str(exc)})
 
 
-def make_server(session: Session, port: int = 0) -> ThreadingHTTPServer:
+def make_server(session: GoldSession, port: int = 0) -> ThreadingHTTPServer:
     """Bind the labeling server on loopback. ``port=0`` picks a free port (tests)."""
     handler = partial(LabelingHandler, session)
     return ThreadingHTTPServer((HOST, port), handler)
