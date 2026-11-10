@@ -9,9 +9,15 @@
 #   * vllm-ocr   — a real vLLM OpenAI-compatible server serving LightOn-OCR-2 (GPU) — the OCR the
 #                  pipeline's Parse stage calls at http://vllm-ocr:8000/v1.
 #   * vllm-llm   — OPTIONAL local LLM server (enable with `--profile llm`) for the endpoint LLM
-#                  Providers (relation.llm / entity.endpoint / schema induction). Off by default.
+#                  Providers (relation.llm / entity.endpoint / schema induction). Off by default,
+#                  and the shipped stack has no Stage that calls it.
 #   * pipeline   — the deploy/Dockerfile image running deploy/stacks/served-ocr.yaml over ./corpus,
-#                  writing the RAG corpus + KG + Quality Report to ./out.
+#                  writing the chunked corpus (corpus.jsonl + corpus.parquet) and the Quality
+#                  Report under ./out. The shipped stack ends at the corpus export: it has no
+#                  extraction, redaction or graph Stage, so it writes no knowledge graph.
+#
+# The pipeline's run id is fixed (prod-0001). A second `docker compose up` over the same ./out
+# resumes that run from its checkpoints and does not read documents added to ./corpus since.
 #
 # GPU required for vllm-ocr (nvidia-container-toolkit). The pipeline + the CPU spine are CPU-only.
 # Everything is wired by env (base_url); no key or model weights are embedded (ADR-0012).
@@ -74,8 +80,9 @@ services:
       retries: 40          # first boot downloads + loads the model; allow ~10 min
       start_period: 60s
 
-  # OPTIONAL local LLM server for the endpoint LLM Providers. Enable with `--profile llm` and point
-  # the relevant stages at http://vllm-llm:8000/v1 (see deploy/stacks/served-ocr.yaml comments).
+  # OPTIONAL local LLM server for the endpoint LLM Providers. Enable with `--profile llm`. The
+  # shipped stack has no Stage that calls it: add one with an endpoint Provider and set its
+  # base_url to http://vllm-llm:8000/v1 (see deploy/stacks/served-ocr.yaml comments).
   vllm-llm:
     profiles: ["llm"]
     image: vllm/vllm-openai:v0.11.0
@@ -118,7 +125,7 @@ services:
       # LATENCE_METRICS_TEXTFILE: "/data/out/metrics/latence.prom"
     volumes:
       - ./corpus:/data/corpus:ro         # your input documents (read-only)
-      - ./out:/data/out                  # RAG corpus + KG + Quality Report land here
+      - ./out:/data/out                  # the corpus export + the Quality Report land here
       - ./stacks:/etc/latence:ro         # the served-ocr stack config (ConfigMap-equivalent)
     command:
       - "run"

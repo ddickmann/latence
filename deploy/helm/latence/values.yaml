@@ -13,13 +13,17 @@ fullnameOverride: ""
 
 # --- The pipeline run (Job / CronJob) -----------------------------------------------------
 pipeline:
-  # "job" runs once (a one-shot ingest); "cronjob" runs on a schedule (incremental re-runs).
+  # "job" runs once (a one-shot ingest); "cronjob" runs the same command on a schedule.
   kind: job                      # job | cronjob
   # The stack YAML the pipeline runs. Rendered verbatim into a ConfigMap (see configmap-stack).
   # Defaults to the served-OCR stack; base_url below is injected so it points at the in-cluster
   # vLLM Service regardless of what the file says.
+  # The run id is passed as written to every run. A run that reuses a run id is a RESUME: Stages
+  # whose checkpoints exist on the data PVC are replayed, not run again. A CronJob run after the
+  # first therefore does not read documents added since, and is NOT an incremental ingest. The
+  # chart has no template that runs `latence delta`; see docs/deployment.md.
   runId: run-0001
-  # CronJob-only: the schedule + concurrency policy for recurring incremental runs.
+  # CronJob-only: the schedule + concurrency policy for the recurring runs.
   schedule: "0 2 * * *"
   concurrencyPolicy: Forbid      # never overlap two pipeline runs (the runner is WIP=1)
   successfulJobsHistoryLimit: 3
@@ -185,7 +189,8 @@ secrets:
 
 # --- Persistent storage: corpus/output + the HF model cache -------------------------------
 persistence:
-  # The corpus (input) + output (RAG corpus, KG, Quality Report) volume, mounted at /data.
+  # The corpus (input) + output (corpus export, Quality Report) volume, mounted at /data. The
+  # default stack has no graph Stage, so no knowledge graph is written.
   data:
     enabled: true
     existingClaim: ""            # bring your own PVC (e.g. an NFS/RWX claim the corpus is staged into)
