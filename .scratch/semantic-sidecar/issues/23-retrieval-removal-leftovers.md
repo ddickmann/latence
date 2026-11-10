@@ -13,7 +13,8 @@ places where the code and its own help text disagree. Each needs a fix or a deci
 
 **Left over from the removal**
 
-1. **The release gates still demand removed capabilities.** `RELEASE-GATES.md` Gates 2 and 3,
+1. *(Done 2026-11-10; owner chose "replace with the new bars".)* **The release gates still
+   demanded removed capabilities.** `RELEASE-GATES.md` Gates 2 and 3,
    and its closing section, require SPLADE proven as a live signal against a real Qdrant and a
    graph leg proven to retrieve. `test_public_release_gate.py` asserts that "splade" and
    "graph leg" appear there. Neither can ever be met now. **Owner's decision:** what the release
@@ -34,7 +35,12 @@ places where the code and its own help text disagree. Each needs a fix or a deci
 
 **Found on the way, not caused by the removal**
 
-7. **A purge keeps the document's file name.** `latence purge` says "NOTHING is retained".
+7. *(Done 2026-11-10; owner chose "scrub them on purge".)* A purge now drops every live
+   listing of the document from every Corpus Version, and with it the file name and content
+   hash. **One deviation from the owner's choice:** the content-addressed id stays, as a
+   DELETED tombstone. `DeltaRunner._prior_deletions` reads it to keep a Source that still serves
+   the file from re-ingesting the document, so removing it would let an erased document come
+   back. The help text says so. Original finding: **a purge kept the document's file name.** `latence purge` says "NOTHING is retained".
    `CorpusStore._reconcile_manifest` rewrites only the fingerprint and the record count of each
    Corpus Version manifest and keeps the delta lineage verbatim, and `DeltaEntry` carries
    `file_name`. So after a purge the document's id, content hash and file name are still in
