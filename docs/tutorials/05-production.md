@@ -449,22 +449,24 @@ knobs that apply to it: `dtype`, `compile` and `batch_size` for the GLiNER encod
 sentence-transformers Embedder, `quantize` as well for the two GLiNER2 Providers, `dtype`,
 `compile` and `ocr_batch_size` for the OCR parsers, and `max_concurrency` alone for the endpoint
 Providers. A Provider outside that list is not swept, and an Embedder that appears only nested
-inside another Stage's config is recorded as not tunable through that stack. The sample is the
-corpus bundled for stack validation, not your documents.
+inside another Stage's config is recorded as not tunable through that stack.
 
 The sweep runs under a **hard correctness gate**. The baseline (fp32, no compile, batch 1) is
 probed first. Any other setting that crashes — including an inference-time
 `BackendCompilerFailed`, which only shows up at inference and not at compile — or whose
 checkpoint bytes differ from the baseline's is **rejected**. `tune` picks the fastest eligible
 setting per Provider, writes a device-fingerprinted `tuned/<device>.yaml`, and prints a report
-listing winners **and rejected knobs**. The file lands in a `tuned/` directory two levels above
-the stack file, which for `stacks/gpu-sota.yaml` is the repository root; `--out` names another
-place.
+listing winners **and rejected knobs**. The file lands in a `tuned/` directory beside the folder
+that holds the stack file, which for `stacks/gpu-sota.yaml` is the repository root; `--out`
+names another place.
 
-Each throughput in that report is the sample size divided by the median duration of the timed
-runs (`--repeats`), taken after an untimed warm-up. Nothing is extrapolated. A winner more than
-100 times faster than its baseline is treated as a measurement fault: the baseline is timed
-again, and the speedup is marked suspect if the ratio holds.
+Read the figures in that report as a comparison between settings on one device. A timed run is
+one run of the whole stack over the corpus bundled for stack validation, with only that
+Provider's knobs changed. It is not a run over your documents, and the probe does not cut the
+corpus down to `--sample` documents. Each figure is `--sample` divided by the median wall time
+of the timed runs (`--repeats`), taken after an untimed warm-up, so it is not a count of records
+per second. A winner more than 100 times faster than its baseline is treated as a measurement
+fault: the baseline is timed again, and the speedup is marked suspect if the ratio holds.
 
 ```bash
 uv run latence run gpu.stack.yaml --tuned tuned/<device>.yaml
