@@ -57,8 +57,8 @@ Resolved 2026-11-10. The removal is merged into the working branch.
 | Item | Result |
 |---|---|
 | `scripts/verify-local.sh` green | Every lane after the secret scan passed on the removal tree: workspace sync, editable installs, ruff, strict mypy, the full suite (4,332 passed, 17 skipped), Provider conformance, stack validation, environment specs, the compatibility matrix and the bake-off matrices. **The secret-scan lane fails locally** on a fixture string in `test_redaction_recall_benchmark.py` that is not in the audited baseline. It fails the same way without the removal, the file is unchanged from `main`, and CI's own secret-scan lane passes. **Cause (found 2026-11-10):** `detect-secrets` verifies some key shapes against the vendor's API. For this Stripe-shaped fixture it calls `api.stripe.com`; where that host is reachable the key is reported invalid and the finding is dropped, and where it is blocked, as here, the finding stays unverified and is kept. The gate's result therefore depends on the network. Scanning with verification off and auditing the fixture into the baseline would make it deterministic; that is a change to a security gate and is the owner's call. |
-| No import, entry point or stack references a removed module | Met. The only code mentions left are dated schema-history comments. |
-| **No doc references a removed module** | **Not met; moved by decision.** Ten pages still describe removed features under a dated warning that names what no longer applies: `docs/BENCHMARKS-E2E.md`, `docs/deployment.md`, `docs/anatomy/index.md`, `docs/tutorials/01`, `02`, `04` and `05`, `docs/guides/benchmark-campaign.md`, `docs/guides/incremental-ingest.md` and `docs/evidence/enterprise-serving-03-incremental-ingest.md`. Their rewrite joins the docs-and-site rewrite in the map. |
+| No import, entry point or stack references a removed module | Met for imports, entry points and stacks. **Not complete in behaviour:** the benchmark campaign's reuse check and the labelling tool's hyperedge mode still serve removed features, and two help texts are stale. See *What the retrieval removal left behind*. |
+| **No doc references a removed module** | **Mostly met.** The ten pages that described removed features were rewritten against the current code on 2026-11-10; measurements from the earlier pipeline stay only as dated records that name what that pipeline contained. Still open and moved to *What the retrieval removal left behind*: the release gates, `ROADMAP.md`, and anatomy chapters 2 and 3. |
 | Doc-truth tests pass with corrected counts | Met (54 passed). A new test checks that documented lint commands name paths that exist; it was red on two removed directories first. |
 | `uv lock` clean | Met (`uv lock --check` exits 0). |
 | Same nodes and edges as before | Met. Before and after runs of the demo, the example pipelines and every kept stack give equal node and edge records, apart from the schema version (36 node rows and 176 edge rows in the Parquet exports). |
@@ -70,3 +70,6 @@ is a diagram script host this environment's network blocks).
 **Kept on purpose.** The removed export chapter also documented behaviour that stays, so a
 shorter chapter replaces it: `docs/anatomy/04-knowledge-graph-export.md` covers the four files
 the graph export writes, their columns, and that it does not redact entity names.
+
+**Follow-up.** [What the retrieval removal left behind](23-retrieval-removal-leftovers.md)
+lists what this removal missed and the unrelated defects the page rewrite found.
