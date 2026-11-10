@@ -29,8 +29,9 @@ from latence_core.quality import (
 from latence_core.runner import LocalRunner
 
 
-def test_schema_version_is_v20() -> None:
-    # v20 carries BOTH extraction-redesign additions (they ship in the same revision). T5:
+def test_schema_version_is_v21() -> None:
+    # v21 (ADR-0068) REMOVES the two retrieval-only sections: ``context_enrichment`` and
+    # ``graph.hyperedges``. v20 carries BOTH extraction-redesign additions (they ship in the same revision). T5:
     # StageMetrics gained the induction COST columns (calls / dedup cache hits / endpoint-reported
     # tokens / budget-exhausted), so per-chunk induction's cost is readable in the report. T3
     # (ADR-0054): the report gained an optional ``type_consolidation`` roll-up (N raw induced types
@@ -39,8 +40,8 @@ def test_schema_version_is_v20() -> None:
     # (chunks_enriched / avg_neighbors_per_chunk / hub_entities_capped). v18 (H-C1 §4):
     # RedactionQuality gained ``redaction_disabled_for_sensitive``. v17 (P3-F3) added the optional
     # ``conformance`` roll-up; v16 (P3-F1) the StageMetrics profile/device columns.
-    assert QUALITY_SCHEMA_VERSION == 20
-    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 20
+    assert QUALITY_SCHEMA_VERSION == 21
+    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 21
 
 
 def test_completeness_passes_only_when_provenance_classification_and_offsets_align() -> None:

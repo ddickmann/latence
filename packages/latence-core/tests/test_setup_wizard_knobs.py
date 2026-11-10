@@ -76,7 +76,7 @@ runner = CliRunner()
 # the model-window test: a synthetic string of repeated words would understate the chunker→mdeberta
 # expansion the pod measured on real documents.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_REAL_TEXT_FILES = ("README.md", "CONTEXT.md", "docs/DEEP-DIVE.md")
+_REAL_TEXT_FILES = ("README.md", "CONTEXT.md", "docs/anatomy/03-corpus-to-knowledge-graph.md")
 
 
 def _src_dir(tmp_path: Path) -> str:

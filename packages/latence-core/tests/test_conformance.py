@@ -249,7 +249,6 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "redaction.presidio",
         "embedding.endpoint",
         "embedding.sentence_transformers",
-        "sparse.splade",
         "graph_completion.ultra",
         # source.sharepoint (#182) needs a tenant for live numbers, so it is verified against the
         # faithful offline Graph fake its package ships — flagged, never passed off as live.

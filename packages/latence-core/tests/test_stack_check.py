@@ -5,10 +5,10 @@ Three gaps this suite pins, each of which shipped:
 1. **The static checks were unreachable.** ``latence stack validate`` staged a corpus and ran the
    stack twice without ever calling the capability guard; ``latence process`` ran straight into
    execution. A hand-edited stack could only be checked by running it.
-2. **A nested ``{provider, config}`` block was nobody's job.** The blessed SOTA stack emits two of
-   them (``graph.config.graph_features``, ``export_corpus.config.bm25``) and neither was
-   capability-checked, device-skip-checked, or seen by any static tool — so a typo in
-   ``graph_features.pagerannk`` reached run time.
+2. **A nested ``{provider, config}`` block was nobody's job.** The blessed SOTA stack emits
+   several of them and a block outside the one hard-coded key was neither
+   capability-checked, device-skip-checked, nor seen by any static tool — so a typo in a nested
+   Provider name reached run time.
 3. **A block under the wrong Capability was silently ignored.** Nothing reads it; the operator gets
    no signal and no error.
 
@@ -140,15 +140,15 @@ def _runnable_stack(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
 
 
 def test_stack_validate_bites_on_a_sub_provider_block_that_nothing_reads(tmp_path: Path) -> None:
-    """``graph_features`` on an EXPORT stage is read by NOBODY — the harness must say so.
+    """An ``ocr`` block on an EXPORT stage is read by NOBODY — the harness must say so.
 
-    Before C8 this stack validated GREEN: the Export never looks at ``graph_features``, so the run
-    succeeded, every check passed, and the operator was left believing their graph was enriched.
+    Before C8 this stack validated GREEN: the Export never looks at ``ocr``, so the run
+    succeeded, every check passed, and the operator was left believing the block did something.
     Silent, and undetectable without reading the Export's source.
     """
     stack = _default_stack_dict()
-    _stage_of(stack, "export_corpus")["config"]["graph_features"] = {
-        "provider": "graph_features.pagerank",
+    _stage_of(stack, "export_corpus")["config"]["ocr"] = {
+        "provider": "parser.pdfplumber",
         "config": {},
     }
     path = _write(tmp_path, stack)
@@ -158,7 +158,7 @@ def test_stack_validate_bites_on_a_sub_provider_block_that_nothing_reads(tmp_pat
     assert not result.ok, result.render()
     static = next(c for c in result.checks if c.name == "static_check")
     assert not static.passed
-    assert "graph_features" in static.detail
+    assert "'ocr'" in static.detail
     assert "IGNORED" in static.detail
 
 
@@ -166,15 +166,15 @@ def test_stack_validate_bites_on_a_sub_provider_block_that_nothing_reads(tmp_pat
 
 
 def test_process_refuses_a_mistyped_nested_provider_before_running(tmp_path: Path) -> None:
-    """``graph_features.pagerannk`` must stop ``latence process`` at the door, with a suggestion.
+    """``embedding.hashng`` must stop ``latence process`` at the door, with a suggestion.
 
     Before C8 nothing static looked inside a nested block, so this typo survived ``latence setup``
     and died mid-run — after the corpus had been sourced, parsed, chunked and extracted. The
     operator's evidence that it stopped at the door: no run state was written at all.
     """
     path, stack = _runnable_stack(tmp_path)
-    _stage_of(stack, "graph")["config"]["graph_features"] = {
-        "provider": "graph_features.pagerannk",
+    _stage_of(stack, "export_corpus")["config"]["embedder"] = {
+        "provider": "embedding.hashng",
         "config": {},
     }
     path = _write(tmp_path, stack)
@@ -182,8 +182,8 @@ def test_process_refuses_a_mistyped_nested_provider_before_running(tmp_path: Pat
     result = cli.invoke(app, ["process", "--config", str(path)])
 
     assert result.exit_code == 2, result.output
-    assert "graph_features.pagerannk" in result.output
-    assert "did you mean 'graph_features.pagerank'" in result.output
+    assert "embedding.hashng" in result.output
+    assert "did you mean 'embedding.hashing'" in result.output
     # Nothing ran: no run state, no export, no corpus read.
     assert not (tmp_path / "store").exists()
 
@@ -230,11 +230,11 @@ def test_a_stage_provider_typo_is_named_with_a_suggestion_and_no_corpus_is_stage
 # -- REGRESSION 4: a nested GPU Provider was never device-skip-checked -------------------------
 
 
-def test_a_gpu_only_nested_graph_features_provider_is_skipped_with_flag() -> None:
-    """A ``graph_features`` block pinned to a GPU Provider must skip-with-flag on a CPU host.
+def test_a_gpu_only_nested_ocr_provider_is_skipped_with_flag() -> None:
+    """An ``ocr`` block pinned to a GPU Provider must skip-with-flag on a CPU host.
 
     Only ``config['embedder']`` was ever device-checked. Every other nested slot went straight to
-    the Runner, so a GPU-only community detector on a CPU box ran and failed instead of being
+    the Runner, so a GPU-only nested OCR model on a CPU box ran and failed instead of being
     honestly reported as skipped. The slot declaration now drives the pre-flight, so a slot added
     tomorrow is checked without touching the harness.
     """
@@ -246,14 +246,14 @@ def test_a_gpu_only_nested_graph_features_provider_is_skipped_with_flag() -> Non
         """Mirrors ProviderRegistry, and REJECTS the same things: an unregistered name raises."""
 
         def names(self) -> list[str]:
-            return ["graph.canonical", "graph_features.louvain"]
+            return ["parser.render", "parser.gpu_ocr"]
 
         def profile(self, name: str) -> ProviderProfile:
             if name not in self.names():
                 msg = f"No Provider registered as {name!r}"
                 raise KeyError(msg)
             return ProviderProfile(
-                compute="gpu" if name == "graph_features.louvain" else "cpu",
+                compute="gpu" if name == "parser.gpu_ocr" else "cpu",
                 memory_mb=512,
                 license="Apache-2.0",
                 license_verified=False,
@@ -262,59 +262,20 @@ def test_a_gpu_only_nested_graph_features_provider_is_skipped_with_flag() -> Non
             )
 
     stage = Stage(
-        name="graph",
-        capability=CapabilityKind.GRAPH_ASSEMBLY,
-        provider="graph.canonical",
+        name="parse",
+        capability=CapabilityKind.PARSE,
+        provider="parser.render",
         config={
-            "graph_features": {
-                "provider": "graph_features.louvain",
+            "ocr": {
+                "provider": "parser.gpu_ocr",
                 "config": {"device": "cuda"},
             }
         },
     )
     reason = _skip_reason_for_stage(stage, _GpuOnlyRegistry())  # type: ignore[arg-type]
     assert reason is not None
-    assert "graph_features" in reason
-    assert "graph_features.louvain" in reason
-
-
-# -- REGRESSION 5: a companion-less slot bit only at run time ----------------------------------
-
-
-def test_an_fde_converter_without_a_multivector_embedder_is_caught_offline(
-    tmp_path: Path,
-) -> None:
-    """The Export raises for this at construction time; the check finds it without constructing."""
-    stack = _default_stack_dict()
-    _stage_of(stack, "export_corpus")["config"]["fde_converter"] = {
-        "provider": "fde.reference",
-        "config": {},
-    }
-    path = _write(tmp_path, stack)
-
-    result = check_stack(path)
-
-    assert not result.ok
-    messages = [f.message for f in result.errors]
-    assert any("multivector_embedder" in m for m in messages), messages
-
-
-def test_keep_multivectors_without_a_multivector_embedder_is_caught_offline() -> None:
-    """The other companion rule (a bare boolean flag), from the same declaration."""
-    pipeline = Pipeline.from_yaml_text(
-        """
-name: flag
-storage_uri: file:///tmp/x
-stages:
-  - name: export_corpus
-    capability: export
-    provider: export.jsonl_parquet
-    config: {keep_multivectors: true}
-"""
-    )
-    result = check_stack(pipeline)
-    assert not result.ok
-    assert any("keep_multivectors" in f.message for f in result.errors)
+    assert "ocr" in reason
+    assert "parser.gpu_ocr" in reason
 
 
 # -- The command itself ------------------------------------------------------------------------
@@ -447,10 +408,9 @@ def test_the_check_is_deterministic() -> None:
 
 
 def test_the_blessed_sota_stack_nested_blocks_are_enumerable(tmp_path: Path) -> None:
-    """Both blocks the wizard's SOTA stack emits are found by ONE walk over the slot declaration.
+    """The nested blocks the wizard's SOTA stack emits are found by ONE walk over the slot declaration.
 
-    ``graph.config.graph_features`` and ``export_corpus.config.bm25`` were invisible to every
-    static tool; enumerating them is what lets the checker, the device pre-flight and the placement
+    Enumerating them is what lets the checker, the device pre-flight and the placement
     probe all see them. Read from the GENERATED config, not a hand-written fixture, so a wizard
     wiring change cannot make this test lie.
     """
@@ -478,8 +438,8 @@ def test_the_blessed_sota_stack_nested_blocks_are_enumerable(tmp_path: Path) -> 
         for stage in pipeline.stages
         for ref in stage_sub_providers(stage)
     }
-    assert ("graph", "graph_features", "graph_features.pagerank") in found
-    assert ("export_corpus", "bm25", "tokenizer.regex") in found
+    assert ("disambiguate", "embedder", "embedding.sentence_transformers") in found
+    assert ("export_corpus", "embedder", "embedding.sentence_transformers") in found
     # And the check has an opinion about them — the thing they never had.
     assert check_stack(pipeline).ok, check_stack(pipeline).render()
 
@@ -487,21 +447,11 @@ def test_the_blessed_sota_stack_nested_blocks_are_enumerable(tmp_path: Path) -> 
 def test_the_declared_slot_keys_are_exactly_the_frameworks_nested_keys() -> None:
     """EXACT, not a superset: a superset assertion cannot notice a walker that fell behind.
 
-    The former version of this test asserted ``{embedder, sparse_embedder, multivector_embedder}
-    <= declared_slot_keys()`` and stayed green for the whole time ``envspec`` kept walking its own
-    hard-coded 3-key tuple (R3-seams_real_not_hypothetical-0).
+    The former version of this test asserted a SUBSET ``<= declared_slot_keys()`` and stayed
+    green for the whole time ``envspec`` kept walking its own hard-coded key tuple
+    (R3-seams_real_not_hypothetical-0).
     """
-    assert declared_slot_keys() == frozenset(
-        {
-            "bm25",
-            "embedder",
-            "fde_converter",
-            "graph_features",
-            "multivector_embedder",
-            "ocr",
-            "sparse_embedder",
-        }
-    )
+    assert declared_slot_keys() == frozenset({"embedder", "ocr"})
 
 
 def test_a_newly_declared_slot_is_walked_without_editing_envspec(
@@ -565,7 +515,7 @@ def test_a_malformed_block_is_one_typed_config_error_at_every_slot(
     """Same mistake, same type, same wording — whichever Capability's slot it is written under."""
     for capability, key in (
         (CapabilityKind.EXPORT, "embedder"),
-        (CapabilityKind.GRAPH_ASSEMBLY, "graph_features"),
+        (CapabilityKind.PARSE, "ocr"),
         (CapabilityKind.TYPE_CONSOLIDATION, "embedder"),
     ):
         with pytest.raises(ConfigError, match=fragment):
@@ -579,7 +529,7 @@ def test_an_absent_block_parses_to_none() -> None:
 def test_asking_for_an_undeclared_slot_is_a_programming_error_not_a_config_error() -> None:
     """Operator input and caller bugs must not look alike (ADR-0034: failures are typed)."""
     with pytest.raises(LookupError):
-        sub_provider_ref({}, capability=CapabilityKind.EXPORT, key="graph_features")
+        sub_provider_ref({}, capability=CapabilityKind.EXPORT, key="ocr")
 
 
 def test_undeclared_keys_are_detected_per_capability() -> None:
@@ -592,12 +542,12 @@ stages:
     capability: export
     provider: export.jsonl_parquet
     config:
-      graph_features: {provider: graph_features.degree}
+      ocr: {provider: parser.pdfplumber}
       embedder: {provider: embedding.hashing}
       basename: corpus
 """
     ).stages[0]
-    assert undeclared_sub_provider_keys(export) == ("graph_features",)
+    assert undeclared_sub_provider_keys(export) == ("ocr",)
 
 
 def test_the_type_consolidator_capability_mismatch_is_a_contract_error() -> None:

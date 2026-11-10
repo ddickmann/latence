@@ -173,12 +173,6 @@ class TestExplicitFalsyFlagsReachValidation:
             ("--s3-chunk-max-tokens", "max_tokens"),
             ("--s3-chunk-min-tokens", "min_tokens"),
             ("--s3-induction-max-concurrency", "max_concurrency"),
-            ("--retrieval-packed-budget", "packed_budget"),
-            ("--retrieval-coe-budget", "coe_budget"),
-            ("--retrieval-seed-top-k", "seed_top_k"),
-            ("--retrieval-seed-docs-k", "seed_docs_k"),
-            ("--retrieval-seed-node-cap", "seed_node_cap"),
-            ("--retrieval-rescue-cap", "rescue_cap"),
         ],
     )
     def test_explicit_zero_int_hits_post_init_rejection(
@@ -200,17 +194,7 @@ class TestExplicitFalsyFlagsReachValidation:
             "--s3-chunk-overlap-tokens",
             "--s3-chunk-min-tokens",
             "--s3-induction-max-concurrency",
-            "--retrieval-packed-budget",
-            "--retrieval-coe-budget",
-            "--retrieval-seed-top-k",
-            "--retrieval-seed-docs-k",
-            "--retrieval-seed-node-cap",
-            "--retrieval-rescue-cap",
             "--s3-extraction-threshold",
-            "--retrieval-hop-weight",
-            "--retrieval-community-weight",
-            "--retrieval-centrality-weight",
-            "--retrieval-pack-centrality-weight",
         ],
     )
     def test_explicit_empty_numeric_is_loud_not_silently_defaulted(
@@ -290,8 +274,9 @@ class TestStatusAndFlow:
         assert rc == 0
         capsys.readouterr()
 
-        # resume advances into s3-pipeline; a reused-only selection (musique, hotpotqa)
-        # verifies the M6 exports without touching any pod, then awaits sign-off.
+        # resume advances into s3-pipeline, the last stage; a reused-only selection
+        # (musique, hotpotqa) verifies the M6 exports without touching any pod, then awaits
+        # sign-off.
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
         assert rc == 0
         assert "s3-pipeline: done" in capsys.readouterr().out
@@ -300,13 +285,10 @@ class TestStatusAndFlow:
         assert rc == 0
         capsys.readouterr()
 
-        # resume advances into s5-retrieval, the last stage. This fixture repo is a corpus
-        # tree, not a latence-framework checkout, so the matrix harness is REFUSED rather
-        # than run against whatever happens to be importable — the stage's own suite drives
-        # its behaviour through an injected harness.
+        # Every stage is approved, so resume has nothing left to advance into.
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
-        assert rc == 1
-        assert "S5 harness is not importable" in capsys.readouterr().err
+        assert rc == 0
+        assert "the campaign is complete" in capsys.readouterr().out
 
     def test_rerun_of_done_stage_is_noop(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

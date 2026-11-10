@@ -1,5 +1,11 @@
 # End-to-end results — GPU pipeline and retrieval
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The retrieval rows of this protocol can no longer be run from this repository.
+    The page is kept until it is rewritten.
+
 > **STATUS: UNFILLED — these are the numbers that gate public release.**
 >
 > Every value below is a placeholder. They are filled from a real GPU run, and this repository is

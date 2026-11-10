@@ -51,7 +51,6 @@ from typing import TYPE_CHECKING
 from latence_core.capability import (
     Chunker,
     ContentScreener,
-    ContextEnricher,
     Disambiguator,
     Embedder,
     EntityExtractor,
@@ -108,9 +107,9 @@ class CapabilityLevel(StrEnum):
 
 
 class StageInputShape(StrEnum):
-    """HOW the Runner delivers a Stage's input — the executor's four-way input decision, declared.
+    """HOW the Runner delivers a Stage's input — the executor's input decision, declared.
 
-    The Runner used to decide this in a four-way ``if`` chain over two hand-maintained frozensets,
+    The Runner used to decide this in an ``if`` chain over two hand-maintained frozensets,
     and the dispatch then re-decided it a second time to know whether ``incoming`` was safe to
     materialize. It is a fact about the Capability, so it is declared here with its siblings:
 
@@ -123,11 +122,6 @@ class StageInputShape(StrEnum):
         The Protocol is ``Iterable``-in and the Provider consumes it exactly ONCE, so the parents'
         checkpoints are read record-by-record into the Provider: the input transient is O(1)
         records rather than O(corpus-slice) (audit R2).
-    ``PER_CARRIER``
-        The Stage reads MORE than one carrier out of one ``depends_on`` set (Context Enrichment:
-        chunks + graph), and its Provider consumes each exactly once in its own order — so one
-        ``incoming`` stream cannot serve it and partitioning one would buffer a side whole-corpus.
-        It receives one INDEPENDENT lazy stream per carrier instead (dogfood-3).
     ``ACCUMULATOR``
         A corpus-level accumulator (ADR-0033) whose input IS the whole doc-level output: it streams
         each carrier from the parents' checkpoints, so nothing corpus-sized is ever a list. Exactly
@@ -137,7 +131,6 @@ class StageInputShape(StrEnum):
 
     GATHERED = "gathered"
     STREAMED = "streamed"
-    PER_CARRIER = "per_carrier"
     ACCUMULATOR = "accumulator"
 
 
@@ -155,7 +148,7 @@ class CarrierRequirement:
     ``{got}`` simply does not show one — the eager Relation-Extraction check never did.
 
     ``subclass_ok`` picks the match: ``False`` tests the carrier is present EXACTLY (the accumulator
-    checks' ``X not in present``), ``True`` accepts a subclass (the Context-Enrichment checks'
+    checks' ``X not in present``), ``True`` accepts a subclass (the Relation-Extraction checks'
     ``issubclass`` form, and the ``isinstance`` partition of a gathered list). Preserved per-rule
     rather than unified, because unifying it would silently change which inputs are accepted.
     """
@@ -182,8 +175,7 @@ class ExclusiveCarrier:
     """The "this Stage's input must be NOTHING BUT X" rule (Graph Assembly / Graph Completion).
 
     The mirror image of :class:`CarrierRequirement`: it rejects a carrier rather than requiring one,
-    which is why its verdict depends on EVERY type in the input and its carrier scan can never
-    short-circuit (see :attr:`StageInputPlan.scan_short_circuit`).
+    which is why its verdict depends on EVERY type in the input.
 
     ``message`` is a :meth:`str.format` template over ``{stage}``, ``{capability}`` and ``{wrong}``
     (the comma-joined sorted names of the carriers that must not be there).
@@ -215,31 +207,16 @@ class StageInputPlan:
     four-way branch, two hand-maintained frozensets the descriptor did not derive, the dispatch's
     second decision of the same shape, and a family of ~10 hand-written validator methods. All four
     are this one field.
-
-    ``scan_short_circuit`` says the carrier scan may stop the moment every required carrier has been
-    seen — nothing later in the stream can change a presence verdict. It is DECLARED rather than
-    derived from "has no :attr:`exclusive` rule" (which is the soundness condition) because it
-    changes how much of the input is READ: the accumulator checks that predate dogfood-3 still pay
-    the full pass, and turning that into an early exit is a measurable change to make deliberately,
-    not a side effect of moving the table.
     """
 
     shape: StageInputShape
     requires: tuple[CarrierRequirement, ...] = ()
     exclusive: ExclusiveCarrier | None = None
-    scan_short_circuit: bool = False
 
     @property
     def validates(self) -> bool:
         """Does this plan constrain its input at all? (False ⇒ the wiring check reads nothing.)"""
         return bool(self.requires) or self.exclusive is not None
-
-    @property
-    def short_circuit_carriers(self) -> tuple[type, ...]:
-        """The carriers a scan may stop at once all are seen — empty unless declared sound."""
-        if not self.scan_short_circuit:
-            return ()
-        return tuple(requirement.carrier for requirement in self.requires)
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,8 +252,7 @@ class CapabilityDescriptor:
         Corpus-level AND its own output is bounded by the knowledge graph rather than by the corpus,
         so the executor materializes its whole input and holds the result (ADR-0033). This is a
         strictly narrower fact than ``level is CORPUS``: an ``EXPORT`` is a sink (nothing downstream
-        holds its output) and ``CONTEXT_ENRICHMENT`` re-emits the entire chunk stream (its output is
-        corpus-sized, so treating it as an accumulator would defeat the streaming release).
+        holds its output).
     ``entry_point_prefixes``
         The ``latence.providers`` entry-point name prefixes that name this Capability
         (``entity.gliner`` → ``entity``). A dotted prefix discriminates on the second segment:
@@ -633,55 +609,6 @@ DESCRIPTORS: tuple[CapabilityDescriptor, ...] = (
         accumulates=True,
     ),
     CapabilityDescriptor(
-        kind=CapabilityKind.CONTEXT_ENRICHMENT,
-        protocol=ContextEnricher,
-        # W13/ADR-0039: a chunk→chunk transform emitting the SAME ChunkRecords with
-        # ``context_header`` populated; the stored chunk text stays byte-unchanged.
-        carrier=ChunkRecord,
-        # Corpus-level: a chunk's context header summarizes the assembled KG, so it cannot be
-        # computed before the graph exists — and a reused document's header can go stale.
-        level=CapabilityLevel.CORPUS,
-        # The MULTI-CARRIER Stage: it depends on the chunk stream (Chunk / Content-Screening /
-        # Schema-Induction) AND Graph Assembly, and its Provider consumes each of its inputs
-        # exactly once in its own order — so it gets one independent lazy stream per carrier
-        # rather than one gathered list to partition. Both parent-side carriers are required
-        # wiring; the run's EntityMentions come corpus-wide (not from a parent) and so are not
-        # checked here. The presence scan may stop as soon as both are seen — the correct case
-        # never reads past the first record of the second carrier.
-        input_plan=StageInputPlan(
-            shape=StageInputShape.PER_CARRIER,
-            requires=(
-                CarrierRequirement(
-                    carrier=ChunkRecord,
-                    subclass_ok=True,
-                    message=(
-                        "Stage {stage} (context_enrichment) received no ChunkRecords "
-                        "(got: {got}). A Context-Enrichment Stage must depend on the Chunk "
-                        "(or Content-Screening / Schema-Induction) Stage — the chunks it enriches. "
-                        "Check the Pipeline's depends_on wiring."
-                    ),
-                ),
-                CarrierRequirement(
-                    carrier=GraphRecord,
-                    subclass_ok=True,
-                    message=(
-                        "Stage {stage} (context_enrichment) received no GraphRecords "
-                        "(got: {got}). A Context-Enrichment Stage must also depend on the "
-                        "Graph Assembly Stage — the assembled KG it projects onto each chunk. "
-                        "Check the Pipeline's depends_on wiring."
-                    ),
-                ),
-            ),
-            scan_short_circuit=True,
-        ),
-        entry_point_prefixes=("context",),
-        conformance_case="context_enrichment",
-        quality_section="context_enrichment",
-        # NOT an accumulator: its output is the whole chunk stream (corpus-sized), so the executor
-        # streams and releases it like any other chunk→chunk transform (ADR-0033).
-        accumulates=False,
-    ),
-    CapabilityDescriptor(
         kind=CapabilityKind.EMBEDDING,
         protocol=Embedder,
         # Not a DAG node: an Export names its Embedder in ``config['embedder']`` (ADR-0017), so
@@ -703,7 +630,7 @@ DESCRIPTORS: tuple[CapabilityDescriptor, ...] = (
         # A pass-through sink: its carrier is whatever its nearest producing ancestor emits, so it
         # has none of its own (see :func:`export_carrier_of`).
         carrier=None,
-        # Materializes the whole corpus (and, with BM25, its term statistics).
+        # Materializes the whole corpus.
         level=CapabilityLevel.CORPUS,
         # It writes a file and holds what it materializes (streamed internally in row groups), so
         # a gathered list is what it needs — and the W17 reuse overlay is merged into that list.
@@ -915,20 +842,12 @@ STREAMED_INPUT_KINDS: frozenset[CapabilityKind] = frozenset(
     d.kind for d in DESCRIPTORS if d.input_plan.shape is StageInputShape.STREAMED
 )
 
-#: The MULTI-CARRIER Capabilities whose input the Runner streams PER CARRIER (ADR-0033,
-#: dogfood-3): they receive nothing through one ``incoming`` stream and open one independent lazy
-#: stream per carrier instead. Derived, like :data:`STREAMED_INPUT_KINDS`.
-PER_CARRIER_INPUT_KINDS: frozenset[CapabilityKind] = frozenset(
-    d.kind for d in DESCRIPTORS if d.input_plan.shape is StageInputShape.PER_CARRIER
-)
-
 __all__ = [
     "ACCUMULATOR_KINDS",
     "CORPUS_LEVEL_KINDS",
     "DESCRIPTORS",
     "DOCUMENT_LEVEL_KINDS",
     "ENTRY_POINT_PREFIX_HEADS",
-    "PER_CARRIER_INPUT_KINDS",
     "STREAMED_INPUT_KINDS",
     "CapabilityDescriptor",
     "CapabilityLevel",

@@ -208,9 +208,9 @@ class Storage:
         """Stream a **set** of sibling files, publishing all of them only once all are complete.
 
         The multi-file face of :meth:`atomic_writer`, for a deliverable that is a *group* of files
-        which must not appear one-by-one — the Export's ``records.jsonl`` + ``records.parquet`` (+
-        the optional multi-vector and BM25 sidecars), which a downstream reader treats as one
-        corpus (ADR-0033/0050). Every handle is written to its own temp sibling; not one byte is
+        which must not appear one-by-one — the Export's ``records.jsonl`` + ``records.parquet``,
+        which a downstream reader treats as one corpus (ADR-0033). Every handle is written to its
+        own temp sibling; not one byte is
         published until *every* handle has closed cleanly, so a write error part-way through the
         corpus can no longer leave a published ``records.parquet`` next to a missing
         ``records.jsonl``. On any exception every temp file is swept, exactly as

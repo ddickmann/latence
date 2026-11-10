@@ -161,19 +161,16 @@ nav:
       # the five tutorials landed from the docs-quickstart lane, so their nav entries are now
       # real files and `mkdocs build --strict` resolves them. Slugs are the filenames that
       # actually shipped (`tutorials/01-…` … `tutorials/05-…`, not the guessed `1-…`).
-      - Quickstart — from a folder to a queryable corpus: quickstart.md
+      - Quickstart — from a folder to a corpus and a knowledge graph: quickstart.md
       - Tutorials:
           - tutorials/index.md
           - Your first pipeline: tutorials/01-your-first-pipeline.md
           - Understanding the output: tutorials/02-understanding-the-output.md
-          - "Retrieval: four signals, fused": tutorials/03-retrieval.md
           - Bringing your own Provider: tutorials/04-bringing-your-own-provider.md
           - Production: tutorials/05-production.md
       - Read the results — the run console: getting-started/run-console.md
       - Long-form walkthroughs:
           - Fresh GPU pod → AI-ready data: TUTORIAL-fresh-pod-walkthrough.md
-          - RFC corpus → fused-retrieval proof: TUTORIAL-rfc-retrieval-proof.md
-          - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
           - GPU testing guide: GPU-TESTING-GUIDE.md
 
   # --- The evaluator's entry point -----------------------------------------------------------
@@ -182,17 +179,15 @@ nav:
       - Architecture: concepts/architecture.md
       - Domain language: concepts/domain-language.md
       - Pipeline Stages: pipeline/index.md
-      - "Deep dive: messy data → knowledge-graph retrieval": DEEP-DIVE.md
-      # The anatomy guide: the same territory as the deep dive, but exhaustive and grounded in
-      # the pipeline that actually produced the benchmark results. The index is readable alone;
-      # the five chapters are the zoom-in, in DAG order.
+      # The anatomy guide: exhaustive and grounded in the pipeline that actually produced the
+      # benchmark results. The index is readable alone; the three chapters are the zoom-in, in
+      # DAG order.
       - Pipeline anatomy:
           - anatomy/index.md
           - "1 · Ingest & document understanding": anatomy/01-ingest-and-document-understanding.md
           - "2 · Extraction & privacy": anatomy/02-extraction-and-privacy.md
           - "3 · Corpus → knowledge graph": anatomy/03-corpus-to-knowledge-graph.md
-          - "4 · Enrichment & export": anatomy/04-enrichment-and-export.md
-          - "5 · Retrieval": anatomy/05-retrieval.md
+          - "4 · The knowledge-graph export": anatomy/04-knowledge-graph-export.md
 
   # --- The Provider author's entry point -----------------------------------------------------
   - Providers:
@@ -219,11 +214,7 @@ nav:
           - Secrets handling: secrets.md
           - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
           - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
-      - Feed a retrieval engine:
-          - Retrieval-quality tooling — scope & boundary: retrieval-tooling.md
-          - Graph-rescue retrieval: guides/graph-rescue-retrieval.md
-          - "Serving with Qdrant: measured parity": guides/serving-qdrant.md
-          - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+      - Export:
           - Iceberg-table Export (optional): iceberg-export.md
       - Measure it:
           - Public benchmark results: BENCHMARKS.md
@@ -239,10 +230,7 @@ nav:
           - "G1 profound-testing gate — signed results": evidence/G1-RESULTS.md
           - The G1 gate specification: evidence/G1-profound-testing-gate.md
           - GPU SOTA sweep results: evidence/GPU-SOTA-SWEEP-RESULTS.md
-          - "Graph latency at scale (hypergraph index)": evidence/enterprise-serving-01-latency.md
-          - "Served on Qdrant: recall parity": evidence/enterprise-serving-02-qdrant-serving-parity.md
           - "Incremental ingest: byte-identical, O(changed)": evidence/enterprise-serving-03-incremental-ingest.md
-          - "Graph inertia: the rescue-lane study": evidence/graph-inertia.md
 
   - API Reference:
       - reference/index.md

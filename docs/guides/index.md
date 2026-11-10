@@ -44,21 +44,8 @@ framework? Start with [Getting Started](../getting-started/index.md) and
 
 <div class="grid cards" markdown>
 
-- :material-database-import: **[Retrieval-engine input specification](../RETRIEVAL-ENGINE-INPUT-SPEC.md)**
-  The exact contract a downstream retrieval engine consumes from a Latence run — the shape
-  of the RAG-ready corpus and knowledge graph.
-
-- :material-graph: **[Graph-rescue retrieval](graph-rescue-retrieval.md)**
-  The production graph-at-query-time architecture: base dense+BM25, a policy-gated graph
-  lane that appends (never fuses), and a token-budget selector — measured defaults, zero
-  LLM calls online.
-
-- :material-database-search: **[Serving with Qdrant](serving-qdrant.md)**
-  The verified Export → collection → served-queries path: pinned compose, `distance: dot`,
-  `hnsw_ef: 512` — recall parity with brute force measured on the full query sets.
-
 - :material-vector-combine: **[Embedders](../embedders.md)**
-  The opt-in RAG-corpus vector augmentation and how it plugs into Export.
+  The Embedder Capability as a resolution signal, and where each Stage names one.
 
 </div>
 

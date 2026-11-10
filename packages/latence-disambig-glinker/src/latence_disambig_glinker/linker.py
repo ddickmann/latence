@@ -260,8 +260,8 @@ def _apply_linking_results(
                 mention.model_copy(
                     update={
                         "canonical_entity_id": result.entity_id,
-                        # v20 (ADR-0057): persist the link score the linker always computed —
-                        # the data source for Hyperedge gamma and weighted incidence.
+                        # v20: persist the link score the linker always computed, so the
+                        # canonical entity carries a per-mention link confidence.
                         "link_confidence": min(1.0, max(0.0, float(result.score))),
                     }
                 )

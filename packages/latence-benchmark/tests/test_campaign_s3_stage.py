@@ -76,7 +76,6 @@ def fixture_report(*, with_induction: bool = True) -> dict[str, Any]:
         "graph": {
             "nodes_total": 80,
             "edges_total": 25,
-            "hyperedges": {"hyperedges_total": 12},
         },
     }
 
@@ -340,7 +339,7 @@ class TestStageRun:
         assert set(metrics["datasets"]) == {"musique", "ohr_bench"}
         ohr = metrics["datasets"]["ohr_bench"]
         assert (ohr["chunks"], ohr["mentions"], ohr["relations"]) == (42, 120, 30)
-        assert (ohr["entities"], ohr["hyperedges"], ohr["pii_total"]) == (80, 12, 5)
+        assert (ohr["entities"], ohr["edges"], ohr["pii_total"]) == (80, 25, 5)
         # Priced at the default deepseek card: 100k @ $0.09/M + 20k @ $0.18/M.
         assert ohr["induction"]["usd_actual"] == pytest.approx(0.0126)
         assert ohr["run_id"] == "s3-ohr_bench-v1"
@@ -505,12 +504,12 @@ class TestStageRun:
     ) -> None:
         # The crashed-graph hole (production S3, 2026-08-04): the run crashed inside
         # Graph Assembly but still left a quality-report.json, so the probe read `done`.
-        # Every campaign pipeline configures graph.canonical + hyperedges, so a report
+        # Every campaign pipeline configures graph.canonical, so a report
         # with zero graph nodes is a crash, never data — block, naming the pod log.
         repo = make_repo(tmp_path, datasets=("ohr_bench",))
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         report = fixture_report()
-        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        report["graph"] = {"nodes_total": 0, "edges_total": 0}
         pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
         clock = FakeClock()
         with pytest.raises(
@@ -520,27 +519,13 @@ class TestStageRun:
             run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
         assert s3_done_probe(ctx) is False  # the stage stays open
 
-    def test_a_null_hyperedges_section_blocks_even_with_nodes(
-        self, tmp_path: Path
-    ) -> None:
-        # A crash BETWEEN node emission and hyperedge emission leaves nodes_total > 0 but
-        # no hyperedges section; on a hyperedge-configured pipeline that is truncation.
-        repo = make_repo(tmp_path, datasets=("ohr_bench",))
-        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
-        report = fixture_report()
-        report["graph"] = {"nodes_total": 80, "edges_total": 25, "hyperedges": None}
-        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
-        clock = FakeClock()
-        with pytest.raises(StageBlockedError, match="hyperedges section null"):
-            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
-
     def test_a_crashed_graph_report_blocks_on_resume_too(self, tmp_path: Path) -> None:
         # Both completion paths again: a previously pulled crashed-graph report must not
         # slide through the local-resume branch either.
         repo = make_repo(tmp_path, datasets=("ohr_bench",))
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         report = fixture_report()
-        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        report["graph"] = {"nodes_total": 0, "edges_total": 0}
         report_dir = stage_dir(ctx.campaign_root, STAGE_NAME) / "reports" / "ohr_bench"
         report_dir.mkdir(parents=True)
         (report_dir / "quality-report.json").write_text(

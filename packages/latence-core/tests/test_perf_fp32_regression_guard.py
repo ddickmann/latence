@@ -41,8 +41,9 @@ both are properties of the CALLER's source text, which the seam by construction 
 Neither rule needs an ordering analysis of the seam's internals, an accept-list of loaders, or a
 list of Providers: both are DISCOVERED by globbing ``packages/*/src``. That is load-bearing, and it
 is what a curated tuple has twice failed to deliver here — ``_LEARNED_PROVIDER_SOURCES`` left
-``sparse.splade`` (a registered learned Provider doing real transformer forwards, loading bare fp32
-with no placement) unscanned indefinitely, and the hand-written 5-tuple that preceded
+a registered learned Provider (the SPLADE sparse embedder, since removed with the retrieval
+tooling, ADR-0068 — real transformer forwards, loading bare fp32 with no placement) unscanned
+indefinitely, and the hand-written 5-tuple that preceded
 ``_DEBERTA_BACKED_SOURCES`` left ``disambiguation.glinker`` with ZERO #190 coverage (R2/#190-5).
 The behavioural end-to-end proof in ``test_perf_jit_import_ordering.py`` is a complement, not a
 substitute: it needs a hand-written load driver per Provider, so its ``_PROVIDERS`` list is
@@ -71,9 +72,7 @@ _PERF_SEAM_SOURCE = "latence-core/src/latence_core/providers/perf.py"
 _LOAD_ENTRY_POINTS = ("load_gliner_model", "load_gliner2_model", "load_transformers_model")
 
 # Sources known to load a learned model when this guard was written. Discovery must never return
-# LESS than this — a shrinking scan is how a Provider silently falls out of coverage. ``splade`` is
-# in the list precisely because its absence from the OLD curated list is the defect this rewrite
-# closes.
+# LESS than this — a shrinking scan is how a Provider silently falls out of coverage.
 _KNOWN_LEARNED_LOAD_SOURCES = frozenset(
     {
         "latence-ner-gliner/src/latence_ner_gliner/provider.py",
@@ -83,7 +82,6 @@ _KNOWN_LEARNED_LOAD_SOURCES = frozenset(
         "latence-extract-gliner2/src/latence_extract_gliner2/provider.py",
         "latence-parser-lighton/src/latence_parser_lighton/provider.py",
         "latence-parser-glm/src/latence_parser_glm/provider.py",
-        "latence-splade/src/latence_splade/model.py",
     }
 )
 
@@ -168,9 +166,10 @@ def test_discovery_covers_every_known_learned_load_source() -> None:
     """REGRESSION: the scan is DISCOVERED, and it never shrinks below what we know exists.
 
     The defect this bites is the shape of the old file: ``_LEARNED_PROVIDER_SOURCES`` was a curated
-    8-entry tuple, so ``sparse.splade`` — a registered learned Provider running real
-    ``AutoModelForMaskedLM`` forwards — was never scanned at all, and shipped a bare fp32
-    ``from_pretrained`` with no device placement while every guard in this file was green.
+    8-entry tuple, so a registered learned Provider running real ``AutoModelForMaskedLM``
+    forwards (the since-removed SPLADE sparse embedder) was never scanned at all, and shipped a
+    bare fp32 ``from_pretrained`` with no device placement while every guard in this file was
+    green.
     """
     discovered = set(_LEARNED_LOAD_SOURCES)
     missing = _KNOWN_LEARNED_LOAD_SOURCES - discovered
@@ -444,8 +443,8 @@ def _discover_deberta_backed_sources() -> tuple[str, ...]:
 _DEBERTA_BACKED_SOURCES = _discover_deberta_backed_sources()
 
 #: The DeBERTa-backed sources known to exist when this guard was written. Discovery must never
-#: return LESS than this. ``disambiguation.glinker`` is listed for the same reason ``splade`` is
-#: listed above: it is the source a hand-written list left uncovered (R2/#190-5), and it is the one
+#: return LESS than this. ``disambiguation.glinker`` is listed because
+#: it is the source a hand-written list left uncovered (R2/#190-5), and it is the one
 #: in-tree DeBERTa-backed Provider that loads NO ``from_pretrained`` model at all — so rule 1 alone
 #: can never see it, and only this discovery keeps it inside a structural scan.
 _KNOWN_DEBERTA_BACKED_SOURCES = frozenset(

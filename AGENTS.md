@@ -8,8 +8,8 @@ things that are easy to get wrong here and expensive to get wrong.
 
 > **Are you here to *use* the framework rather than change this repository?** You want
 > [`docs/agent-briefing.md`](./docs/agent-briefing.md) instead — the mental model, every Provider
-> available at each Stage, the Pipeline YAML contract, the CLI, the output schema and the retrieval
-> wiring. [`llms.txt`](./llms.txt) indexes the rest. This page is for agents **editing this
+> available at each Stage, the Pipeline YAML contract, the CLI and the output schema.
+> [`llms.txt`](./llms.txt) indexes the rest. This page is for agents **editing this
 > codebase**: the gates, the contracts, and the traps.
 
 Two ground rules before anything else:
@@ -18,7 +18,7 @@ Two ground rules before anything else:
    command here disagrees with the repository, the repository is right and this page is a bug —
    fix it in the same change.
 2. **This repository rejects plausible-sounding claims.** Documentation that makes an assertion
-   about the code is machine-checked by ordinary pytest modules — see item 4 of § *Six things that
+   about the code is machine-checked by ordinary pytest modules — see item 3 of § *Five things that
    will burn you*. A confident sentence you cannot substantiate will not merge; it will turn CI red.
 
 ---
@@ -37,7 +37,7 @@ Evidence, Quarantine) and avoid the synonyms it bans.
 ## Repository shape
 
 A [uv](https://docs.astral.sh/uv/) workspace. `[tool.uv.workspace] members = ["packages/*"]` in the
-root `pyproject.toml`; **34 packages** under `packages/`, each an independently publishable
+root `pyproject.toml`; **30 packages** under `packages/`, each an independently publishable
 distribution.
 
 **One of them is deliberately NOT a workspace member.** `packages/latence-gliner25` pins a
@@ -50,7 +50,7 @@ three things had to be taught about it, and all three are gated: the release bui
 and `scripts/generate-sbom.sh` folds that lock into the SBOM union.
 
 ```
-packages/latence-<family>-<name>/     33 of these
+packages/latence-<family>-<name>/     29 of these
 ├── pyproject.toml                    deps, classifiers, the entry-point registration
 ├── LICENSE                           must match the root LICENSE
 ├── README.md                         this distribution's PyPI long_description
@@ -65,15 +65,14 @@ packages/latence-<family>-<name>/     33 of these
 
 **The directory is hyphenated, the module is underscored.** `packages/latence-parser-pdfplumber/`
 holds `src/latence_parser_pdfplumber/`. This is not cosmetic — it is the direct cause of the mypy
-rule in § *Six things that will burn you*.
+rule in § *Five things that will burn you*.
 
 Everything else at the top level:
 
 | Path | What it is |
 |---|---|
 | `packages/latence-core/` | contracts, Capability protocols, the plugin registry, the local Runner, Storage, the CLI, the conformance suite. Near-zero-dep and pure-Python **by policy** (ADR-0016) |
-| `packages/latence-retrieval/` | the stateless query-time library. A separate downstream layer, not a Stage; it registers under a different entry-point group |
-| `benchmark/` | measurement harnesses. `benchmark/s5/` is the retrieval matrix, `benchmark/serving/` the live-engine lane, `benchmark/sota-campaign/` the pipeline campaign |
+| `benchmark/` | measurement harnesses and their recorded results. `benchmark/sota-campaign/` is the pipeline campaign |
 | `scripts/` | `verify-local.sh` (the merge gate), `typecheck.sh`, the SBOM and secret-scan gates |
 | `docs/` | the mkdocs site, including `docs/adr/` — the Decision Log |
 | `stacks/`, `matrix/`, `examples/` | shipped pipeline configs, bake-off matrices, example configs — all executed by gates, none of them decoration |
@@ -115,12 +114,12 @@ costs you seconds rather than ten minutes.
 
 ```bash
 # 1. lint — the scope CI uses, which is wider than `packages`
-uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+uv run ruff check packages benchmark/sota-campaign scripts
 
 # 2. strict types, src AND tests, per package (see below for why it is a script)
 MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
 
-# 3. the suite — the seed is not optional, and `-q` is already in addopts (see #6 below)
+# 3. the suite — the seed is not optional, and `-q` is already in addopts (see #5 below)
 PYTHONHASHSEED=0 uv run pytest packages
 
 # 4. the docs site, if you touched anything under docs/ or mkdocs.yml
@@ -134,7 +133,7 @@ PYTHONHASHSEED=0 uv run pytest packages/latence-core/tests/test_conformance.py -
 ```
 
 **The merge gate is `scripts/verify-local.sh`.** It mirrors CI's lint · type · test · build lane
-plus the secret scan, Provider conformance, nine end-to-end stack validations, the reproducible
+plus the secret scan, Provider conformance, eight end-to-end stack validations, the reproducible
 environment specs, the compatibility matrix and seven bake-off matrices — same commands, same
 environment (`PYTHONHASHSEED=0 LATENCE_CUDA=0`), same order.
 
@@ -151,7 +150,7 @@ exercise rather than implying you did.
 
 ---
 
-## Six things that will burn you
+## Five things that will burn you
 
 ### 1. `PYTHONHASHSEED=0` is mandatory, and it must be set before the interpreter starts
 
@@ -163,37 +162,7 @@ pinned. `make test` pins it for you; a bare `uv run pytest` does not.
 
 A test that depends on dict/set ordering, or on wall-clock time, is a bug — not a flake.
 
-### 2. The S5 benchmark harness additionally refuses without pinned BLAS threads
-
-`benchmark/s5/run_matrix.py` refuses to run unless `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` **and**
-`MKL_NUM_THREADS` are all `1`. This is a measured finding, not superstition, and the numbers are in
-the module's `THREADS_REFUSAL` constant: the dense leg's BLAS `gemv` and the query embedder
-reassociate their float sums per thread count, so at `OMP_NUM_THREADS=4` instead of `1`, on the same
-code and the same corpus, 33 of 1,209 musique queries get a different dense pool and `recall@10`
-moves from 0.3404 to 0.3406. An unpinned harness reports thread scheduling as a quality change.
-
-Unpinned, it stops before doing any work and tells you exactly why:
-
-```console
-$ PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix --datasets multihop_rag --legs dense
-refusing to run: pin OMP_NUM_THREADS = OPENBLAS_NUM_THREADS = MKL_NUM_THREADS = 1 (the dense leg's
-BLAS gemv and the query embedder reassociate their float sums per thread count, which changes
-rankings: measured, 33/1209 musique queries get a different dense pool at 4 threads vs 1).
-Unpinned: OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS.
-```
-
-The invocation shape the harness documents for itself (`benchmark/s5/run_matrix.py`, module
-docstring) is:
-
-```bash
-env PYTHONHASHSEED=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-    .venv/bin/python -m benchmark.s5.run_matrix --datasets vidoseek,multihop_rag --legs all --limit 50
-```
-
-Do not "fix" the refusal by deleting the check, and do not export the pins globally in a way that
-hides which run they applied to — they are part of a recorded cell's identity.
-
-### 3. mypy cannot be run whole-tree — use `scripts/typecheck.sh`
+### 2. mypy cannot be run whole-tree — use `scripts/typecheck.sh`
 
 `uv run mypy --strict packages` **aborts before checking anything**. The package directories are
 hyphenated, which mypy cannot turn into dotted module names, so every package's `tests/conftest.py`
@@ -207,7 +176,7 @@ where a contract regression hides. Do not add `# type: ignore` to make a strict 
 without saying why in the same line.
 
 One local-environment caveat, because it will confuse you otherwise: the root `pyproject.toml` marks
-the heavy optional dependencies (`torch`, `transformers`, `qdrant_client`, …) with
+the heavy optional dependencies (`torch`, `transformers`, …) with
 `ignore_missing_imports`, which only applies while they are **absent** — which is the state CI's
 CPU-first env is in. If you install torch or transformers into your local `.venv`, mypy starts
 resolving their real stubs and reports mismatches against the deliberately-faithful fakes in those
@@ -215,7 +184,7 @@ Providers' tests, in packages you never touched. Those are an artefact of your e
 regression you introduced. Check `git status` before you "fix" them, and do not edit a Provider you
 did not otherwise change.
 
-### 4. The doc-truth gates resolve links through `git ls-files`, not the working tree
+### 3. The doc-truth gates resolve links through `git ls-files`, not the working tree
 
 `packages/latence-core/tests/test_front_door_truthfulness.py` checks the front-door pages —
 `README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, this file, and every **tracked** page
@@ -246,7 +215,7 @@ The rule underneath all of them: **assert observable repository facts, never a f
 intent.** If you add a doc-truth gate, make it fail on the tree that motivated it before you make it
 pass.
 
-### 5. The licence topology is uniform, and it is pinned
+### 4. The licence topology is uniform, and it is pinned
 
 The repository is **Apache-2.0**, everywhere, with no exception and no carve-out (ADR-0063, which
 supersedes ADR-0055's relicence to PolyForm Noncommercial). Every source file that declares an SPDX
@@ -261,17 +230,11 @@ So: if you add an SPDX header to a new file, it says `Apache-2.0` and nothing el
 per-file exception — if one is ever genuinely wanted it needs an ADR, a statement in the file, and a
 pin in that test, in one commit, so the code, the licence document and the gate cannot disagree.
 
-Two things are NOT licence drift and must survive:
+One thing is NOT licence drift and must survive: **third-party noncommercial terms.**
+Research-only corpora like OmniDocBench are still noncommercial and still gated behind their
+opt-in flags. The framework's outbound licence does not touch a third party's terms.
 
-- **`pack.py`'s inbound provenance.** It records that the QKP packer was ported from the
-  maintainer's own `colsearch` project and relicensed Apache-2.0 for that use. That is *where the
-  code came from*, not *what you may do with it*; both claims now name the same identifier, so the
-  `INBOUND` / `OUTBOUND` labels are what keeps them apart. A gate requires them.
-- **Third-party noncommercial terms.** `naver/splade-v3`'s CC-BY-NC-SA-4.0 weights and
-  research-only corpora like OmniDocBench are still noncommercial and still gated behind their
-  opt-in flags. The framework's outbound licence does not touch a third party's terms.
-
-### 6. `-q` on the command line resolves to `-qq`
+### 5. `-q` on the command line resolves to `-qq`
 
 The root `pyproject.toml` already sets `addopts = "-q"`. Passing your own `-q` gives you `-qq`, which
 suppresses the summary line entirely — you get no pass/fail counts at all. Clear it when you want
@@ -320,9 +283,7 @@ component.
    "parser.pdfplumber" = "latence_parser_pdfplumber.provider:PdfPlumberParser"
    ```
 
-   The group name is `latence.providers` (`ENTRY_POINT_GROUP` in `capability.py`). Query-time
-   retrieval components use a separate group, `latence.retrieval`, kept off the Stage seam on
-   purpose.
+   The group name is `latence.providers` (`ENTRY_POINT_GROUP` in `capability.py`).
 5. **Verify weights and code licences separately** (ADR-0012). A checkpoint's licence is per-weight
    and cannot be inferred from the library it runs under. Only permissive weights ship as defaults;
    a restricted licence makes the Provider opt-in and non-default, and its flow-down obligations go

@@ -1,5 +1,11 @@
 # Tutorial 5 — Production
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The `latence-sink-qdrant` steps and the `enrich` checkpoint in the resume example no longer exist.
+    The page is kept until it is rewritten.
+
 **What you will build.** The operational half of the system: a stack you can gate in CI, a run you
 can kill and restart without losing work, a corpus you can update incrementally instead of
 reprocessing, an erasure path that stands up to an auditor, and served GPU models behind an
@@ -379,7 +385,7 @@ from your detected file types: a corpus that is entirely born-digital text route
 it on a text corpus makes every document a `PARSE_ERROR`. It also detects structured cross-reference
 headers in the corpus and wires the deterministic `header_refs` and `inline_refs` extractors when it
 finds them — the extractors that recovered the majority of the reference edges in the measured RFC
-run ([deep dive](../DEEP-DIVE.md), Act IV).
+run.
 
 Full serving recipes, the Compose and Helm paths, the air-gapped path and the Blackwell
 `VLLM_USE_FLASHINFER_SAMPLER=0` caveat are in [Deployment](../deployment.md) and

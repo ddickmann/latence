@@ -218,8 +218,8 @@ def _skip_reason_for_stage(stage: Stage, registry: ProviderRegistry) -> str | No
     decision = select_device(requested, profile)
     if decision.skipped:
         return decision.reason
-    # A Stage may opt into *nested* sub-Provider blocks (the Export's embedder / retrieval signals
-    # / BM25 tokenizer, the Graph Assembly's graph_features, the resolvers' semantic embedder) that
+    # A Stage may opt into *nested* sub-Provider blocks (the Export's embedder, the resolvers'
+    # semantic embedder, the universal Parser's ocr) that
     # are themselves GPU/endpoint-gated (e.g. embedding.sentence_transformers pinned device: cuda,
     # or an endpoint embedder whose package is absent). None is a top-level DAG node, so the check
     # above never sees them; inspect each through the SAME select_device seam so the embed

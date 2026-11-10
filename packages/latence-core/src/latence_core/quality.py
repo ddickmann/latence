@@ -120,7 +120,12 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # report from a pipeline without a Type-Consolidation Stage is byte-identical. No number bump: the
 # extraction-redesign report changes ship in one revision (same rule as ADR-0043's own additive
 # DeltaChurn fields, which also did not bump).
-QUALITY_SCHEMA_VERSION = 20
+# v21 (ADR-0068 — the query-time retrieval tooling is removed): the two sections that reported on
+# retrieval-only Stages leave the report — ``context_enrichment`` (``ContextEnrichmentQuality``,
+# v19) and ``graph.hyperedges`` (``HyperedgeQuality``, with its token-cost distribution). A
+# removal, not an additive change: the report models are ``extra="forbid"``, so a v20 report that
+# carries either key no longer validates, hence the bump.
+QUALITY_SCHEMA_VERSION = 21
 
 
 class StageMetrics(BaseModel):
@@ -619,60 +624,6 @@ class GraphQuality(BaseModel):
     # proposed them. A run with no Graph Completion Stage has ``inferred_edge_count == 0``.
     inferred_edge_count: int = 0
     inferred_edges_by_scorer: dict[str, int] = Field(default_factory=dict)
-    # ADR-0057: the OPTIONAL Hyperedge projection's roll-up, ``None`` for every run that never
-    # configured hyperedges (the genuinely-optional guarantee: the section appears only when the
-    # projection ran). The token-cost distribution is the number that predicts whether budgeted
-    # selection will behave (spec 1.2: a tight, roughly unimodal distribution packs well) — it is
-    # reported from the first run, not discovered after one.
-    hyperedges: HyperedgeQuality | None = None
-
-
-class HyperedgeQuality(BaseModel):
-    """Hyperedge-projection roll-up (ADR-0057): counts + the token-cost distribution.
-
-    Counts only (never ``tau_text``), so it is safe to persist. ``weak_count`` are the
-    entities-only Hyperedges (``has_relations=False``, spec 1.2 rule 4); ``arity_histogram``
-    maps arity (as a string key, JSON-stable) to count; the ``token_cost_*`` fields summarise
-    the knapsack-weight distribution; ``support_max`` witnesses dedup-merge actually firing.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    hyperedges_total: int = 0
-    weak_count: int = 0
-    relations_total: int = 0
-    avg_gamma: float = 0.0
-    avg_arity: float = 0.0
-    arity_histogram: dict[str, int] = Field(default_factory=dict)
-    token_cost_min: int = 0
-    token_cost_median: int = 0
-    token_cost_max: int = 0
-    token_cost_total: int = 0
-    support_max: int = 0
-
-
-class ContextEnrichmentQuality(BaseModel):
-    """Context-enrichment roll-up: how much KG coherence the OPTIONAL W13 Stage projected
-    (ADR-0039).
-
-    Emitted when a run had a ``context_enrichment`` Stage. Counts-only (no content), so it is safe
-    to
-    persist/share. ``chunks_enriched`` is how many chunks got a non-empty
-    :class:`~latence_core.contracts.ContextHeader` (a chunk with no confidence-gated canonical
-    entity
-    is left ``None`` and not counted). ``avg_neighbors_per_chunk`` is the mean number of query-time
-    KG-neighbor keys per enriched chunk — the coherence density surfaced into the vector + metadata.
-    ``hub_entities_capped`` is the anti-bloat witness: the number of KG entities whose neighbor set
-    exceeds the Stage's ``max_neighbors_per_entity`` cap, so wherever they appear only their TOP-k
-    relations are projected — the hub-entity guard that keeps a corpus-wide hub from swamping its
-    chunks (the crux of the W13 bloat discipline). A run with no Stage reports this section as None.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    chunks_enriched: int = 0
-    avg_neighbors_per_chunk: float = 0.0
-    hub_entities_capped: int = 0
 
 
 class DriftDiagnostics(BaseModel):
@@ -879,11 +830,6 @@ class QualityReport(BaseModel):
     disambiguation: DisambiguationQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Graph Assembly Stage.
     graph: GraphQuality | None = Field(default=None, json_schema_extra=SECTION)
-    # W13 (ADR-0039): present when the run had a context_enrichment Stage — how much KG coherence it
-    # projected onto chunks (chunks enriched, avg neighbors, hub entities capped). None otherwise.
-    context_enrichment: ContextEnrichmentQuality | None = Field(
-        default=None, json_schema_extra=SECTION
-    )
     # S10: corpus-level Provenance-integrity drift roll-up (present when the run parsed
     # documents with page maps), and the gold-set harness result (present only when a
     # gold set was supplied — an adopter dropped in annotated documents).
@@ -977,15 +923,6 @@ class QualityReport(BaseModel):
                     continue
                 lines.append(f"- {title}:")
                 lines.extend(f"  - {alias} -> {canonical}" for alias, canonical in amap.items())
-        if self.context_enrichment is not None:
-            ce = self.context_enrichment
-            lines.append("")
-            lines.append("## Context enrichment")
-            lines.append(
-                f"- chunks enriched: {ce.chunks_enriched}, "
-                f"avg neighbors/chunk: {ce.avg_neighbors_per_chunk:.3f}, "
-                f"hub entities capped: {ce.hub_entities_capped}"
-            )
         if self.goldset is not None:
             g = self.goldset
             lines.append("")

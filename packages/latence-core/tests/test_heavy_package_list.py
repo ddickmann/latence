@@ -101,7 +101,7 @@ def test_no_consumer_re_hardcodes_the_list() -> None:
         _REPO_ROOT / ".github" / "actions" / "setup-workspace" / "action.yml",
     )
     # Two entries that appear in no other list, so a re-hardcoded copy is unmistakable.
-    canaries = ("latence-ner-gliner", "latence-splade")
+    canaries = ("latence-ner-gliner", "latence-disambig-glinker")
     for consumer in consumers:
         text = consumer.read_text(encoding="utf-8")
         assert "heavy-packages.txt" in text, (

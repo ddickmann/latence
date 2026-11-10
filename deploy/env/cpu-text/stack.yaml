@@ -4,8 +4,8 @@
 # broken environment fails fast and cheaply:
 #
 #   parse (pdfplumber) -> chunk -> GLiNER2 fused entity+relation -> learned GLiNER PII redaction
-#   -> disambiguation -> graph -> KG export + RAG corpus export with BOTH the dense Granite r2
-#      embedding leg AND the SPLADE sparse leg
+#   -> disambiguation -> graph -> KG export + corpus export with the dense Granite r2
+#      embedding leg
 #
 # Every learned Stage pins `device: cpu` — this environment installs CPU-only torch wheels, so
 # `auto` would be honest but silent; `cpu` states the intent the environment was solved for.
@@ -115,19 +115,3 @@ stages:
       embedder:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-97m-multilingual-r2, dimension: 384, device: cpu}
-      # The sparse leg (ADR-0053). The checkpoint is NOT bge-m3: BAAI/bge-m3's HF config declares
-      # architectures=["XLMRobertaModel"] (verified against the HF model API, 2026-07-18) — it has
-      # no MLM head, so `AutoModelForMaskedLM.from_pretrained` (what TransformersSpladeModel calls)
-      # would randomly initialise `lm_head` and emit a meaningless sparse vector. Its own sparse
-      # weights come from FlagEmbedding's bespoke head, which this seam does not implement.
-      #
-      # Wired instead: opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1 — a
-      # genuine multilingual SPLADE MLM (architectures=["BertForMaskedLM"], ungated), WEIGHTS
-      # Apache-2.0 and CODE path `transformers` Apache-2.0, both verified separately per ADR-0012
-      # on 2026-07-18. naver/splade-v3 was rejected: cc-by-nc-sa-4.0 (non-commercial) and gated.
-      sparse_embedder:
-        provider: sparse.splade
-        config:
-          model: opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1
-          mode: inject
-          max_length: 512

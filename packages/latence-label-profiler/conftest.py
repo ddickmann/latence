@@ -6,7 +6,7 @@ working in parallel on this branch set. The package is pure-stdlib and dependenc
 its ``src`` on ``sys.path`` is enough to run the REAL code — no stub, no mock, no skip.
 
 The integrator pinning this package for CI should add it to the root ``[project].dependencies`` +
-``[tool.uv.sources]`` (as ``latence-muvera`` is) and delete this file; nothing else changes.
+``[tool.uv.sources]`` (as ``latence-demo`` is) and delete this file; nothing else changes.
 """
 
 from __future__ import annotations

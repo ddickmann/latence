@@ -62,13 +62,6 @@ class CapabilityKind(StrEnum):
     label schema and annotate its chunks (:class:`~latence_core.contracts.InducedLabels`), which the
     extraction Stages UNION onto their config labels. It is genuinely optional — a stack without a
     ``schema_induction`` Stage is byte-identical to today (the induced-labels field defaults None).
-    W13-context-enrichment adds the OPTIONAL ``CONTEXT_ENRICHMENT`` Capability (ADR-0039): a
-    corpus-level chunk→chunk Stage placed AFTER Graph Assembly that projects the assembled KG back
-    onto each chunk as a compact :class:`~latence_core.contracts.ContextHeader` (its canonical
-    entities + top-k KG-neighbor triples), which the corpus Export prepends to the EMBEDDING input
-    ONLY — the stored chunk text stays byte-unchanged. It depends_on the chunk stream AND Graph
-    Assembly and is genuinely optional — a stack without it is byte-identical to today (the
-    ``context_header`` field defaults None and the Export prepends nothing).
     T3 (ADR-0054) adds the OPTIONAL ``TYPE_CONSOLIDATION`` Capability: a corpus-level
     mention→mention Stage placed between extraction and Disambiguation that canonicalizes the
     run's TYPE vocabulary. Per-chunk label induction gives each chunk a small, relevant, uncapped
@@ -96,7 +89,6 @@ class CapabilityKind(StrEnum):
     DISAMBIGUATION = "disambiguation"
     GRAPH_ASSEMBLY = "graph_assembly"
     GRAPH_COMPLETION = "graph_completion"
-    CONTEXT_ENRICHMENT = "context_enrichment"
     EMBEDDING = "embedding"
     EXPORT = "export"
 

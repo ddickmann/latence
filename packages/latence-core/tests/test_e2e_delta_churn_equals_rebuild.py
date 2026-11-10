@@ -1,11 +1,7 @@
-"""ADR-0061 — incremental ingest over a CONTEXT-ENRICHMENT pipeline == full rebuild.
+"""ADR-0061 — incremental ingest == full rebuild, through the corpus Export and the graph.
 
-The ticket-03 CI-scale equivalence gate. Before ADR-0061 a pipeline containing a
-``context_enrichment`` Stage fell back to full re-extraction on every delta
-(``DeltaRunner._reuse_supported`` refused reuse), so "incremental" was incremental in name only on
-the flagship profile. Now the reuse overlay reaches the enrichment Stage's per-carrier chunk
-stream — merged document-interleaved in source order — and every chunk's header is re-derived
-from the CURRENT assembled graph each run.
+The ticket-03 CI-scale equivalence gate: the reuse overlay is merged document-interleaved in
+source order into every consumer's stream, so a delta run's exports are the rebuild's.
 
 Covered:
 
@@ -13,14 +9,14 @@ Covered:
   delta, an edit delta and a file-removal delta, the FINAL delta run's exported corpus
   (``records.jsonl``) and its assembled-graph checkpoint are byte-identical to a from-scratch
   batch run of the same final corpus: same rows, same order (the order-preserving merge), same
-  headers, same graph;
+  graph;
 * **reuse actually engages** — the deltas reuse the unchanged documents (``documents_reused``
   witness + doc-level checkpoints hold only the changed documents), so the equivalence is not the
   trivial full-re-extraction one;
-* **no export double-count** — the enrichment Stage re-emits the reused chunks, so the Export
-  must NOT materialize the overlay again (every exported ``record_id`` appears exactly once);
+* **no export double-count** — the Export folds the reused chunks in exactly once (every
+  exported ``record_id`` appears exactly once);
 * **churn never silently re-induces** — on an induced-schema (per-chunk, offline lexicon
-  inducer) enrichment pipeline, a delta's induction checkpoint holds ONLY the changed document's
+  inducer) pipeline, a delta's induction checkpoint holds ONLY the changed document's
   chunks: unchanged documents are excluded at Source and their induced chunks ride the reuse
   store (the ticket-03 non-negotiable, previously violated by the full-extraction fallback).
 """
@@ -54,7 +50,7 @@ def _pipeline(store: str, docs_dir: Path, *, induce: bool = False) -> Pipeline:
     chunk_parent = "induce" if induce else "chunk"
     return Pipeline.from_yaml_text(
         f"""
-name: delta-enrichment-incremental
+name: delta-churn-equals-rebuild
 storage_uri: {store}
 stages:
   - name: source
@@ -94,14 +90,10 @@ stages:
     capability: graph_assembly
     provider: graph.canonical
     depends_on: [disambiguate]
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [{chunk_parent}, graph]
   - name: export
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [enrich]
+    depends_on: [{chunk_parent}]
 """
     )
 
@@ -151,7 +143,7 @@ def test_add_update_remove_churn_matches_full_rebuild_byte_for_byte(tmp_path: Pa
     added_id = _doc_id(docs / "d.txt")
     r_add = DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v1")
     assert r_add.delta is not None
-    assert r_add.delta.documents_reused == 3  # reuse ENGAGES on an enrichment pipeline now
+    assert r_add.delta.documents_reused == 3  # reuse ENGAGES
     assert r_add.delta.documents_added == 1
     assert _checkpoint_doc_ids(store, "v1", "parse") == {added_id}
     assert _checkpoint_doc_ids(store, "v1", "entities") == {added_id}
@@ -176,8 +168,8 @@ def test_add_update_remove_churn_matches_full_rebuild_byte_for_byte(tmp_path: Pa
     fresh_store = f"file://{tmp_path}/fresh"
     LocalRunner().run(_pipeline(fresh_store, docs), run_id="rebuild")
 
-    # The gate: byte-identical exported corpus (rows, order, headers) and byte-identical
-    # assembled graph — the incremental store's exported retrieval state IS the rebuild's.
+    # The gate: byte-identical exported corpus (rows, order) and byte-identical
+    # assembled graph — the incremental store's exported state IS the rebuild's.
     incremental_corpus = _read(store, "v3", "export/records.jsonl")
     rebuild_corpus = _read(fresh_store, "rebuild", "export/records.jsonl")
     assert incremental_corpus == rebuild_corpus
@@ -185,8 +177,8 @@ def test_add_update_remove_churn_matches_full_rebuild_byte_for_byte(tmp_path: Pa
     rebuild_graph = _read(fresh_store, "rebuild", "checkpoints/graph.jsonl")
     assert incremental_graph == rebuild_graph
 
-    # The equivalence is not vacuous: the final corpus has all 3 documents' chunks, and at least
-    # one reused document's chunk carries a KG-derived context header recomputed this run.
+    # The equivalence is not vacuous: the final corpus has all 3 documents' chunks, including
+    # the rows of a document that was REUSED (not re-extracted) by the final delta.
     rows = [json.loads(line) for line in incremental_corpus.splitlines() if line.strip()]
     assert {r["provenance"]["document_id"] for r in rows} == {
         _doc_id(docs / "a.txt"),
@@ -194,7 +186,7 @@ def test_add_update_remove_churn_matches_full_rebuild_byte_for_byte(tmp_path: Pa
         added_id,
     }
     reused_doc_rows = [r for r in rows if r["provenance"]["document_id"] == added_id]
-    assert any(r.get("context_header") for r in reused_doc_rows)
+    assert reused_doc_rows
 
 
 def test_export_materializes_each_reused_record_exactly_once(tmp_path: Path) -> None:
@@ -205,12 +197,12 @@ def test_export_materializes_each_reused_record_exactly_once(tmp_path: Path) -> 
     (docs / "d.txt").write_text("Dave works at Umbrella.\n", encoding="utf-8")
     DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v1")
 
-    # The enrichment Stage re-emits the reused chunks (fresh ∪ overlay), so the Export must NOT
-    # fold the overlay in again: every exported record_id appears exactly once.
+    # The Export folds the overlay into its fresh input exactly once: every exported record_id
+    # appears exactly once.
     corpus = _read(store, "v1", "export/records.jsonl")
     ids = [json.loads(line)["record_id"] for line in corpus.splitlines() if line.strip()]
     assert len(ids) == len(set(ids))
-    # ...and the reused documents' chunks ARE in the export (the overlay reached enrichment).
+    # ...and the reused documents' chunks ARE in the export (the overlay reached the Export).
     docs_in_export = {
         json.loads(line)["provenance"]["document_id"]
         for line in corpus.splitlines()

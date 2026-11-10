@@ -43,14 +43,12 @@ flowchart LR
     Export --> KG["Knowledge graph (files)"]
 ```
 
-That is the spine the blessed GPU stack declares (`stacks/gpu-sota.yaml`). Three further
+That is the spine the blessed GPU stack declares (`stacks/gpu-sota.yaml`). Two further
 Stages are **optional** and inert unless a stack declares them — Schema Induction
-([ADR-0038](adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md)),
-Type Consolidation
+([ADR-0038](adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md))
+and Type Consolidation
 ([ADR-0054](adr/0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md))
-and Context Enrichment
-([ADR-0039](adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md))
-— and embeddings are an opt-in *Export augmentation* rather than a Stage of their own
+— and an Embedder is a nested resolution signal rather than a Stage of its own
 ([Embedders](embedders.md)). [Pipeline Stages](pipeline/index.md) documents each of them,
 with what it consumes and produces.
 
@@ -68,19 +66,16 @@ and you should not need to hunt for anything else.
 
     You want to know whether the claims hold before spending a day on it.
 
-    1. **[Messy data to knowledge-graph retrieval — a deep dive](DEEP-DIVE.md)** — the
-       long-form argument: what happens at each step, and why fusing a knowledge graph
-       into retrieval answers questions dense and lexical search structurally cannot.
-    2. **[Concepts & Architecture](concepts/index.md)** — the five load-bearing concepts
+    1. **[Concepts & Architecture](concepts/index.md)** — the five load-bearing concepts
        (Capability, Provider, Stage, Runner, Storage) and where the seams are.
-    3. **[Pipeline Stages](pipeline/index.md)** — the contract of every Stage, Source
+    2. **[Pipeline Stages](pipeline/index.md)** — the contract of every Stage, Source
        through Export.
-    4. **[Public benchmark results](BENCHMARKS.md)** — measured numbers, each carrying its
+    3. **[Public benchmark results](BENCHMARKS.md)** — measured numbers, each carrying its
        dataset, hardware and measurement date. A Stage with no section there has not been
        measured; that is stated, never implied by silence.
-    5. **[Provider catalog](providers/catalog.md)** — every shipped Provider with its
+    4. **[Provider catalog](providers/catalog.md)** — every shipped Provider with its
        compute, footprint and verified weights-and-code license.
-    6. **[Threat model](THREAT-MODEL.md)** · **[Continuity & security process](CONTINUITY.md)**
+    5. **[Threat model](THREAT-MODEL.md)** · **[Continuity & security process](CONTINUITY.md)**
        · **[SBOM & supply chain](SBOM.md)** — the procurement answers, each claim pointing
        at the artifact in the repository that proves it.
 
@@ -148,7 +143,7 @@ and you should not need to hunt for anything else.
   The catalog, the authoring guide, and the conformance gate.
 
 - :material-book-open-variant: **[Guides](guides/index.md)**
-  Operate, tune, deploy, benchmark, and feed a retrieval engine.
+  Operate, tune, deploy and benchmark.
 
 - :material-api: **[API reference](reference/index.md)**
   Contracts, protocols, Runner, Storage and errors, autodoc'd from source.
@@ -162,7 +157,7 @@ and you should not need to hunt for anything else.
 
 | | |
 | --- | --- |
-| **Packages** | 33 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
+| **Packages** | 30 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
 | **Decisions** | 68 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0069 (0040 was never issued). |
 | **Runners** | Two shipped: the built-in local Runner and `latence-runner-airflow`. |
 | **Deliverables** | A RAG corpus and a knowledge graph, as files — Parquet, JSONL, TTL, GraphML ([ADR-0017](adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md)). |

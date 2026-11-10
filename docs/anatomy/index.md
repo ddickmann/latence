@@ -1,5 +1,11 @@
 # Pipeline anatomy — the through-line
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The former chapters 4 (enrichment and export) and 5 (retrieval) were removed with it, and chapter 4 is now the knowledge-graph export; mentions of hyperedges, graph features, the context header, BM25 and retrieval on this page and in chapters 1–3 describe the pipeline as it was measured, not as it is now.
+    The page is kept until it is rewritten.
+
 *One folder of messy files becomes a queryable corpus **and** a knowledge graph, and a query
 that no single retriever can answer gets answered. This page is the spine: the whole system,
 end to end, in one read. Each stage gets a sentence or two here and a chapter of its own
@@ -340,11 +346,9 @@ flows in and out, what breaks if it is wrong, and which alternatives exist.
 - [2 · Extraction and privacy](02-extraction-and-privacy.md) —
   schema induction, fused entity/relation extraction, redaction, profiling.
 - [3 · From corpus to knowledge graph](03-corpus-to-knowledge-graph.md) —
-  type consolidation, disambiguation, graph assembly, hyperedges, graph features, edge prediction.
-- [4 · Enrichment and export](04-enrichment-and-export.md) —
-  the KG header, the twin exports, embeddings and BM25.
-- [5 · Retrieval](05-retrieval.md) —
-  graph-rescue retrieval, the packer, the measured results.
+  type consolidation, disambiguation, graph assembly, edge prediction.
+- [4 · The knowledge-graph export](04-knowledge-graph-export.md) —
+  the four files it writes, their columns, and what it does not redact.
 
 **If you are a developer**, read chapters 1 → 4 in order with a pipeline YAML open beside
 them, then the [stage contract reference](../reference/stage-contracts.md) for exact I/O and
@@ -352,13 +356,12 @@ the [pipeline reference](../reference/pipeline.md) for the config schema. The
 [quickstart](../quickstart.md) gets you a running pipeline first if you would rather start
 from a green run.
 
-**If you are a researcher**, the reasoning narrative is
-[the deep dive](../DEEP-DIVE.md) (why the design is shaped this way, in five acts); this page
+**If you are a researcher**, this page
 and its chapters are the exhaustive *what and how*. The measured evidence lives in
 [the benchmark pages](../BENCHMARKS.md) and the campaign guide
 ([running the campaign](../guides/benchmark-campaign.md)); the decisions, with their
-alternatives and their falsifiers, are in the [decision log](../adr/index.md). Chapter 3 and
-chapter 5 carry the results most likely to be contested.
+alternatives and their falsifiers, are in the [decision log](../adr/index.md). Chapter 3
+carries the results most likely to be contested.
 
 **If you are an architect or evaluating this for an organisation**, start with
 [architecture](../concepts/architecture.md) — three orthogonal seams, and what each one buys

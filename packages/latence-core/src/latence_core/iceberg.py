@@ -109,8 +109,8 @@ PROP_MODE = "latence.export.mode"
 PROP_ERASURE = "latence.export.erasure"
 
 #: The exact shape :meth:`IcebergCorpusTable._publish_data_file` gives every file it publishes:
-#: ``<basename>-<sha256 of the bytes>.parquet``. It is the OWNERSHIP SCOPE of the erasure sweep —
-#: the analogue of the Qdrant sink's ``_latence_id_namespace`` marker. A file in the table's data
+#: ``<basename>-<sha256 of the bytes>.parquet``. It is the OWNERSHIP SCOPE of the erasure sweep.
+#: A file in the table's data
 #: directory that does not match was written by some other engine, and the sweep never touches it
 #: (Iceberg's own writers name files ``<partition>-<task>-<uuid4>.parquet``, whose trailing segment
 #: is a 36-char dashed UUID, never a bare 64-hex digest — so the two spaces cannot collide).
@@ -592,11 +592,10 @@ class IcebergCorpusTable:
         The Iceberg schema is derived from the **exact Arrow schema of the Parquet deliverable**, so
         the table mirrors the documented consumer contract column-for-column: the same
         ``record_id`` / ``schema_version`` / ``provenance`` / ``classification`` / ``content`` /
-        ``media_type`` spine, plus exactly whichever optional signal columns (``embedding``,
-        ``sparse_*``, ``fde_embedding``, the W13 context columns) this Export was configured to
-        write. A schema drift between an existing table and this run is therefore REFUSED here, in
-        BOTH directions, by :meth:`_assert_no_drift` — Iceberg's own ``add_files`` validation only
-        catches the widening half (see that method).
+        ``media_type`` spine, plus the optional ``embedding`` column when this Export was
+        configured to write it. A schema drift between an existing table and this run is
+        therefore REFUSED here, in BOTH directions, by :meth:`_assert_no_drift` — Iceberg's own
+        ``add_files`` validation only catches the widening half (see that method).
 
         A catalog fault anywhere here (an unavailable server, an auth expiry, a rejected create) is
         normalised into a :class:`~latence_core.errors.ProviderError` naming the table and the

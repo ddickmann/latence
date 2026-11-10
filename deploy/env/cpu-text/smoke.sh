@@ -23,8 +23,8 @@
 #
 #   3. END-TO-END SLICE (needs the installed environment + model weights). `latence stack
 #      validate stack.yaml` runs the tiny corpus through parse -> chunk -> GLiNER2 fused
-#      extraction -> learned PII redaction -> disambiguation -> graph -> KG export + RAG export
-#      with BOTH the dense Granite r2 leg and the SPLADE sparse leg, asserting the contract /
+#      extraction -> learned PII redaction -> disambiguation -> graph -> KG export + corpus
+#      export with the dense Granite r2 leg, asserting the contract /
 #      KG / RAG / report / determinism / resume / graceful-failure checks.
 #
 # Gates 2 and 3 need the environment install.sh built. If it is absent this script FAILS rather

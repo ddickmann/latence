@@ -40,10 +40,9 @@ from latence_core.capability_descriptor import (
     kind_for_entry_point,
 )
 from latence_core.contracts import (
-    ChunkRecord,
     Classification,
-    ContextHeader,
     DocumentRecord,
+    EntityMention,
     Provenance,
     Record,
 )
@@ -64,17 +63,10 @@ if TYPE_CHECKING:
 # Kinds that are not top-level DAG Stages, so a single-Stage Pipeline of that kind is meaningless.
 _NOT_A_STAGE = {CapabilityKind.EMBEDDING}
 
-_CONTEXT_HEADER = ContextHeader(
-    entities=["Acme"],
-    entity_types=["ORG"],
-    neighbor_triples=["Acme —sells→ Widgets"],
-)
-
-
-def _chunk_record(*, context_header: ContextHeader | None) -> ChunkRecord:
-    """One chunk, optionally carrying the KG-derived header the enrichment Stage stamps on."""
-    return ChunkRecord(
-        record_id="c1",
+def _mention(*, label: str, raw_label: str | None) -> EntityMention:
+    """One mention, optionally carrying the corpus-level relabel Type Consolidation stamps on."""
+    return EntityMention(
+        record_id="m1",
         provenance=Provenance(
             source_uri="file:///c/a.txt",
             file_name="a.txt",
@@ -82,16 +74,18 @@ def _chunk_record(*, context_header: ContextHeader | None) -> ChunkRecord:
             file_size=10,
             document_id="sha256:d1",
             char_start=0,
-            char_end=10,
+            char_end=4,
             page_start=1,
             page_end=1,
         ),
         classification=Classification(language="en", sensitivity="public"),
         document_record_id="d1",
+        chunk_record_id="c1",
         index=0,
-        content="Acme sells",
-        token_count=2,
-        context_header=context_header,
+        label=label,
+        text="Acme",
+        confidence=1.0,
+        raw_label=raw_label,
     )
 
 
@@ -304,11 +298,10 @@ def test_declared_export_carriers_match_the_runners_export_resolution() -> None:
 def test_declared_accumulators_match_the_runners_accumulator_tuple() -> None:
     """``accumulates`` is the executor's memory-shaping fact (ADR-0033), declared once."""
     assert frozenset(_ACCUMULATOR_KINDS) == ACCUMULATOR_KINDS
-    # It is strictly narrower than "corpus-level": a sink and a chunk-stream re-emitter are
-    # corpus-level but must NOT be materialized by the executor.
+    # It is strictly narrower than "corpus-level": a sink is corpus-level but must NOT be
+    # materialized by the executor.
     assert ACCUMULATOR_KINDS < CORPUS_LEVEL_KINDS
     assert not descriptor_for(CapabilityKind.EXPORT).accumulates
-    assert not descriptor_for(CapabilityKind.CONTEXT_ENRICHMENT).accumulates
 
 
 def test_mixed_carrier_kinds_are_the_ones_read_polymorphically() -> None:
@@ -361,9 +354,9 @@ def test_every_dag_kind_declares_a_protocol_and_embedding_refuses() -> None:
 def test_the_delta_reuse_skip_set_is_the_descriptor_corpus_set() -> None:
     """The DeltaRunner and the phase boundary ask the SAME question, so they read the SAME answer.
 
-    They used to be two hand-written tuples and they disagreed (``TYPE_CONSOLIDATION`` in one,
-    ``CONTEXT_ENRICHMENT`` in the other). Deterministic order is asserted too: the reuse store's
-    Stage walk must be reproducible.
+    They used to be two hand-written tuples and they disagreed (a corpus-level kind listed in
+    one and not the other). Deterministic order is asserted too: the reuse store's Stage walk
+    must be reproducible.
     """
     from latence_core.delta_runner import _CORPUS_LEVEL_KINDS
 
@@ -371,47 +364,49 @@ def test_the_delta_reuse_skip_set_is_the_descriptor_corpus_set() -> None:
     assert list(_CORPUS_LEVEL_KINDS) == [k for k in CapabilityKind if k in CORPUS_LEVEL_KINDS]
 
 
-def test_the_reuse_store_keeps_the_per_document_chunk_not_the_kg_derived_one(
+def test_the_reuse_store_keeps_the_per_document_mention_not_the_corpus_level_one(
     tmp_path: Path,
 ) -> None:
     """The BEHAVIOURAL consequence of unifying the delta set with the phase-boundary set (W17).
 
-    ``context_enrichment`` is corpus-level — a chunk's ``context_header`` summarizes the mutable
-    assembled graph — so its output must never enter the cross-run reuse store. Before the sets
-    were unified, the DeltaRunner's own skip tuple did not list it, so the store collected the
-    ENRICHED chunk (topologically last, last-writer-wins) and persisted a KG-derived artifact as
-    if it were a per-document one — the stale-header hazard, written down.
+    ``type_consolidation`` is corpus-level — it re-emits the whole run's mentions relabelled
+    onto the corpus's canonical vocabulary — so its output must never enter the cross-run reuse
+    store: the store substitutes for RE-RUNNING the doc-level Stages, and a corpus-level
+    decision is recomputed every run. A skip tuple that does not list it lets the store collect
+    the RELABELLED mention (topologically last, last-writer-wins) and persist a corpus-derived
+    artifact as if it were a per-document one.
 
     Reading the level off the Capability descriptor makes the two agree: the store keeps the
-    redacted chunk (reproducible from the document's own bytes) and drops the enriched variant.
-    Since ADR-0061 this is what makes reuse SOUND for an enrichment pipeline: only the
-    pre-enrichment variant crosses the run boundary, and every header is re-derived from the
-    current graph each run.
+    extractor's mention (reproducible from the document's own bytes) and drops the consolidated
+    variant.
     """
     storage_uri = tmp_path.as_uri()
     pipeline = _pipeline(
         _stage(CapabilityKind.SOURCE, "source"),
         {**_stage(CapabilityKind.PARSE, "parse"), "depends_on": ["source"]},
         {**_stage(CapabilityKind.CHUNK, "chunk"), "depends_on": ["parse"]},
-        {**_stage(CapabilityKind.REDACTION, "redact"), "depends_on": ["chunk"]},
-        {**_stage(CapabilityKind.GRAPH_ASSEMBLY, "graph"), "depends_on": ["redact"]},
-        {**_stage(CapabilityKind.CONTEXT_ENRICHMENT, "enrich"), "depends_on": ["graph"]},
+        {**_stage(CapabilityKind.ENTITY_EXTRACTION, "extract"), "depends_on": ["chunk"]},
+        {**_stage(CapabilityKind.TYPE_CONSOLIDATION, "consolidate"), "depends_on": ["extract"]},
     )
     pipeline = pipeline.model_copy(update={"storage_uri": storage_uri})
 
     storage = Storage.for_uri(storage_uri)
-    for stage_name, header in (("redact", None), ("enrich", _CONTEXT_HEADER)):
-        record = _chunk_record(context_header=header)
+    for stage_name, label, raw_label in (
+        ("extract", "org", None),
+        ("consolidate", "organization", "org"),
+    ):
+        record = _mention(label=label, raw_label=raw_label)
         storage.write_atomic(
             f"{storage_uri.rstrip('/')}/_latence/runs/r1/checkpoints/{stage_name}.jsonl",
             (record.model_dump_json() + "\n").encode("utf-8"),
         )
 
     collected = DeltaRunner()._doc_level_records(pipeline, "r1")  # noqa: SLF001
-    assert [type(r).__name__ for r in collected] == ["ChunkRecord"]
+    assert [type(r).__name__ for r in collected] == ["EntityMention"]
     kept = collected[0]
-    assert isinstance(kept, ChunkRecord)
-    assert kept.context_header is None, "the KG-derived chunk variant must not enter the reuse store"
+    assert isinstance(kept, EntityMention)
+    assert kept.label == "org"
+    assert kept.raw_label is None, "the corpus-level relabel must not enter the reuse store"
 
 
 def test_the_descriptor_table_is_declared_in_capability_kind_order() -> None:

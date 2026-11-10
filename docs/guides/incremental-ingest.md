@@ -1,5 +1,11 @@
 # Incremental ingest: document churn without a full rebuild
 
+!!! warning "Written before the retrieval tooling was removed"
+    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
+    BM25 / sparse / multi-vector export signals and the Qdrant sink. The measured pipeline included Context Enrichment and Hyperedge stages; the incremental-ingest mechanism itself is unchanged.
+    The page is kept until it is rewritten.
+
 > **Status: production capability, equivalence-verified.** The machinery is
 > `latence_core.delta_runner.DeltaRunner` behind the `latence delta` / `retract` / `purge` CLI
 > verbs; the design is [ADR-0061](../adr/0061-incremental-ingest-exact-corpus-recompute-over-an-order-preserving-reuse-union.md)

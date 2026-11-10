@@ -1,5 +1,10 @@
 # 2 · Extraction and privacy
 
+!!! warning "Written before the retrieval tooling was removed"
+    This chapter predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
+    tooling together with Context Enrichment, graph features and hyperedges. Its few mentions of those features describe the pipeline as it was measured.
+    The chapter is kept until it is rewritten.
+
 *Chunks arrive: retrieval-sized, screened, each one carrying the exact character span and page
 it came from. This chapter is what happens to them before the pipeline is allowed to look at
 the corpus as a whole — what types to look for, what to pull out, and what must never leave.*

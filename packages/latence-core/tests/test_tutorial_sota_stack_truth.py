@@ -135,28 +135,6 @@ def test_tutorial_section4_names_the_blessed_redactor() -> None:
     )
 
 
-def test_tutorial_section4_carries_the_graph_feature_block() -> None:
-    """Without `graph_features` (#193) every centrality/community signal is silently absent."""
-    tutorial = _tutorial_stages()["graph"].get("config") or {}
-    wizard = _wizard_stages()["graph"].get("config") or {}
-    assert "graph_features" in wizard, "wizard fixture drift: enterprise-sota must emit it"
-    assert tutorial.get("graph_features") == wizard["graph_features"], (
-        "§4's `graph` stage must carry the ADR-0051 graph_features block the wizard emits "
-        f"({wizard['graph_features']!r}); got {tutorial.get('graph_features')!r}"
-    )
-
-
-def test_tutorial_section4_carries_the_bm25_block() -> None:
-    """Without `bm25` (#194) no term statistics are written and the sparse leg is dead."""
-    tutorial = _tutorial_stages()["export_corpus"].get("config") or {}
-    wizard = _wizard_stages()["export_corpus"].get("config") or {}
-    assert "bm25" in wizard, "wizard fixture drift: enterprise-sota must emit it"
-    assert tutorial.get("bm25") == wizard["bm25"], (
-        "§4's `export_corpus` stage must carry the ADR-0049 bm25 block the wizard emits "
-        f"({wizard['bm25']!r}); got {tutorial.get('bm25')!r}"
-    )
-
-
 def test_tutorial_section4_stage_wiring_equals_the_wizard_output() -> None:
     """The whole claim, checked: same stages, same providers, same deps, same config wiring.
 
@@ -192,8 +170,7 @@ def test_tutorial_section4_stage_wiring_equals_the_wizard_output() -> None:
         ),
         # The other nested Provider pins recursion used to be able to hide.
         ("export_corpus", ("embedder", "provider"), "embedding.not_blessed"),
-        ("graph", ("graph_features", "provider"), "graph_features.not_blessed"),
-        ("export_corpus", ("bm25", "provider"), "tokenizer.not_blessed"),
+        ("disambiguate", ("embedder", "provider"), "embedding.not_blessed"),
     ],
 )
 def test_the_gate_catches_drift_in_a_NESTED_provider_block(
@@ -222,13 +199,4 @@ def test_the_gate_catches_drift_in_a_NESTED_provider_block(
     assert drift, (
         f"the gate did not notice §4 re-pinning {stage}.config.{'.'.join(path)} to "
         f"{replacement!r} — a nested Provider block is wiring, not an operator answer"
-    )
-
-
-@pytest.mark.parametrize("token", ["graph_features", "bm25"])
-def test_the_go_live_tutorial_mentions_the_signals_it_ships(token: str) -> None:
-    """A prose-level backstop: the go-live guide cannot be silent about these two signals."""
-    assert token in _tutorial_text(), (
-        f"the go-live tutorial never mentions {token!r} — an operator reading it end-to-end "
-        "would never learn the signal exists"
     )

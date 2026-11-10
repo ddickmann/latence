@@ -6,7 +6,7 @@ reproduces the pod-validated GOOD stack (see ``docs/TUTORIAL-fresh-pod-walkthrou
 
     source → intake_screen → parse → chunk[768] → [content_screen] → induce[chunk]
       → extract[gliner2, thr 0.5] → [redact[gliner2, financial-PII]] → profiling
-      → disambiguate → graph → enrich(context) → export_kg + export_corpus(context_columns)
+      → disambiguate → graph → export_kg + export_corpus
 
 The *mandatory spine* is always present; the ONE optional toggle is PII redaction + guardrail
 screening (``pii``), which adds/omits exactly the ``content_screen`` + ``redact`` stages and
@@ -14,13 +14,11 @@ nothing else. The generator is PURE — it never reads the environment, a clock,
 so identical answers yield a **byte-identical** file (the ``--non-interactive`` determinism
 contract, for CI/repro).
 
-The exported RAG corpus is built from the ENRICHED chunk stream (``export_corpus → enrich``), so it
-carries ``induced_labels`` + ``context_header`` + a dense embedding. With PII ON the ``redact``
-Stage is a W16 CHUNK-LEVEL transform (ADR-0042): it consumes the induced chunk stream and sets each
-chunk's ``masked_content`` (each chunk ≤ the model window, so no PII is truncated), and ``enrich``
-reads THAT redacted chunk stream — so the exported corpus row is genuinely PII-safe AND enriched
-(``redact → enrich → export_corpus``, the blessed ``stacks/context-enrichment.yaml`` dataflow).
-This closes the pre-W16 gap where the RAG chunks were enriched but un-masked.
+The exported corpus is built from the chunk stream, so it carries ``induced_labels`` + a dense
+embedding. With PII ON the ``redact`` Stage is a W16 CHUNK-LEVEL transform (ADR-0042): it consumes
+the induced chunk stream and sets each chunk's ``masked_content`` (each chunk ≤ the model window,
+so no PII is truncated), and ``export_corpus`` reads THAT redacted chunk stream — so the exported
+corpus row is genuinely PII-safe (``redact → export_corpus``).
 
 **What lives here (C7).** This module owns the two halves the operator's answers pass through:
 
@@ -73,9 +71,7 @@ from latence_core.setup.recipe import (
     PARSER_UNIVERSAL,
     PROFILE_LITE,
     PROFILE_SOTA,
-    SOTA_BM25_TOKENIZER,
     SOTA_DEVICE,
-    SOTA_GRAPH_FEATURES_PROVIDER,
     SOTA_OCR_API_KEY,
     SOTA_OCR_MAX_CONCURRENCY,
     STACK_NAME,
@@ -120,9 +116,7 @@ __all__ = [
     "PREDEFINED_LABEL_SLOTS",
     "PROFILE_LITE",
     "PROFILE_SOTA",
-    "SOTA_BM25_TOKENIZER",
     "SOTA_DEVICE",
-    "SOTA_GRAPH_FEATURES_PROVIDER",
     "SOTA_OCR_API_KEY",
     "SOTA_OCR_MAX_CONCURRENCY",
     "STACK_NAME",

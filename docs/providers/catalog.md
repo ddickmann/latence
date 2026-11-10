@@ -37,7 +37,6 @@ CPU reference Provider so the seam is exercised by real alternatives
 | Disambiguation | `disambiguation.cascade`, `disambiguation.exact_surface` | 5-strategy resolver / exact-surface blocking | cpu |
 | Graph Assembly | `graph.canonical`, `graph.weighted` | Content-addressed nodes/edges + per-edge Evidence | cpu |
 | Graph Completion | `graph_completion.reference` | Bounded 2-hop transitive/symmetric closure | cpu |
-| Context Enrichment | `context.kg_header` | KG-header projection onto chunks | cpu |
 | Embedding | `embedding.hashing` | Deterministic hashing embedder | cpu |
 | Delta | `delta.affected_set` | Affected-set recompute + drift reconcile | cpu |
 | Export | `export.jsonl_parquet`, `export.knowledge_graph` | JSONL/Parquet + TTL/GraphML files | cpu |

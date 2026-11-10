@@ -31,7 +31,7 @@ operator-facing interface is unchanged — answers in, one validated YAML out.
 
 The deletion test: deleting the two old builders does NOT make complexity vanish. the chunk
 budget's coupling to the mdeberta window, the 0.3-vs-0.5 extraction threshold, the ADR-0044
-financial-PII floor, the ``redact -> enrich -> export_corpus`` dataflow are all real, load-bearing
+financial-PII floor, the ``redact -> export_corpus`` dataflow are all real, load-bearing
 knowledge. It RELOCATES to N small,
 individually-testable declarations behind one assembler — which is the depth gain: a caller still
 learns one function, and a maintainer changing one Stage now reads one declaration instead of two
@@ -123,7 +123,7 @@ PARSER_PLAINTEXT = "parser.plaintext"  # born-digital text (.txt/.md/.jsonl) —
 # VLM is the WRONG tool — it only rasterizes pages and POSTs images to the OCR server, it has no
 # text passthrough — so forcing it makes a text corpus un-parseable when the OCR box is (correctly)
 # not served. The wizard therefore routes a detected plaintext corpus to the CPU plaintext parser
-# and keeps every other SOTA signal (graph_features.pagerank + BM25 + Granite r2) intact.
+# and keeps every other SOTA choice (Granite r2 included) intact.
 
 # The two setup profiles (tiers). `lite` is the CPU-first, laptop-friendly default (unchanged); the
 # `enterprise-sota` profile emits the pod-VALIDATED composed stack (served-vLLM OCR + LLM schema
@@ -144,29 +144,6 @@ SOTA_OCR_MAX_CONCURRENCY = 8
 # biencoders/rerankers/OCR need a GPU). On a CPU-only host these Stages are skip-with-flag at
 # `latence stack validate` (device honesty, P3-F1) — the generated config still validates.
 SOTA_DEVICE = "cuda"
-
-# The index-time SIGNALS the blessed enterprise-SOTA stack bakes in (ADR-0041: the wizard emits ONE
-# opinionated, quality-baked config). Both are pure-Python, CPU-only, deterministic, zero extra deps
-# — they add no GPU cost and no new dependency to the pod stack, and both are strictly ADDITIVE:
-# omitting the block leaves the export byte-identical (the ADR-0049/0051 guarantee).
-#
-#   * graph features (ADR-0051, #161) — PageRank centrality + label-propagation community stamped
-#     onto every KG node, promoted by export_kg to first-class graph-nodes.parquet columns and
-#     projected by `enrich` onto each chunk's context_header. Feeds multi-hop expansion and the
-#     Knapsack packer's optional signals. `pagerank` (not `degree`): global influence over the
-#     whole citation-like graph an enterprise corpus builds, not just local degree.
-#   * BM25 (ADR-0049, #164) — the term-statistics artifact (`bm25-stats.json` +
-#     `bm25-postings.parquet`) the query-side sparse rescorer runs on. `tokenizer.regex` is the
-#     documented reference tokenizer (lowercase UNICODE alphanumeric runs), matching the retrieval
-#     tooling's query-side term unit exactly — the agreement the sparse leg depends on.
-#     Scope, stated honestly because this profile is the MULTILINGUAL stack (it emits a
-#     multilingual embedder and a multilingual PII model): the reference tokenizer keeps accented
-#     and non-Latin words WHOLE, but it is not a word SEGMENTER — a script written without word
-#     spacing (Chinese/Japanese/Thai) yields one term per whitespace-delimited run. A corpus in
-#     those scripts should plug its own segmenter in behind the `Tokenizer` seam; the dense leg
-#     (Granite r2, multilingual) is unaffected either way.
-SOTA_GRAPH_FEATURES_PROVIDER = "graph_features.pagerank"
-SOTA_BM25_TOKENIZER = "tokenizer.regex"
 
 # The default source extensions when a folder is empty / undetectable — the broad GOOD-stack set.
 _DEFAULT_EXTENSIONS: tuple[str, ...] = (
@@ -652,8 +629,8 @@ class StageContribution(ABC):
     """ONE Stage's declaration of what it puts into the blessed stack, and why.
 
     Subclasses are small frozen dataclasses: their fields ARE the per-Stage overrides a profile
-    applies (an extraction threshold, a device pin, whether the corpus Export also materializes the
-    BM25 artifact). Everything a Stage knows about itself — its Provider, its config, what it
+    applies (an extraction threshold, a device pin, whether the corpus Export embeds on the GPU
+    tier). Everything a Stage knows about itself — its Provider, its config, what it
     depends on, when it stays out of the stack entirely, and the comment-header prose describing it
     — lives in ONE class, so a change to that Stage is a change to one declaration.
 
@@ -1390,8 +1367,8 @@ class RedactContribution(StageContribution):
     W16 (ADR-0042): Redaction is a chunk→chunk transform — it consumes the induced CHUNK stream and
     sets each chunk's ``masked_content`` (each chunk fits the model window, so no PII is truncated).
     Depending on the label source keeps the induced pii_types UNIONing onto the FINANCIAL_PII floor
-    (ADR-0038). ``enrich`` then reads THIS redacted chunk stream so export_corpus is masked AND
-    enriched (the pre-W16 doc-level ``depends_on: [parse, induce]`` shape is gone).
+    (ADR-0038). ``export_corpus`` then reads THIS redacted chunk stream, so the exported corpus is
+    masked (the pre-W16 doc-level ``depends_on: [parse, induce]`` shape is gone).
 
     T2: the blessed checkpoint is a GUARDRAILS+PII model, so the guard half is switched on too.
     Every chunk carries the universal guard floor (prompt injection / harmful content — a security
@@ -1471,10 +1448,9 @@ class RedactContribution(StageContribution):
             "#   Capability seam — swap `redact.provider` and nothing else moves.",
             "#   W16 (ADR-0042): `redact` is a CHUNK-LEVEL transform — it consumes the induced",
             "#   chunk stream and sets each chunk's `masked_content` (each chunk fits the model",
-            "#   window, so no PII is truncated). `enrich` reads THAT redacted chunk stream, and",
-            "#   export_corpus materializes `masked_content` — so the RAG corpus is BOTH masked",
-            "#   (PII-safe) AND context-enriched (`redact -> enrich -> export_corpus`). No pre-W16",
-            "#   doc-truncation leak, and no trade-off between masking and the per-chunk headers.",
+            "#   window, so no PII is truncated). export_corpus reads THAT redacted chunk stream",
+            "#   and materializes `masked_content` — so the exported corpus is masked (PII-safe;",
+            "#   `redact -> export_corpus`). No pre-W16 doc-truncation leak.",
         )
 
 
@@ -1592,29 +1568,19 @@ class GlinkerDisambiguateContribution(StageContribution):
 
 @dataclass(frozen=True)
 class GraphContribution(StageContribution):
-    """``graph`` — the canonical, evidence-linked knowledge graph.
+    """``graph`` — the canonical, evidence-linked knowledge graph."""
 
-    ``graph_features`` is the enterprise-SOTA override (ADR-0051, #193): the assembler resolves the
-    PageRank computer and stamps centrality + community onto every node, which ``export_kg``
-    promotes to graph-nodes.parquet columns and ``enrich`` projects onto each chunk's
-    context_header. Strictly additive — with the block absent the emitted graph is byte-identical.
-    """
-
-    graph_features: bool = False
     name: str = "graph"
     why: str = "assemble the canonical, evidence-linked knowledge graph"
 
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
-        config: StageBlock = {"corpus_id": STACK_NAME}
-        if self.graph_features:
-            config["graph_features"] = {"provider": SOTA_GRAPH_FEATURES_PROVIDER, "config": {}}
         ctx.add_fanin(FANIN_KG, self.name)
         return {
             "name": self.name,
             "capability": "graph_assembly",
             "provider": "graph.canonical",
             "depends_on": ["disambiguate"],
-            "config": config,
+            "config": {"corpus_id": STACK_NAME},
         }
 
 
@@ -1648,35 +1614,6 @@ class GraphCompletionContribution(StageContribution):
 
 
 @dataclass(frozen=True)
-class EnrichContribution(StageContribution):
-    """``enrich`` — W13 context enrichment: project the KG back onto each chunk.
-
-    W16 (ADR-0042): with PII ON it reads the REDACTED chunk stream (``redact`` set each chunk's
-    masked_content), so the exported corpus row is masked AND enriched; with PII OFF there is no
-    redact Stage, so it reads the induced chunk stream directly. This mirrors the blessed
-    ``stacks/context-enrichment.yaml`` ``redact -> enrich -> export_corpus`` dataflow.
-    """
-
-    name: str = "enrich"
-    why: str = "project the KG back onto every chunk as a context header"
-
-    def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
-        chunk_source = "redact" if ctx.emitted("redact") else ctx.anchor(ANCHOR_LABELS)
-        return {
-            "name": self.name,
-            "capability": "context_enrichment",
-            "provider": "context.kg_header",
-            "depends_on": [chunk_source, "graph"],
-            "config": {
-                "max_neighbors_per_entity": 4,
-                "max_triples": 6,
-                "min_entity_confidence": 0.0,
-                "min_edge_confidence": 0.0,
-            },
-        }
-
-
-@dataclass(frozen=True)
 class ExportKGContribution(StageContribution):
     """``export_kg`` — materialize the knowledge graph (asserted + any completed edges)."""
 
@@ -1695,35 +1632,29 @@ class ExportKGContribution(StageContribution):
 
 @dataclass(frozen=True)
 class ExportCorpusContribution(StageContribution):
-    """``export_corpus`` — the RAG corpus, built from the ENRICHED chunk stream.
+    """``export_corpus`` — the corpus export: the record of the text that was processed.
 
-    Always ``context_columns`` + a dense embedding, so the exported row carries ``induced_labels`` +
-    ``context_header`` + a vector. ``bm25`` is the enterprise-SOTA override (ADR-0049, #194): the
-    term-statistics artifact (bm25-stats.json + bm25-postings.parquet) the query-side sparse
-    rescorer runs on. Without it the stack ships dense-only and the hybrid fuser has no sparse leg;
-    with the block absent the export is byte-identical, so the signal costs the stack nothing it did
-    not already own.
+    W16 (ADR-0042): with PII ON it reads the REDACTED chunk stream (``redact`` set each chunk's
+    masked_content), so the exported corpus row is masked; with PII OFF there is no redact Stage,
+    so it reads the induced chunk stream directly. Always a dense embedding (ADR-0017), so the
+    exported row carries ``induced_labels`` + a vector.
     """
 
     gpu_embedder: bool = False
-    bm25: bool = False
     name: str = "export_corpus"
-    why: str = "materialize the AI-ready RAG corpus from the enriched chunk stream"
+    why: str = "materialize the processed corpus from the (redacted) chunk stream"
 
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
-        config: StageBlock = {
-            "basename": "records",
-            "context_columns": True,
-            "embedder": _embedder_for(answers, gpu=self.gpu_embedder),
-        }
-        if self.bm25:
-            config["bm25"] = {"provider": SOTA_BM25_TOKENIZER, "config": {}}
+        chunk_source = "redact" if ctx.emitted("redact") else ctx.anchor(ANCHOR_LABELS)
         return {
             "name": self.name,
             "capability": "export",
             "provider": "export.jsonl_parquet",
-            "depends_on": ["enrich"],
-            "config": config,
+            "depends_on": [chunk_source],
+            "config": {
+                "basename": "records",
+                "embedder": _embedder_for(answers, gpu=self.gpu_embedder),
+            },
         }
 
 
@@ -1732,20 +1663,12 @@ class ExportCorpusContribution(StageContribution):
 # --------------------------------------------------------------------------------------------
 
 
-def _config_of(stack: AssembledStack, stage: str) -> Mapping[str, object]:
-    """The emitted ``config`` mapping of ``stage`` (``{}`` when the Stage or the key is absent)."""
-    block = stack.by_name.get(stage)
-    config = block.get("config") if block is not None else None
-    return config if isinstance(config, Mapping) else {}
-
-
 def _sota_prologue(answers: SetupAnswers, stack: AssembledStack) -> tuple[str, ...]:
     """The enterprise-SOTA profile paragraph — every claim read off an EMITTED block.
 
-    The parse-path sentence follows the ``parse`` Stage's actual Provider, and the index-time
-    signals paragraph is rendered only when the ``graph`` Stage really carries a graph-feature block
-    AND the corpus Export really carries a BM25 block. Drop either from the recipe and the header
-    stops advertising it — which is exactly the drift ADR-0041 §7a recorded, made unrepresentable.
+    The parse-path sentence follows the ``parse`` Stage's actual Provider, so the header cannot
+    advertise a parse path the recipe did not emit — the drift ADR-0041 §7a recorded, made
+    unrepresentable.
     """
     parse_block = stack.by_name.get("parse", {})
     if parse_block.get("provider") == PARSER_PLAINTEXT:
@@ -1765,7 +1688,7 @@ def _sota_prologue(answers: SetupAnswers, stack: AssembledStack) -> tuple[str, .
             "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR",
             "#   box.",
         ]
-    lines = [
+    return (
         "#",
         "# Profile: enterprise-sota — the pod-VALIDATED composed stack (ADR-0046,",
         "#   stacks/gpu-sota-glinker.yaml):",
@@ -1774,19 +1697,7 @@ def _sota_prologue(answers: SetupAnswers, stack: AssembledStack) -> tuple[str, .
         "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
         "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
         *parse_point,
-    ]
-    has_graph_features = "graph_features" in _config_of(stack, "graph")
-    has_bm25 = "bm25" in _config_of(stack, "export_corpus")
-    if has_graph_features and has_bm25:
-        lines += [
-            "#",
-            "#   Index-time signals (CPU, deterministic, zero extra deps): graph features on",
-            "#   `graph` (ADR-0051 — PageRank centrality + community, exported as graph-nodes",
-            "#   columns and projected onto each chunk's context_header) and BM25 on",
-            "#   `export_corpus` (ADR-0049 — bm25-stats.json + bm25-postings.parquet for the",
-            "#   query-side sparse rescorer). Drop either block to get the plain export back.",
-        ]
-    return tuple(lines)
+    )
 
 
 #: ``lite`` — the CPU-first, laptop-friendly default. The ONE toggle (``answers.pii``) adds/omits
@@ -1809,7 +1720,6 @@ LITE_RECIPE = StackRecipe(
         ProfilingContribution(),
         EmbeddingDisambiguateContribution(),
         GraphContribution(),
-        EnrichContribution(),
         ExportKGContribution(),
         ExportCorpusContribution(),
     ),
@@ -1819,7 +1729,7 @@ LITE_RECIPE = StackRecipe(
 #: ``stacks/gpu-sota-glinker.yaml``): the chosen parse path → chunk[640] → per-chunk LLM schema
 #: induction → fused GLiNER2 ER (+ any detected deterministic cross-reference extractors) → learned
 #: PII redaction → profiling → type consolidation → the neural GLinker disambiguator → canonical KG
-#: with graph features → ULTRA completion → KG + context-enriched RAG-corpus export with BM25.
+#: → ULTRA completion → KG export + corpus export.
 #:
 #: Deliberate delta from ``stacks/gpu-sota-glinker.yaml`` (#197): that hand-written stack predates
 #: the decision and still wires ``redaction.gliner_pii``; the wizard emits the ONE blessed
@@ -1856,11 +1766,10 @@ SOTA_RECIPE = StackRecipe(
         ProfilingContribution(),
         ConsolidateTypesContribution(),
         GlinkerDisambiguateContribution(),
-        GraphContribution(graph_features=True),
+        GraphContribution(),
         GraphCompletionContribution(),
-        EnrichContribution(),
         ExportKGContribution(),
-        ExportCorpusContribution(gpu_embedder=True, bm25=True),
+        ExportCorpusContribution(gpu_embedder=True),
     ),
     prologue=_sota_prologue,
 )

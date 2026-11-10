@@ -112,9 +112,6 @@ class FakeProvider:
     def embed(self, texts: Any) -> Any:
         return self._run("embed", [[0.1, 0.2] for _ in texts])
 
-    def encode_sparse(self, texts: Any) -> Any:
-        return self._run("encode_sparse", [{} for _ in texts])
-
     def redact(self, chunks: Any) -> Any:
         return self._run("redact", list(chunks))
 
@@ -413,7 +410,6 @@ def test_only_declared_learned_providers_are_probed(tmp_path: Path) -> None:
         ("entity_extraction", "extract"),
         ("disambiguation", "disambiguate"),
         ("embedder", "embed"),
-        ("sparse_embedder", "encode_sparse"),
     ],
 )
 def test_each_capability_is_driven_through_its_real_protocol_method(
@@ -519,46 +515,46 @@ def test_every_learned_capability_of_the_shipped_gpu_stack_has_a_driver() -> Non
 # silently drop a model-loading Provider out of the #191 guard.
 # --------------------------------------------------------------------------------------------
 
-_SPARSE_STAGE = (
-    "  - name: sparse\n"
-    "    capability: sparse\n"
-    "    provider: sparse.splade\n"
+_EMBED_STAGE = (
+    "  - name: embed\n"
+    "    capability: embedding\n"
+    "    provider: embedding.learned\n"
     "    config: {device: cuda}\n"
 )
 
 
 def _write_workspace(tmp_path: Path) -> Path:
-    """A minimal repo root whose `latence-splade` package declares a MODEL RUNTIME dependency.
+    """A minimal repo root whose `latence-embedder-learned` package declares a MODEL RUNTIME dependency.
 
     Nothing here is a fake of the derivation: `model_loading_providers` reads exactly this
     metadata — the package's own `dependencies` and its `latence.providers` entry points — off a
     real `pyproject.toml`, which is what makes the probe set structural rather than declared.
     """
     repo_root = tmp_path / "repo"
-    pkg = repo_root / "packages" / "latence-splade"
+    pkg = repo_root / "packages" / "latence-embedder-learned"
     pkg.mkdir(parents=True, exist_ok=True)
     (pkg / "pyproject.toml").write_text(
         "[project]\n"
-        'name = "latence-splade"\n'
+        'name = "latence-embedder-learned"\n'
         'dependencies = ["latence-core", "transformers>=4.44"]\n'
         '[project.entry-points."latence.providers"]\n'
-        '"sparse.splade" = "latence_splade:Splade"\n',
+        '"embedding.learned" = "latence_embedder_learned:Learned"\n',
         encoding="utf-8",
     )
     return repo_root
 
 
 def _write_derived_env(
-    tmp_path: Path, *, learned: tuple[str, ...], stages: str = _SPARSE_STAGE
+    tmp_path: Path, *, learned: tuple[str, ...], stages: str = _EMBED_STAGE
 ) -> EnvironmentSpec:
-    """An environment that INSTALLS `latence-splade` and drives it, with `learned` as declared."""
+    """An environment that INSTALLS `latence-embedder-learned` and drives it, with `learned` as declared."""
     env_dir = tmp_path / "env"
     env_dir.mkdir(parents=True, exist_ok=True)
     (env_dir / "stack.yaml").write_text(f"name: s\nstages:\n{stages}", encoding="utf-8")
     (env_dir / "environment.yaml").write_text(
         "name: probe-env\nsummary: s\npython: '>=3.11'\nplatform: linux-x86_64\n"
-        "workspace_packages: [packages/latence-splade]\n"
-        "providers:\n  - sparse.splade\n"
+        "workspace_packages: [packages/latence-embedder-learned]\n"
+        "providers:\n  - embedding.learned\n"
         "learned_providers:\n" + "".join(f"  - {p}\n" for p in learned),
         encoding="utf-8",
     )
@@ -579,7 +575,7 @@ def test_a_model_loading_provider_absent_from_learned_providers_is_still_probed(
 
     A routine change — new package in `workspace_packages`, new name under `providers`, new stage
     with `device: cuda` — and the one optional field left alone. Pre-fix the probe read that field
-    alone, so `sparse.splade` was never loaded, never driven, never measured, and emitted NO
+    alone, so `embedding.learned` was never loaded, never driven, never measured, and emitted NO
     finding: the gate that exists to make #191 unshippable reported green over an unmeasured CUDA
     Provider. The derivation reads the package's `transformers` dependency instead, so the omission
     can no longer buy silence.
@@ -591,8 +587,8 @@ def test_a_model_loading_provider_absent_from_learned_providers_is_still_probed(
     # A forward pass that allocated nothing: the #191 shape, which must now be REPORTED.
     result = _probe_root(spec, repo_root, FakeCuda(allocate_per_call=0))
 
-    assert [p.provider for p in result.placements] == ["sparse.splade"]
-    assert FakeProvider.driven == ["encode_sparse", "encode_sparse"]
+    assert [p.provider for p in result.placements] == ["embedding.learned"]
+    assert FakeProvider.driven == ["embed", "embed"]
     assert not result.ok
     assert [f.code for f in result.report.findings] == ["E-PLACEMENT-ON-CPU"]
 
@@ -607,15 +603,15 @@ def test_deleting_a_learned_providers_entry_cannot_drop_it_from_the_probe_set(
     key off the very field that was emptied.
     """
     repo_root = _write_workspace(tmp_path)
-    declared = _write_derived_env(tmp_path, learned=("sparse.splade",))
+    declared = _write_derived_env(tmp_path, learned=("embedding.learned",))
     undeclared = _write_derived_env(tmp_path, learned=())
 
     with_declaration = _probe_root(declared, repo_root, FakeCuda())
     FakeProvider.driven = []
     without_declaration = _probe_root(undeclared, repo_root, FakeCuda())
 
-    assert [p.provider for p in with_declaration.placements] == ["sparse.splade"]
-    assert [p.provider for p in without_declaration.placements] == ["sparse.splade"]
+    assert [p.provider for p in with_declaration.placements] == ["embedding.learned"]
+    assert [p.provider for p in without_declaration.placements] == ["embedding.learned"]
     assert with_declaration.ok and without_declaration.ok
 
 
@@ -640,7 +636,7 @@ def test_a_probe_set_no_stack_component_matches_is_a_finding_not_a_green(tmp_pat
 
     R6-env_reproducibility-5. The guard used to sit on `if not probe_set` — one CAUSE of measuring
     nothing rather than the fact of it — which left the measurement loop as an unguarded second
-    route to the identical result. Here the derivation finds `sparse.splade` (the installed package
+    route to the identical result. Here the derivation finds `embedding.learned` (the installed package
     depends on `transformers`), so the probe set is NON-empty and `E-PLACEMENT-NONE` did not fire;
     but the stack drives only `source.fs`, so every iteration hit `continue`, no finding was
     appended, and the gate returned `ok=True` with zero placements: green earned by measuring
@@ -650,7 +646,7 @@ def test_a_probe_set_no_stack_component_matches_is_a_finding_not_a_green(tmp_pat
     installed and declared: gate 3 of `smoke.sh` would exit 0 printing `OK (no findings)` without a
     single measured forward pass.
     """
-    repo_root = _write_workspace(tmp_path)  # -> a NON-empty derived probe set: {'sparse.splade'}
+    repo_root = _write_workspace(tmp_path)  # -> a NON-empty derived probe set: {'embedding.learned'}
     spec = _write_derived_env(
         tmp_path,
         learned=(),
@@ -658,7 +654,7 @@ def test_a_probe_set_no_stack_component_matches_is_a_finding_not_a_green(tmp_pat
     )
     from latence_core.envspec import placement_probe_providers
 
-    assert placement_probe_providers(spec, repo_root) == {"sparse.splade"}  # so NOT the empty case
+    assert placement_probe_providers(spec, repo_root) == {"embedding.learned"}  # so NOT the empty case
 
     FakeProvider.driven = []
     result = _probe_root(spec, repo_root, FakeCuda())
@@ -666,7 +662,7 @@ def test_a_probe_set_no_stack_component_matches_is_a_finding_not_a_green(tmp_pat
     assert FakeProvider.driven == []  # not one forward pass was driven...
     assert result.placements == ()
     assert [f.code for f in result.report.findings] == ["E-PLACEMENT-NONE"]
-    assert "sparse.splade" in result.report.findings[0].message  # ...and the skipped name is said
+    assert "embedding.learned" in result.report.findings[0].message  # ...and the skipped name is said
     assert not result.ok  # ...so the gate must NOT be green
 
 
@@ -684,9 +680,9 @@ def test_a_measured_failure_is_not_reported_as_having_measured_nothing(tmp_path:
         tmp_path,
         learned=(),
         stages=(
-            "  - name: sparse\n"
-            "    capability: sparse\n"
-            "    provider: sparse.splade\n"
+            "  - name: embed\n"
+            "    capability: embedding\n"
+            "    provider: embedding.learned\n"
             "    config: {device: cpu}\n"
         ),
     )
@@ -722,8 +718,7 @@ def test_the_shipped_gpu_probe_set_is_unchanged_by_the_derivation() -> None:
 def test_a_nested_gpu_model_cannot_be_skipped_into_a_green_report(tmp_path: Path) -> None:
     """The documented universal-parse shape: a Parse Stage whose OCR model is nested under ``ocr:``.
 
-    Pre-fix, ``envspec.stack_components`` walked a hard-coded ``(embedder, sparse_embedder,
-    multivector_embedder)`` tuple, so the ``ocr`` block — the ONLY GPU-gated node of that stack —
+    Pre-fix, ``envspec.stack_components`` walked a hard-coded tuple of nested keys that did not list ``ocr``, so the ``ocr`` block — the ONLY GPU-gated node of that stack —
     was invisible here. The loop below ``continue``d past it without appending a finding, and the
     ``E-PLACEMENT-NONE`` guard did not fire either, because the sibling redaction Stage *was*
     probed. The report was a genuine ``ok=True`` earned by measuring the wrong set of models: #191

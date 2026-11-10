@@ -25,8 +25,8 @@ pod has ONE GPU, and the framework runs its GPU stages sequentially anyway:
    with the same id and a live one is re-entered, never doubled.
 5. On completion per dataset: pull ``quality-report.{json,md}`` + the export file listing
    into the stage dir, then fold the report's numbers (chunks, mentions, relations,
-   entities, hyperedges, PII, induction cost actuals) into one consolidated metrics.json —
-   the gate artifact Dennis inspects before S4/S5 open.
+   entities, PII, induction cost actuals) into one consolidated metrics.json —
+   the stage's gate artifact.
 """
 
 from __future__ import annotations
@@ -462,7 +462,7 @@ def _require_nonempty_run(
 
     A ``latence process`` run over zero documents still writes its quality-report.json, so
     the status probe reads ``done``, the report is pulled, and — without this floor — the
-    stage would advance an empty dataset toward S4/S5 as if it were data. That is exactly
+    stage would advance an empty dataset as if it were data. That is exactly
     what happened in the field when the markdown push landed as a dangling symlink on the
     pod. Zero documents OR zero chunks means the input push (or the corpus behind it)
     likely failed; the block names the dataset and the counts so the operator looks at the
@@ -471,10 +471,9 @@ def _require_nonempty_run(
     Second floor, from the crashed-graph incident (production S3, 2026-08-04): a run that
     CRASHED inside Graph Assembly can still leave a quality-report.json behind, so the
     ``done`` probe fires and the pull path would advance a graph-less run. Every
-    campaign-generated pipeline configures ``graph.canonical`` WITH hyperedges (s3_lib),
-    so ``graph.nodes_total == 0`` or a null/absent ``graph.hyperedges`` section in the
-    RAW report is a crashed or truncated graph stage, never a legitimate result — block,
-    pointing the operator at the pod's run log.
+    campaign-generated pipeline configures ``graph.canonical`` (s3_lib), so
+    ``graph.nodes_total == 0`` in the RAW report is a crashed or truncated graph stage,
+    never a legitimate result — block, pointing the operator at the pod's run log.
     """
     documents = int(report_metrics.get("documents", 0))
     chunks = int(report_metrics.get("chunks", 0))
@@ -490,12 +489,10 @@ def _require_nonempty_run(
     graph_raw = report.get("graph")
     graph = graph_raw if isinstance(graph_raw, dict) else {}
     nodes_total = int(graph.get("nodes_total", 0))
-    hyper = graph.get("hyperedges")
-    if nodes_total <= 0 or not isinstance(hyper, dict):
+    if nodes_total <= 0:
         msg = (
             f"{dataset}: quality report shows a CRASHED/TRUNCATED graph run — "
-            f"graph.nodes_total={nodes_total}, hyperedges section "
-            f"{'present' if isinstance(hyper, dict) else 'null'} — on a graph-configured "
+            f"graph.nodes_total={nodes_total} — on a graph-configured "
             f"pipeline. Inspect the pod log {_remote_log(dataset)} for the crash, fix the "
             f"cause, remove the run store {_remote_store(dataset)}, then "
             "`latence-campaign resume`."
@@ -579,7 +576,7 @@ def run_s3_stage(
                 report, induction_model=s3.induction_model
             )
             # Sanity floor on BOTH paths (fresh pull and local resume): empty blocks,
-            # and so does a crashed-graph report (zero nodes / null hyperedges).
+            # and so does a crashed-graph report (zero nodes).
             _require_nonempty_run(dataset, report_metrics, report)
             dataset_metrics[dataset] = {
                 **report_metrics,

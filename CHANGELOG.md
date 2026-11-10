@@ -15,6 +15,27 @@ history. It is large for that reason. When the first tag is cut (`docs/RELEASING
 becomes that release's section and the cadence starts from there; until then there is no cadence to
 report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
 
+### Removed
+
+- **The query-time retrieval tooling is gone (ADR-0068).** Four distributions leave the
+  workspace — `latence-retrieval`, `latence-sink-qdrant`, `latence-splade` and `latence-muvera`
+  — and with them everything in `latence-core` that existed only to feed them: Hyperedges
+  (`GraphHyperedge`, `HyperedgeRelation`, `HyperedgeSourceRef`, `GraphScope.HYPEREDGE`, the
+  hyperedge KV sidecar), the Context Enrichment Stage and `ContextHeader`, the graph-feature
+  computers, the BM25 / sparse / multi-vector / FDE export signals and their Capability
+  Protocols (`ContextEnricher`, `GraphFeatureComputer`, `SparseEmbedder`,
+  `ComposingSparseEmbedder`, `MultiVectorEmbedder`, `FdeConverter`, `Tokenizer`), the
+  `latence retrieval` CLI group, the `context_columns` / `sparse_embedder` /
+  `multivector_embedder` / `fde_converter` / `keep_multivectors` / `bm25` Export keys, the
+  `graph_features` / `hyperedges` Graph Assembly keys and the `hyperedge_kv` KG Export key, the
+  three retrieval-only stacks, the S5 retrieval matrix and the Qdrant serving lane.
+  **`SCHEMA_VERSION` is 22 and `QUALITY_SCHEMA_VERSION` is 21**: both are removals from
+  `extra="forbid"` models, so a v21 chunk record (which always carries a `context_header` key)
+  and a v20 Quality Report that carries `context_enrichment` or `graph.hyperedges` no longer
+  validate. Graph Assembly emits nodes and edges exactly as before — same ids, same fields, same
+  order. Embedder Providers stay, as a signal of the resolution phase; the corpus Export still
+  accepts an opt-in `embedder` block.
+
 ### Changed
 
 - **The repository moved to `ddickmann/latence`, and 200 references to the old slug moved with

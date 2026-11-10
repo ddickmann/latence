@@ -277,22 +277,20 @@ class TestGeneratedPipelines:
 
         # extract_on unmasked: extraction reads raw chunks, masking hits the export only.
         assert pipeline.extract_on.value == "unmasked"
-        # Hyperedges ride graph.canonical ONLY (the inventory gotcha), with the KV export.
+        # Graph Assembly is the canonical assembler, exported as nodes + edges.
         graph = by_name["graph"]
         assert graph.provider == "graph.canonical"
-        assert graph.config["hyperedges"]["max_arity"] == 12
-        assert graph.config["graph_features"] == {"provider": "graph_features.degree"}
-        assert by_name["export_kg"].config["hyperedge_kv"] is True
+        assert graph.config == {"corpus_id": graph.config["corpus_id"]}
+        assert by_name["export_kg"].config == {"basename": "graph"}
         # The linear full-corpus resolution path (the M6 cascade-wall lesson).
         assert by_name["consolidate_types"].provider == "type_consolidation.exact_surface"
         assert by_name["disambiguate"].provider == "disambiguation.exact_surface"
         assert by_name["disambiguate"].depends_on == ["consolidate_types"]
-        # Corpus export: masked+enriched rows, cuda ST embedder, BM25, context columns.
+        # Corpus export: masked rows off redact, cuda ST embedder.
         corpus = by_name["export_corpus"]
-        assert corpus.depends_on == ["enrich"]
+        assert corpus.depends_on == ["redact"]
         assert corpus.config["embedder"]["config"]["device"] == "cuda"
-        assert corpus.config["bm25"] == {"provider": "tokenizer.regex"}
-        assert corpus.config["context_columns"] is True
+        assert set(corpus.config) == {"basename", "embedder"}
         # Redaction: learned gliner2 with guardrails ON + the PII floor.
         redact = by_name["redact"]
         assert redact.provider == "redaction.gliner2"
@@ -350,7 +348,6 @@ def fixture_report(*, with_induction: bool = True) -> dict[str, object]:
         "graph": {
             "nodes_total": 80,
             "edges_total": 25,
-            "hyperedges": {"hyperedges_total": 12},
         },
     }
 
@@ -364,7 +361,6 @@ class TestReportReader:
         assert metrics["relations"] == 30
         assert metrics["entities"] == 80
         assert metrics["edges"] == 25
-        assert metrics["hyperedges"] == 12
         assert metrics["pii_total"] == 5
         induction = metrics["induction"]
         assert induction is not None
@@ -388,7 +384,7 @@ class TestReportReader:
     def test_missing_sections_read_as_zero_not_a_crash(self) -> None:
         metrics = s3_lib.dataset_metrics_from_report({"document_count": 1})
         assert metrics["chunks"] == 0
-        assert metrics["hyperedges"] == 0
+        assert metrics["entities"] == 0
 
 
 class TestPrepFileShape:

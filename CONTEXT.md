@@ -58,7 +58,7 @@ The corpus-level Stage that links entity mentions to canonical entities and merg
 _Avoid_: Entity linking / entity resolution as stage names (they name the two internal steps, not the Stage)
 
 **Graph Assembly**:
-The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations, and re-projects the same input m-ary as Hyperedges (ADR-0057).
+The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations.
 
 **Export**:
 The Stage that materializes AI-ready outputs (Parquet, JSONL, TTL, GraphML).
@@ -79,11 +79,11 @@ _Avoid_: Delete, drop, filter (unqualified)
 
 **Evidence**:
 The record linking a knowledge-graph edge (or a Disambiguation merge decision) back to the specific source mentions and offsets that justify it, with a confidence value.
-_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference), Hyperedge (a Hyperedge *carries* raw text for retrieval; Evidence never does)
+_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference)
 
-**Hyperedge**:
-The m-ary unit of retrieval: a minimal verbatim text span, the full set of canonical entities occurring in it, the directed relations extracted from it, and its token cost — emitted by Graph Assembly as a third `GraphScope` alongside nodes and edges (ADR-0057). Where an edge is binary, a Hyperedge connects m ≥ 2 entities at once, so a joint fact ("A acquired B in 2019 pending approval by C") stays one selectable unit instead of fragmenting into disconnected pairs. It is the atomic thing the chain-of-evidence selector packs into a token budget. Its `tau_text` never holds content the exported corpus would not hold.
-_Avoid_: Evidence Unit, EU (collides with Evidence), fact, claim (both assert truth; a Hyperedge asserts only that the text says so)
+**Embedder**:
+A Capability that maps text to a fixed-width vector. It is never a Stage of its own: a Stage names one in a nested `embedder` block, and the resolution phase (Disambiguation, Type Consolidation) uses it as one signal among several (ADR-0068).
+_Avoid_: Retrieval embedder, signal generator
 
 **Quality Report**:
 A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. For a delta run it also reports what changed — documents added/retracted, entities created/merged/split, edges added/retracted, and drift since the last reconciliation. The substantiation of the "AI-ready" claim.
@@ -134,47 +134,3 @@ _Avoid_: Seed record, raw record (unqualified), pre-parsed document
 **Raw document**:
 A source document as first read by Source — its bytes plus stamped Provenance and Classification, before any Parse decoding — carried as a ParserInput. Contrast the DocumentRecord, which is the *parsed* (markdown) form the Parser produces.
 _Avoid_: Blob, payload, input record (unqualified)
-
-## Retrieval tooling
-
-The stateless, downstream layer that gives an adopter's retrieval engine SOTA quality without being one (ADRs 0048–0053). It never holds an index; it only generates signals and transforms candidate lists.
-
-**Retrieval tooling**:
-The whole downstream layer (signal generators + candidate processors + the MCP server) that sits on the consumer side of Export. It is *not* a retrieval engine — it never runs first-stage search or holds durable state (ADR-0048).
-_Avoid_: Retrieval engine, retriever, search engine, index
-
-**Signal generator**:
-An index-time pure transform that turns chunk text into a vector / term-weight map / multi-vector, materialised as files during `latence process` (dense Embedder, SparseEmbedder, MultiVectorEmbedder, FdeConverter). The index-time half of retrieval tooling.
-_Avoid_: Encoder (unqualified), vectorizer
-
-**Candidate processor**:
-A query-time pure transform over a caller-supplied candidate list: fuse, rerank, pack, or expand. The query-time half of retrieval tooling; holds nothing, fetches nothing.
-_Avoid_: Retriever, ranker (unqualified)
-
-**Fuse**:
-Merge N ranked candidate lists into one (RRF or weighted). Distinct from rerank and pack.
-_Avoid_: Fusion (as a catch-all for rerank/pack), merge
-
-**Rerank**:
-Re-score a single candidate list with a stronger model (cross-encoder; MaxSim over multi-vectors is the experimental path, ADR-0050). Distinct from fuse and pack.
-_Avoid_: Re-order, fusion
-
-**Pack**:
-Select a token-budgeted *subset* of candidates that maximises coverage and relevance minus redundancy — the ported Knapsack QKP context-packer. The final assembly before the LLM's context window. Distinct from fuse and rerank.
-_Avoid_: Fusion, context selection (unqualified), truncation
-
-**Expand**:
-Graph-augmented widening/rescoring of candidates: 1-hop over the KG columns denormalised onto each chunk (default), or DuckDB multi-hop over the emitted graph parquet (ADR-0051).
-_Avoid_: Graph search, traversal (unqualified)
-
-**RetrievalBackend**:
-The bring-your-own-engine adapter: a capability-declaring seam (`{dense, sparse, bm25, filter, multivector}`) whose `search` runs the customer's first-stage retrieval. The tooling orchestrates around it but never replaces it (ADR-0052).
-_Avoid_: Vector store (as the seam name), connector, driver
-
-**Retrieval MCP**:
-The optional, stateless MCP server that wraps a RetrievalBackend with the candidate processors and exposes them as MCP tools; hardened from `memory_engine`, with all agent-facing copy loaded from operator config (ADR-0052).
-_Avoid_: Retrieval server, search API
-
-**FDE (Fixed-Dimensional Encoding)**:
-A data-oblivious, training-free conversion of a multi-vector into one dense vector whose dot-product approximates MaxSim, so it lands in an ordinary dense index (MUVERA). Ships experimental and off by default (ADR-0050).
-_Avoid_: Pooling (unqualified), flattening

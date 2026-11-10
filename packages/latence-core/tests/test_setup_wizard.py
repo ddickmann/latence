@@ -55,7 +55,6 @@ _MANDATORY_SPINE: tuple[tuple[str, str], ...] = (
     ("profiling", "profiling"),
     ("disambiguate", "disambiguation"),
     ("graph", "graph_assembly"),
-    ("enrich", "context_enrichment"),
     ("export_kg", "export"),
     ("export_corpus", "export"),
 )
@@ -274,33 +273,32 @@ def test_mandatory_spine_always_present(tmp_path: Path, pii: bool) -> None:
         assert expected in present, f"missing mandatory stage {expected}"
 
 
-def test_export_corpus_reads_the_enriched_chunk_stream(tmp_path: Path) -> None:
-    """The RAG corpus is exported from `enrich` (context columns on the enriched chunks)."""
+def test_export_corpus_reads_the_redacted_chunk_stream(tmp_path: Path) -> None:
+    """With PII ON the corpus is exported from `redact`, so every exported row is masked."""
     pipe = Pipeline.from_yaml_text(build_stack_config(_answers(tmp_path, pii=True)))
     export = next(s for s in pipe.stages if s.name == "export_corpus")
-    assert export.depends_on == ["enrich"]
-    assert export.config["context_columns"] is True
+    assert export.depends_on == ["redact"]
+    assert set(export.config) == {"basename", "embedder"}
 
 
 def test_pii_on_wires_w16_chunk_level_redaction_dataflow(tmp_path: Path) -> None:
-    """W16 (ADR-0042): with PII ON, redact consumes the induced CHUNK stream and enrich reads the
-    REDACTED chunk stream, so export_corpus is masked AND enriched (`redact → enrich → export`)."""
+    """W16 (ADR-0042): with PII ON, redact consumes the induced CHUNK stream and export_corpus
+    reads the REDACTED chunk stream, so the exported corpus is masked (`redact → export`)."""
     pipe = Pipeline.from_yaml_text(build_stack_config(_answers(tmp_path, pii=True)))
     redact = next(s for s in pipe.stages if s.name == "redact")
-    enrich = next(s for s in pipe.stages if s.name == "enrich")
+    export = next(s for s in pipe.stages if s.name == "export_corpus")
     # redact is a chunk→chunk transform over the induced chunk stream (NOT the pre-W16 doc-level
     # [parse, induce] shape) so the induced pii_types union onto the FINANCIAL_PII floor.
     assert redact.depends_on == ["induce"]
-    # enrich reads the redacted chunk stream first, then the graph — the blessed context-enrichment
-    # dataflow, so the exported corpus row carries masked_content AND the context header.
-    assert enrich.depends_on == ["redact", "graph"]
+    # export_corpus reads the redacted chunk stream, so the exported row carries masked_content.
+    assert export.depends_on == ["redact"]
 
 
-def test_pii_off_enrich_reads_induced_chunk_stream(tmp_path: Path) -> None:
-    """With PII OFF there is no redact stage, so enrich falls back to the induced chunk stream."""
+def test_pii_off_export_corpus_reads_induced_chunk_stream(tmp_path: Path) -> None:
+    """With PII OFF there is no redact stage, so the export falls back to the induced chunks."""
     pipe = Pipeline.from_yaml_text(build_stack_config(_answers(tmp_path, pii=False)))
-    enrich = next(s for s in pipe.stages if s.name == "enrich")
-    assert enrich.depends_on == ["induce", "graph"]
+    export = next(s for s in pipe.stages if s.name == "export_corpus")
+    assert export.depends_on == ["induce"]
 
 
 # -- W18 mask-before-extract advanced option ----------------------------------

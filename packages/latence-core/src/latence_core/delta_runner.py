@@ -40,11 +40,7 @@ delta machinery on top of it, without forking the Runner (ADR-0018 reuses the ex
   only for an explicit ``granularity: corpus`` induction Stage, where the single shared vocabulary
   IS a genuine cross-document coupling. **``--reinduce``** now means *re-canonicalize from
   scratch*: no seed, no schema reuse, no doc-level reuse — the full O(corpus) rebuild, the rare
-  path. Since ADR-0061 reuse also covers a ``context_enrichment`` pipeline (previously the one
-  fallback to full extraction): the reuse store persists the PRE-enrichment chunk variant, the
-  Runner folds the overlay into the enrichment Stage's per-carrier chunk stream in document
-  order, and every chunk's header is re-derived from the CURRENT graph each run — so no
-  KG-derived artifact ever crosses a run boundary and none can go stale.
+  path.
 * **Retraction** (:meth:`retract`) is the default soft deletion: the deleted documents' derived
   records are tombstoned (excluded from the live set, retained on Storage for audit and
   rollback), affected clusters re-resolved, a new Version committed.
@@ -108,8 +104,7 @@ _DOC_LEVEL = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
 
 # The Stage kinds whose checkpoint the reuse store must NOT read (T4): every CORPUS-LEVEL kind.
 # A corpus-level Stage can ride a doc-level carrier — Type Consolidation re-emits the whole run's
-# mentions/relations relabelled, Context Enrichment re-emits the whole chunk stream with a header
-# summarizing the assembled graph, and an Export sink re-emits its input verbatim — so the
+# mentions/relations relabelled, and an Export sink re-emits its input verbatim — so the
 # distinction has to be drawn by Stage KIND, not by carrier type (see
 # :meth:`DeltaRunner._doc_level_records`).
 #
@@ -237,7 +232,7 @@ class DeltaRunner:
         previous_manifest = self._manifest_of(parent_version, store)
 
         # W17/ADR-0061: decide cross-run reuse. Reuse engages from a committed parent whenever not
-        # reinducing — for EVERY pipeline, context-enrichment ones included (the Runner's
+        # reinducing — for EVERY pipeline (the Runner's
         # document-ordered overlay fold makes the union reach every corpus-level Stage exactly as
         # a rebuild would deliver it). The frozen schema + the prior Version's doc-level store are
         # read once; the reusable documents are those whose current content-addressed id matches a

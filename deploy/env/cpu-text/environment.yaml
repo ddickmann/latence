@@ -8,13 +8,12 @@
 #
 # Governing: ADR-0016 (per-Provider extras are the composition mechanism — the heavy stack lives
 # in the Provider packages, never in latence-core), ADR-0007 (CPU-first), ADR-0041 (opinionated
-# quality-baked defaults), ADR-0045 (Granite r2 embedder), ADR-0046 (GLinker), ADR-0053 (SPLADE).
+# quality-baked defaults), ADR-0045 (Granite r2 embedder), ADR-0046 (GLinker).
 name: cpu-text
 summary: >-
   The CPU/text portion of the enterprise-sota multilingual stack: GLiNER2 fused entity+relation
-  extraction, learned GLiNER PII redaction, GLinker disambiguation, IBM Granite r2 dense
-  embeddings and BAAI bge-m3 SPLADE sparse signals — installed from CPU-only wheels with no CUDA
-  payload.
+  extraction, learned GLiNER PII redaction, GLinker disambiguation and IBM Granite r2 dense
+  embeddings — installed from CPU-only wheels with no CUDA payload.
 
 # PEP 668 (externally-managed-Python) is handled by install.sh creating a dedicated venv; the
 # interpreter range is the intersection of the packages' requires-python and the wheel coverage
@@ -46,7 +45,6 @@ workspace_packages:
   - packages/latence-pii-gliner
   - packages/latence-disambig-glinker
   - packages/latence-embedder-st
-  - packages/latence-splade
 
 # Third-party requirements that no workspace package declares directly but the environment owns.
 # Empty: every distribution here is reachable from a package's declared dependencies, and the
@@ -114,7 +112,6 @@ providers:
   - export.knowledge_graph
   - export.jsonl_parquet
   - embedding.sentence_transformers
-  - sparse.splade
 
 # DEVICE HONESTY. disambiguation.glinker declares ProviderProfile compute="gpu" (its L3/L4
 # gliner-linker biencoder needs a GPU), so on a CPU host the Runner skips it with a flag rather

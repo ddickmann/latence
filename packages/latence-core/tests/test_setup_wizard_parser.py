@@ -85,14 +85,11 @@ def test_sota_plaintext_corpus_emits_a_runnable_text_parser(tmp_path: Path) -> N
 
 
 def test_sota_plaintext_keeps_every_other_sota_signal(tmp_path: Path) -> None:
-    """Switching the parse path must not strip the SOTA spine: pagerank + BM25 + Granite stay."""
+    """Switching the parse path must not strip the SOTA spine: Granite + GLinker stay."""
     text = build_stack_config(
         _sota_answers(tmp_path, parser="parser.plaintext", extensions=("txt",))
     )
-    graph = stage(text, "graph")
     export = stage(text, "export_corpus")
-    assert graph.config["graph_features"]["provider"] == "graph_features.pagerank"
-    assert "bm25" in export.config
     assert "granite" in str(export.config["embedder"]).lower()
     # The neural GLinker disambiguator is still wired (this is the composed pod stack).
     assert stage(text, "disambiguate").provider == "disambiguation.glinker"
