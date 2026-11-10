@@ -187,9 +187,9 @@ did not otherwise change.
 ### 3. The doc-truth gates resolve links through `git ls-files`, not the working tree
 
 `packages/latence-core/tests/test_front_door_truthfulness.py` checks the front-door pages —
-`README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `RELEASE-GATES.md`, this file, and
-every **tracked** page under `docs/` — plus `CHANGELOG.md` and every `packages/*/README.md`. It
-rejects:
+`README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `RELEASE-GATES.md`, `ROADMAP.md`,
+this file, and every **tracked** page under `docs/` — plus `CHANGELOG.md` and every
+`packages/*/README.md`. It rejects:
 
 - relative markdown links, and backticked `docs/…` / `issues/…` file references, that do not resolve;
 - `#fragment` anchors that do not match a real heading under GitHub's slug rules;
@@ -211,6 +211,11 @@ add a document and link to it, stage it in the same change.
 workflow files. `packages/latence-core/tests/test_publish_readiness.py` polices licence pins,
 contact addresses, and agreement between trove classifiers and the CI matrix — a classifier is a
 claim, and the matrix is its only evidence, so widening either without the other fails.
+
+`packages/latence-core/tests/test_pages_name_no_removed_capability.py` holds the pages it lists
+to one more rule: a paragraph that names a capability ADR-0068 removed must say that it is gone.
+The names live in `packages/latence-core/tests/_removed_capabilities.py`, which the release gate
+reads too.
 
 The rule underneath all of them: **assert observable repository facts, never a flag that records
 intent.** If you add a doc-truth gate, make it fail on the tree that motivated it before you make it

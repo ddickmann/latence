@@ -64,6 +64,10 @@ _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 # checklist, and no gate walked it: it linked a GPU runbook under ``issues/e2e-extended/`` that was
 # never in the tree, on ``main`` and here, until a rewrite of the gates happened to delete the
 # sentence.
+#
+# ``ROADMAP.md`` is in the set because it sits at the repository root and ``issues/README.md``
+# sends readers to it for the forward-looking picture. Its links and anchors resolved on the day
+# it joined; nothing had been checking that they did.
 _FRONT_DOOR = (
     "README.md",
     "CONTEXT.md",
@@ -71,6 +75,7 @@ _FRONT_DOOR = (
     "SECURITY.md",
     "AGENTS.md",
     "RELEASE-GATES.md",
+    "ROADMAP.md",
 )
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")

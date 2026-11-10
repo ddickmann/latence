@@ -28,6 +28,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from _removed_capabilities import lines_naming_a_removed_capability
 
 # packages/latence-core/tests/ -> repo root is three parents up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -230,11 +231,7 @@ def test_the_gates_name_no_capability_the_tree_no_longer_has() -> None:
     """A gate on a removed capability is unmeetable; it must go when the capability goes."""
     gates = _text(_GATES)
     unchecked = [line for line in gates.splitlines() if line.lstrip().startswith("- [ ]")]
-    stale = [
-        line.strip()
-        for line in unchecked
-        if re.search(r"splade|qdrant|graph leg|hyperedge", line, re.IGNORECASE)
-    ]
+    stale = lines_naming_a_removed_capability(unchecked)
     assert not stale, "open release gates name capabilities removed by ADR-0068:\n" + "\n".join(stale)
 
 
