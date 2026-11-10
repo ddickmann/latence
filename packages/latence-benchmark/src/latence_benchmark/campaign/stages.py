@@ -129,10 +129,17 @@ def run_stage(
     2. **Terminal states**: a ``done``/``approved`` stage is a NO-OP unless ``fresh``;
        a ``blocked`` stage is refused unless ``fresh`` (blocked is terminal-with-reason).
     3. **Probe on entry**: if the done-probe is already satisfied the stage is marked
-       ``done`` without running — resuming never redoes finished work.
+       ``done`` without running — resuming never redoes finished work. ``fresh`` skips this
+       step: it is the operator's request to do the work again, and an intact artifact from
+       the earlier run must not answer it.
     4. **Run, then probe again**: the probe, not the return, decides ``done``. Any raise or
        an unsatisfied probe records ``blocked`` with the reason and raises
        :class:`StageBlockedError`.
+
+    ``fresh`` resets the recorded status (an approval included) and calls the stage's ``run``
+    again. It deletes nothing. What ``run`` then repeats is the stage's own business: the
+    stages skip units of work they find already written (a fetched file, an OCR'd document, a
+    finalized pipeline checkpoint), so recomputing those still means removing them first.
 
     Every observable transition is saved atomically before the next step begins.
     """
@@ -161,8 +168,7 @@ def run_stage(
     if fresh:
         state.reset(name)
         state.save()
-
-    if spec.done_probe(ctx):
+    elif spec.done_probe(ctx):
         state.mark_done(name)
         state.save()
         return f"{name}: done-probe satisfied on entry — marked done without running."

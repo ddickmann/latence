@@ -177,6 +177,67 @@ class TestRerunSemantics:
         run_stage(specs, "a", ctx, state, fresh=True)
         assert state.status_of("a") == DONE
 
+    def test_fresh_redoes_a_done_stage_whose_artifact_is_intact(
+        self, tmp_path: Path, ctx: CampaignContext
+    ) -> None:
+        """``--fresh`` runs the stage again even though its done-probe is satisfied.
+
+        The entry probe used to win: ``--fresh`` reset the recorded status, the probe found the
+        artifact and the stage was marked done again without running. That left the operator no
+        way to redo a stage short of deleting its artifacts by hand.
+        """
+        stage = FakeStage("a")
+        specs, state = make(tmp_path, stage)
+        run_stage(specs, "a", ctx, state)
+        assert stage.artifact is True
+
+        note = run_stage(specs, "a", ctx, state, fresh=True)
+
+        assert stage.runs == ["a", "a"]
+        assert "without running" not in note
+        assert note.startswith("a: done")
+        assert state.status_of("a") == DONE
+
+    def test_fresh_redoes_an_approved_stage_and_withdraws_the_approval(
+        self, tmp_path: Path, ctx: CampaignContext
+    ) -> None:
+        """A redone stage is ``done``, not ``approved``: its new output has not been looked at."""
+        first, second = FakeStage("a"), FakeStage("b")
+        specs, state = make(tmp_path, first, second)
+        run_stage(specs, "a", ctx, state)
+        state.approve("a")
+
+        run_stage(specs, "a", ctx, state, fresh=True)
+
+        assert first.runs == ["a", "a"]
+        assert state.status_of("a") == DONE
+        with pytest.raises(GateRefusedError, match="not approved"):
+            run_stage(specs, "b", ctx, state)
+
+    def test_fresh_run_that_fails_blocks_the_stage_although_the_old_artifact_exists(
+        self, tmp_path: Path, ctx: CampaignContext
+    ) -> None:
+        """The old artifact must not turn a failed redo into ``done``."""
+        stage = FakeStage("a")
+        specs, state = make(tmp_path, stage)
+        run_stage(specs, "a", ctx, state)
+
+        stage.fail_with = "the pod is gone"
+        with pytest.raises(StageBlockedError, match="the pod is gone"):
+            run_stage(specs, "a", ctx, state, fresh=True)
+
+        assert stage.artifact is True
+        assert state.status_of("a") == BLOCKED
+
+    def test_without_fresh_the_entry_probe_still_spares_finished_work(
+        self, tmp_path: Path, ctx: CampaignContext
+    ) -> None:
+        """What ``resume`` relies on is unchanged: no ``--fresh``, no second run."""
+        stage = FakeStage("a", artifact=True)
+        specs, state = make(tmp_path, stage)
+        assert "without running" in run_stage(specs, "a", ctx, state)
+        assert stage.runs == []
+
     def test_state_survives_on_disk_between_runs(
         self, tmp_path: Path, ctx: CampaignContext
     ) -> None:

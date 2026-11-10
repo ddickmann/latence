@@ -85,9 +85,11 @@ that opens the next gate.
 
 A blocked stage records its reason in `STATE.json`, and `status` renders it. Blocked is
 terminal: fix the cause, then re-run that stage with `latence-campaign run <stage> --fresh`.
-`--fresh` resets the recorded status and nothing else. The done-probe is still consulted first,
-so a stage whose artifacts are intact is marked done again without running; remove the artifacts
-to force the work to be redone.
+`--fresh` resets the recorded status, an approval included, and runs the stage again. The
+done-probe is not consulted on entry, so a stage whose artifacts are intact is run again too; the
+probe is consulted after the run, as always. `--fresh` deletes nothing, and the work inside a
+stage stays resumable (next paragraph): a file already fetched, a document already OCR'd and a
+finalized pipeline checkpoint are skipped or replayed. Remove those to have them recomputed.
 
 Inside a stage, the work itself is resumable. The OCR worker skips every document it has
 already written. Each pipeline run uses a fixed run id (`s3-<dataset>-v1`), and re-invoking

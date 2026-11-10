@@ -385,6 +385,34 @@ class TestStatusAndFlow:
         assert cli.main(["run", "s1-corpus", "-c", str(config), "--repo-root", str(repo)]) == 0
         assert "no-op" in capsys.readouterr().out
 
+    @pytest.mark.usefixtures("offline_seams")
+    def test_run_fresh_redoes_a_done_stage_whose_artifacts_are_intact(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``run <stage> --fresh`` runs the real stage again; the metrics show the second pass.
+
+        The first pass fetches the one raw file (``fetched: 1``). Nothing is deleted. On the
+        second pass the fetcher finds the file and skips it, so a stage that really ran again
+        records ``fetched: 0, skipped: 1``. Before the fix the done-probe was satisfied on entry,
+        the stage was marked done without running and the metrics still said ``fetched: 1``.
+        """
+        config = init_campaign(tmp_path)
+        repo = make_repo(tmp_path)
+        argv = ["run", "s1-corpus", "-c", str(config), "--repo-root", str(repo)]
+        metrics = tmp_path / "camp" / "stages" / "s1-corpus" / "metrics.json"
+
+        assert cli.main(argv) == 0
+        capsys.readouterr()
+        first = json.loads(metrics.read_text(encoding="utf-8"))["datasets"]["multihop_rag"]
+        assert (first["fetched"], first["skipped"]) == (1, 0)
+
+        assert cli.main([*argv, "--fresh"]) == 0
+        out = capsys.readouterr().out
+        assert "s1-corpus: done" in out
+        assert "without running" not in out
+        second = json.loads(metrics.read_text(encoding="utf-8"))["datasets"]["multihop_rag"]
+        assert (second["fetched"], second["skipped"]) == (0, 1)
+
     def test_approve_before_done_fails_loudly(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

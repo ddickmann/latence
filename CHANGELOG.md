@@ -140,6 +140,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   the median wall time. The behaviour is unchanged. The help text, the report's field
   descriptions and table header, `docs/tuning.md` and `scripts/tune-on-gpu.md` now say that a
   figure compares settings on one device and is not records per second.
+- **`latence-campaign run <stage> --fresh` redoes the stage.** It reset the recorded status, then
+  the done-probe found the earlier artifacts and the stage was marked done again without
+  running. With `--fresh` the entry probe is now skipped and the stage's `run` is called; the
+  probe still decides `done` afterwards, and a redone stage needs approving again. `--fresh`
+  deletes nothing: units of work a stage finds already written are still skipped.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept
