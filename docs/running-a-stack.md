@@ -41,6 +41,10 @@ sed -e 's#{STORAGE_URI}#file:///tmp/my-run#' -e 's#{CORPUS_DIR}#file:///path/to/
 latence run /tmp/my-stack.yaml
 ```
 
+`latence run` substitutes nothing. Given a stack whose placeholders are still unfilled, it (like
+`process`, `delta`, `retract` and `purge`) stops with a `[config]` error that names each
+placeholder and where it sits, exits 2, and writes nothing.
+
 ## Validating a stack — `latence stack validate`
 
 `latence stack validate <stack.yaml>` runs a named stack **end-to-end on a small bundled corpus**

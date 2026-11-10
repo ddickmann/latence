@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from latence_core.errors import LatenceError, error_category
+from latence_core.errors import ConfigError, LatenceError, error_category
 from latence_core.observability import (
     DEFAULT_LINEAGE_NAMESPACE,
     OpenLineageEmitter,
@@ -96,13 +96,20 @@ def _load_pipeline(pipeline_path: Path) -> Pipeline:
     """Load a Pipeline from a stack/pipeline YAML (the exact loader ``run`` uses).
 
     The YAML itself is read from local disk; its declared ``storage_uri`` can point anywhere
-    fsspec supports. Exits 2 (a usage error) when the file is missing.
+    fsspec supports. Exits 2 (a usage error) when the file is missing, and when the file is a
+    template that still carries a placeholder such as ``{STORAGE_URI}``: every command that loads
+    a Pipeline through here executes it, and a template executed as written is a silent empty run.
     """
     if not pipeline_path.exists():
         typer.echo(f"Pipeline file not found: {pipeline_path}", err=True)
         raise typer.Exit(code=2)
     text = pipeline_path.read_text(encoding="utf-8")
     pipeline = Pipeline.from_yaml_text(text)
+    try:
+        pipeline.require_resolved()
+    except ConfigError as exc:
+        typer.echo(f"Not running {pipeline_path} [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     logger.info("loaded pipeline %r with %d stages", pipeline.name, len(pipeline.stages))
     return pipeline
 

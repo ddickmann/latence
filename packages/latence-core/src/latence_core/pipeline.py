@@ -9,13 +9,18 @@ and commit, and what makes the one-line Provider swap literally true.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from latence_core.errors import ConfigError
+
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from latence_core.storage import Storage
 
 # v2 (S10): the Pipeline gains an optional ``gold_set_uri`` — the annotation file an adopter
@@ -23,6 +28,32 @@ if TYPE_CHECKING:
 # ADR-0008). Additive and backward-compatible (defaults to None), so a v1 declaration still
 # validates.
 PIPELINE_SCHEMA_VERSION = 2
+
+# A template placeholder: braces around an UPPER_SNAKE name, as in ``{STORAGE_URI}``,
+# ``{CORPUS_DIR}`` or ``{OCR_BASE_URL}``. The shipped stacks carry these where a machine-specific
+# value belongs, and whoever executes a stack fills them first (``latence stack validate`` and the
+# other harnesses by substitution, an operator with ``sed`` / ``envsubst``). Three look-alikes are
+# deliberately NOT placeholders, because they are legitimate config text: a lower-case format
+# field (``{id}``), a doubled brace that a format template uses for a literal one
+# (``{{LABELS}}``), and a named character in a regular expression (``\N{BULLET}``).
+_PLACEHOLDER = re.compile(r"(?<!\{)(?<!\\N)\{[A-Z][A-Z0-9_]*\}(?!\})")
+
+
+def _placeholders_in(value: object, where: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(location, placeholder)`` for every placeholder in a config value, in file order.
+
+    Only string VALUES are read (a mapping's keys are names, not values), recursing through
+    mappings and lists. A placeholder that occurs twice in one string is reported once.
+    """
+    if isinstance(value, str):
+        for token in dict.fromkeys(_PLACEHOLDER.findall(value)):
+            yield where, token
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _placeholders_in(item, f"{where}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _placeholders_in(item, f"{where}[{index}]")
 
 
 class CapabilityKind(StrEnum):
@@ -229,6 +260,43 @@ class Pipeline(BaseModel):
                     "its depends_on through the redact Stage (or re-run `latence setup`)."
                 )
                 raise ValueError(msg)
+
+    def unresolved_placeholders(self) -> list[tuple[str, str]]:
+        """Every template placeholder this Pipeline still carries, as ``(location, placeholder)``.
+
+        Reads ``storage_uri``, ``gold_set_uri`` and every Stage's config, in declaration order. An
+        empty list means the Pipeline is concrete. Parsing never rejects a placeholder — the
+        static tools (the stack check, the capability guard, the tuner's roster) read the shipped
+        templates as they are — so this is asked by whoever is about to EXECUTE the Pipeline.
+        """
+        found = list(_placeholders_in(self.storage_uri, "storage_uri"))
+        found += _placeholders_in(self.gold_set_uri, "gold_set_uri")
+        for stage in self.stages:
+            found += _placeholders_in(stage.config, f"stages.{stage.name}.config")
+        return found
+
+    def require_resolved(self) -> None:
+        """Raise :class:`~latence_core.errors.ConfigError` if a template placeholder is unfilled.
+
+        Called at the top of every path that executes a Pipeline, before anything is written. A
+        Pipeline that still says ``storage_uri: "{STORAGE_URI}"`` is a template, not a run: executed
+        as it is, it writes into a directory literally named ``{STORAGE_URI}`` under the working
+        directory, reads no document from the relative path ``{CORPUS_DIR}`` and reports an empty
+        corpus as a completed run. The message names each location and its placeholder and no
+        other config value, so it cannot quote a credential.
+        """
+        found = self.unresolved_placeholders()
+        if not found:
+            return
+        listing = "; ".join(f"{where} carries {token}" for where, token in found)
+        msg = (
+            f"Pipeline {self.name!r} is a template with unfilled placeholder(s): {listing}. "
+            "A Pipeline is executed as written; nothing substitutes these at run time. Replace "
+            "each one with a real value in a copy of the file (docs/running-a-stack.md, "
+            "'Running a stack directly'), or use `latence stack validate`, which fills "
+            "{STORAGE_URI} and {CORPUS_DIR} itself."
+        )
+        raise ConfigError(msg)
 
     @classmethod
     def from_yaml_text(cls, text: str) -> Pipeline:

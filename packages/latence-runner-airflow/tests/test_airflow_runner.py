@@ -253,3 +253,25 @@ def test_xcom_backend_gathers_parents_in_order() -> None:
 
     gathered = xcom.gather(cast(Stage, _Stage()))
     assert gathered == cast(list[StageOutput], ["a1", "a2", "b1"])
+
+
+def test_a_template_pipeline_is_refused_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Pipeline with an unfilled ``{STORAGE_URI}`` is a config error under this Runner too.
+
+    The adapter never calls the local Runner's ``run()``, so the refusal the local Runner makes
+    does not cover it. Executed as written, the template would create a directory literally named
+    ``{STORAGE_URI}`` under the working directory and report an empty corpus. ``build_dag`` refuses
+    as well, and before it needs Airflow: a DAG built from a template would only fail (or, worse,
+    not fail) once scheduled.
+    """
+    from latence_core.errors import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    template = _pipeline("'{STORAGE_URI}'", Path("{CORPUS_DIR}"))
+    with pytest.raises(ConfigError, match=r"\{STORAGE_URI\}"):
+        AirflowRunner().run(template, run_id="af")
+    with pytest.raises(ConfigError, match=r"\{STORAGE_URI\}"):
+        AirflowRunner().build_dag(template)
+    assert list(tmp_path.iterdir()) == []
