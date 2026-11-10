@@ -242,7 +242,12 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]], gold: dict[str, str]) 
 # --------------------------------------------------------------------------------------------
 
 
-def score(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
+def score(
+    df: pd.DataFrame, cand: pd.DataFrame, kind: str, detail: dict[str, Any] | None = None
+) -> np.ndarray:
+    """Splink match probability per candidate pair. Pass a dict as ``detail`` to also get the
+    per-field evidence a reviewer is shown: it receives the trained ``model`` and the full
+    ``pred`` frame (gamma and Bayes-factor columns per comparison)."""
     import splink.comparison_library as cl
     from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 
@@ -291,11 +296,16 @@ def score(df: pd.DataFrame, cand: pd.DataFrame, kind: str) -> np.ndarray:
     for r in em_rules:
         trainer.training.estimate_parameters_using_expectation_maximisation(r)
     model = trainer.misc.save_model_to_json()
+    if detail is not None:  # keeps gamma_* and bf_* per comparison; probabilities are unchanged
+        model["retain_intermediate_calculation_columns"] = True
     linker = Linker(sdf, model, log_level=40)
     bp = cand[["l", "r"]].rename(columns={"l": "join_key_l", "r": "join_key_r"})
     bp.insert(0, "match_key", "0")
     linker.table_management.register_blocked_pairs_for_predict(db.register(bp))
-    pred = linker.inference.predict().as_pandas_dataframe()[["unique_id_l", "unique_id_r", "match_probability"]]
+    full = linker.inference.predict().as_pandas_dataframe()
+    if detail is not None:
+        detail["model"], detail["pred"] = model, full
+    pred = full[["unique_id_l", "unique_id_r", "match_probability"]]
     m = cand.merge(pred, left_on=["l", "r"], right_on=["unique_id_l", "unique_id_r"], how="left")
     return m["match_probability"].fillna(0.0).to_numpy()
 
@@ -386,6 +396,8 @@ def run(
     n_cal2: int = 1000,
     n_ltt2: int = 1500,
     scorers: dict[str, Any] | None = None,
+    export_review: Path | None = None,
+    export_groups: int = 150,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes)."""
@@ -405,7 +417,8 @@ def run(
     _stage("block", t0)
 
     t = time.time()
-    p_raw = score(df, cand, kind)
+    detail: dict[str, Any] | None = {} if export_review else None
+    p_raw = score(df, cand, kind, detail)
     timings["score_splink"] = time.time() - t
     _stage("score", t0)
     veto = vetoes(df, cand, kind)
@@ -508,6 +521,17 @@ def run(
         set(cand.l[rev]) | set(cand.r[rev]), zip(cand.l[rev], cand.r[rev])
     ).values()}) if rev.any() else 0
 
+    if export_review is not None and detail is not None:
+        from review_export import build_review_export
+
+        export = build_review_export(
+            raw=raw, cand=cand, p=p, p_raw=p_raw, band=band, y=y, veto=veto, detail=detail,
+            accept_at=bands.accept_at, reject_below=bands.reject_below, kind=kind,
+            max_groups=export_groups, seed=seed, source=str(path),
+        )
+        export_review.parent.mkdir(parents=True, exist_ok=True)
+        export_review.write_text(json.dumps(export, indent=1, default=str))
+
     result: dict[str, Any] = {
         "dataset": dataset,
         "path": str(path),
@@ -567,10 +591,13 @@ def main() -> None:
     ap.add_argument("--rescore", default="", help="comma-separated pair scorers for the uncertain pairs: rerank,decide,glide")
     ap.add_argument("--n-cal2", type=int, default=1000)
     ap.add_argument("--n-ltt2", type=int, default=1500)
+    ap.add_argument("--export-review", type=Path, default=None, help="write the review-band items for the workbench")
+    ap.add_argument("--export-groups", type=int, default=150, help="review groups to export, highest priority first")
     a = ap.parse_args()
     res = run(
         a.dataset, a.path, a.n_cal, a.n_ltt, a.seed, a.baseline_max, a.reject_target,
         rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
+        export_review=a.export_review, export_groups=a.export_groups,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))
