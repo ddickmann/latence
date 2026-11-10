@@ -1,8 +1,9 @@
 """``latence-parser-lighton-vllm`` — the PRODUCTION LightOn-OCR Parser over a served vLLM (W10).
 
 The production OCR path: a drop-in :class:`~latence_core.capability.Parser`
-(``parser.lighton_vllm``) that hits a **running vLLM OpenAI-compatible endpoint** — ~2.7x faster at
-concurrency than optimised in-process transformers (LightOn's recommended path). It reuses
+(``parser.lighton_vllm``) that hits a **running vLLM OpenAI-compatible endpoint**. The served and
+the in-process path have not been measured against each other on one machine (``PERF-RESULTS.md``
+lists that comparison as pending). It reuses
 ``parser.lighton``'s exact rasteriser (200 dpi / megapixel bomb-cap / 1540px LANCZOS longest-side —
 the shared :class:`~latence_parser_lighton.rasterize.PageRasteriser`, so the two OCR back-ends
 cannot diverge), POSTs each page as an OpenAI multimodal image to ``{base_url}/v1/chat/completions``

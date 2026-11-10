@@ -196,9 +196,10 @@ PY
 ## 2. Serve the LightOn-OCR vLLM endpoint (the OCR prereq)
 
 The enterprise parse Stage is `parser.lighton_vllm` — it does **not** run OCR in-process; it POSTs
-each rasterised page to a **running vLLM server**. Pod-measured, vLLM at concurrency is
-~**2.7× faster than optimised in-process transformers**, which is why production OCR is a warm
-server (the full recipe + tuning is [`docs/serving-lighton-vllm.md`](serving-lighton-vllm.md)).
+each rasterised page to a **running vLLM server**. Production OCR is a warm server by decision
+(ADR-0030). The served and the in-process path have not been measured against each other on one
+machine: `PERF-RESULTS.md` lists that comparison as pending. The full recipe + tuning is
+[`docs/serving-lighton-vllm.md`](serving-lighton-vllm.md).
 
 Stand it up on the pod (LightOn's official, optimal-throughput config):
 

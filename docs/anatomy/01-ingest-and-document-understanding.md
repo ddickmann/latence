@@ -337,8 +337,8 @@ join to drift from.
 
 ### What the OCR path does when it *is* in play
 
-Take `parser.lighton_vllm`, the production path (vLLM at concurrency measured ~2.7× faster than
-optimised in-process `transformers` on the same GPU). Per document:
+Take `parser.lighton_vllm`, the production path. (It has not been measured against in-process
+`transformers` on one machine; `PERF-RESULTS.md` lists that comparison as pending.) Per document:
 
 1. **Rasterise** through the shared `PageRasteriser` — deliberately *shared* with
    `parser.lighton` so the two back-ends cannot silently diverge at the pixel boundary. The

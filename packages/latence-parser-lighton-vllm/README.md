@@ -6,9 +6,9 @@ OpenAI-compatible endpoint** serving
 [**LightOn-OCR-2**](https://huggingface.co/lightonai/LightOnOCR-2-1B) (`lightonai/LightOnOCR-2-1B`) —
 a compact vision-language OCR model, **Apache-2.0 weights AND code**.
 
-**Production OCR = a warm vLLM server, not in-process transformers.** Pod-measured on the same GPU,
-vLLM at concurrency is ~**2.7× faster than optimised transformers** (LightOn's recommended path;
-their 5.71 pg/s H100 headline figure is the vLLM path). This Provider is a **drop-in** for
+**Production OCR = a warm vLLM server, not in-process transformers** (ADR-0030). The served and the
+in-process path have not been measured against each other on one machine: `PERF-RESULTS.md` in the
+repository lists that comparison as pending. This Provider is a **drop-in** for
 `parser.lighton` — the *same* `Parser` Capability, the *same* output contract — so a Pipeline swaps
 the in-process OCR for the served one with **one config change** (point `base_url` at the endpoint).
 The in-process `parser.lighton` stays for single-box / simple deployments.
@@ -43,8 +43,8 @@ parse:
 
 ## The production vLLM serve recipe (CUDA GRAPHS ON)
 
-LightOn's official + optimal-throughput config — **no `--enforce-eager` in production** (cudagraphs
-give the extra speed the transformers head-to-head's enforce-eager floor did not capture):
+LightOn's official + optimal-throughput config — **no `--enforce-eager` in production** (that flag
+turns cudagraphs off, and the recipe keeps them on):
 
 ```bash
 vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0.90 \

@@ -166,6 +166,15 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   unchanged. The tests now assert the per-format wording, the negative control uses a corpus
   that holds all three formats, and two tests pin the per-format rule and its threshold. No
   gate runs this file; it is run by hand.
+- **The served-OCR speedup figure is gone from the pages that still stated it.** "About 2.7×
+  faster" (LightOn-OCR served by vLLM against in-process `transformers`) has no measurement
+  record: `PERF-RESULTS.md` lists that comparison as pending. `docs/serving-lighton-vllm.md`,
+  `docs/TUTORIAL-fresh-pod-walkthrough.md`, `docs/anatomy/01-ingest-and-document-understanding.md`,
+  `scripts/validate-lighton-vllm-on-gpu.md` and the `latence-parser-lighton-vllm` package
+  (README, `pyproject.toml`, two docstrings) now say what is recorded, as `docs/deployment.md`
+  does. A third-party throughput figure quoted beside it, with no source in the tree, went with
+  it, as did the sentences that referred to a head-to-head run that never took place. A test
+  refuses the figure on any page while the comparison is pending.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept
