@@ -104,6 +104,10 @@ jobs:
     name: test · conformance · coverage (${{ matrix.os }} · py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     needs: lint-type
+    # A healthy leg takes 30 to 48 minutes. Without a limit a stalled leg holds the run for the
+    # default six hours; pytest's faulthandler_timeout (pyproject.toml) names the stuck test in
+    # the log well before this cuts the job off.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

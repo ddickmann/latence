@@ -270,6 +270,11 @@ ignore_errors = true
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["packages"]
+# A watchdog, not a limit: when one test (set-up and tear-down included) runs longer than this
+# many seconds, pytest writes every thread's traceback to the log and lets the test go on. The
+# whole suite takes 20 to 40 minutes for some 4,400 tests, so a single test that is still
+# running after 15 minutes is stuck, and this is what names it.
+faulthandler_timeout = 900
 
 # Coverage is SURFACED in CI (job summary + artifact + a badge-ready number), never
 # hard-gated — a % threshold flakes as the heavy/endpoint Providers (whose real backends

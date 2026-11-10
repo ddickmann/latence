@@ -909,6 +909,34 @@ def test_secrets_baseline_is_audited_clean() -> None:
     assert not unaudited, f"un-audited or true-positive secret findings: {unaudited}"
 
 
+def test_a_hung_test_job_ends_with_a_traceback_not_in_silence() -> None:
+    """A test job that hangs must stop within a bounded time and say where it was.
+
+    On 2026-11-10 two legs of the test matrix stalled on unrelated commits: one ended after 56
+    minutes with no downloadable log, one was still running after 75 minutes, where a healthy
+    leg takes 30 to 48. Without a job timeout a stalled leg holds the run for GitHub's default
+    of six hours, and without a per-test watchdog it leaves nothing that names the test.
+
+    Two settings close that: ``timeout-minutes`` on the ``test`` job, and pytest's
+    ``faulthandler_timeout``, which dumps every thread's traceback into the log when one test
+    runs longer than the limit (it does not fail the test). The watchdog has to fire well
+    before the job is cut off, or the dump is never written.
+    """
+    job = yaml.safe_load(_CI_WORKFLOW.read_text())["jobs"]["test"]
+    minutes = job.get("timeout-minutes")
+    assert isinstance(minutes, int) and 60 <= minutes <= 120, (
+        "ci.yml job `test` needs `timeout-minutes` between 60 and 120: long enough for a "
+        f"healthy leg (about 48 minutes), short enough that a hang is noticed. Found {minutes!r}."
+    )
+    ini = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    watchdog = ini.get("faulthandler_timeout")
+    assert isinstance(watchdog, int) and 0 < watchdog * 2 <= minutes * 60, (
+        "pyproject.toml [tool.pytest.ini_options] needs `faulthandler_timeout` (seconds), at "
+        f"most half the job's {minutes} minutes, so a stuck test is named in the log. "
+        f"Found {watchdog!r}."
+    )
+
+
 def test_ci_secret_scan_uses_a_baseline_tolerant_gate() -> None:
     """The CI secret gate must not fail on a pristine tree with no new secret.
 
