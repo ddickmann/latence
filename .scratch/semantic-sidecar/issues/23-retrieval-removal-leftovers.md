@@ -60,6 +60,22 @@ places where the code and its own help text disagree. Each needs a fix or a deci
     stage; the Helm CronJob is described as incremental but passes a fixed run id (reported by
     the page rewrite; not reproduced again here).
 
+**Statements the page rewrite left in place without checking them against code**
+
+12. `docs/deployment.md`: the helm and docker commands (checked against templates and values,
+    not executed); the "~24 GB GPU" sizing for the default LLM; the `huggingface-cli` steps; the
+    2.7× OCR figure (cited to the serving guide, not re-measured); the Airflow "tested, not yet
+    operated" paragraph beyond `build_dag` and the CI job existing.
+13. `docs/tutorials/05-production.md` §6: `env placement`, `tune` and `--tuned` are described
+    from `--help` text only.
+14. `docs/tutorials/04-bringing-your-own-provider.md` §8: the `AdapterBase` helper names are
+    verified; the descriptions of what they do are not line-checked.
+15. `docs/anatomy/index.md`: the "why this one" model rationales, the one-line corpus
+    descriptions and the Gemma sentence.
+16. `docs/BENCHMARKS-E2E.md`: the literature figures (Hits@1 0.26–0.31).
+17. `docs/guides/benchmark-campaign.md`: stage behaviour is described from reading the code; no
+    stage was run.
+
 ## Done when
 
 - Items 1 and 7 are decided by the owner and implemented, each with a test that was red first.
@@ -67,3 +83,4 @@ places where the code and its own help text disagree. Each needs a fix or a deci
   behaviour and nothing weakened.
 - Items 8–11 are each reproduced, then fixed or recorded as intended.
 - Items 5 and 6 are closed by the docs-and-site rewrite or here.
+- Items 12–17 are each verified or reworded to what can be verified.
