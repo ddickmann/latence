@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _workspace_providers import declared_providers
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.perf import is_compile_backend_failure
 from latence_core.tune.fingerprint import (
@@ -32,7 +33,7 @@ from latence_core.tune.fingerprint import (
 from latence_core.tune.overlay import overlay_tuned_config
 from latence_core.tune.probe import ProbeOutcome
 from latence_core.tune.report import KnobSetting, TuneReport
-from latence_core.tune.sweep import knob_grid_for_provider
+from latence_core.tune.sweep import _PROVIDER_FAMILY, knob_grid_for_provider
 from latence_core.tune.tuner import Tuner, _pick_winner
 
 if TYPE_CHECKING:
@@ -111,6 +112,28 @@ def test_non_tunable_provider_has_empty_grid() -> None:
     """A CPU-deterministic in-core Provider has no perf knobs — an empty grid, not swept."""
     assert knob_grid_for_provider("entity.gazetteer") == []
     assert knob_grid_for_provider("chunk.markdown") == []
+
+
+def test_every_provider_in_the_knob_mapping_is_a_provider_this_workspace_declares() -> None:
+    """A name in the knob mapping that no package registers is a Provider that is never swept.
+
+    The tuner looks a Stage's Provider name up in this mapping and skips the Stage on a miss, so a
+    misspelt key fails in silence: the mapping held ``ner.endpoint`` while the package registers
+    ``entity.endpoint``, and the endpoint entity extractor was never tuned. Every key must be an
+    entry-point name declared in a workspace ``pyproject.toml`` (the heavy packages are not
+    installed in every environment, so the manifests, not the installed registry, are the roster).
+    """
+    declared = declared_providers()
+    unknown = sorted(name for name in _PROVIDER_FAMILY if name not in declared)
+    assert unknown == [], (
+        f"the tuner's knob mapping names Provider(s) no workspace package declares: {unknown}"
+    )
+
+
+def test_the_endpoint_entity_extractor_is_swept_under_its_registered_name() -> None:
+    grid = knob_grid_for_provider("entity.endpoint")
+    assert [setting.knobs for setting in grid] == [{"max_concurrency": 1}, {"max_concurrency": 8}]
+    assert knob_grid_for_provider("ner.endpoint") == []
 
 
 # -- (1) pick-correct: the fastest CORRECT setting wins ----------------------------------------

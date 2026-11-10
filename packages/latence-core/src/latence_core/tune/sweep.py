@@ -75,7 +75,7 @@ _PROVIDER_FAMILY: dict[str, str] = {
     "parser.lighton_vllm": "ocr",
     "embedding.endpoint": "endpoint",
     "parser.endpoint": "endpoint",
-    "ner.endpoint": "endpoint",
+    "entity.endpoint": "endpoint",
 }
 
 

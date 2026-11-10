@@ -250,7 +250,7 @@ are in the repo — measure it and add the row with its hardware, profile, corpu
   Only per-call latency exists (above) — see **issue #64**.
 - **Embedding throughput** (`embedding.sentence_transformers` / the endpoint embedders). No Embed
   Stage runs in `stacks/default.yaml`, so no embedding row was measured.
-- **The endpoint Providers** (`parser.endpoint`, `ner.endpoint`, `embedder.endpoint`) — their
+- **The endpoint Providers** (`parser.endpoint`, `entity.endpoint`, `embedding.endpoint`) — their
   throughput is a property of the remote service, and none was measured against a live endpoint.
 - **The universal/document parsers on real office formats** (`parser.document`, `parser.render`,
   `parser.glm`) and **served-vLLM OCR** — see the PENDING section above.

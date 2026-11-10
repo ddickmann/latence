@@ -129,6 +129,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   local, Delta and Airflow Runners and the CLI loader make before writing anything — raises a
   `ConfigError` naming the key, the Stage and the ADR. Unknown keys in general are still
   accepted.
+- **`latence tune` sweeps the endpoint entity extractor.** The tuner's knob mapping named
+  `ner.endpoint`; the package registers `entity.endpoint`, so that Provider was skipped. A test
+  now requires every name in the mapping to be an entry point a workspace package declares.
+  `PERF-RESULTS.md` carried the same wrong name, and `embedder.endpoint` for
+  `embedding.endpoint`.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept
