@@ -1,10 +1,5 @@
 # 3 · From corpus to knowledge graph
 
-!!! warning "Written before the retrieval tooling was removed"
-    This chapter predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment, graph features and hyperedges. The hyperedge and graph-feature sections were cut; the remaining mentions of them (the campaign config, the dataflow diagram, the node-properties table, the closing section) and the source line references describe the pipeline as it was measured.
-    The chapter is kept until it is rewritten.
-
 *Chapter 2 left the pipeline holding a pile of local observations: one `EntityMention` per span
 a model found in one chunk, one `RelationMention` per pair of those spans, each carrying a label
 that chunk induced for itself, a confidence, and character offsets that resolve back to a page.
@@ -13,13 +8,10 @@ Nothing in that pile knows that the `ORG` called "Acme Corp." in document 14 and
 This chapter is where that gets decided, and where the decisions become a graph you can query and
 audit.*
 
-Four stages do it — type consolidation
+Three stages do it — type consolidation
 ([ADR-0054](../adr/0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md)),
-disambiguation, graph assembly with hyperedges
-([ADR-0057](../adr/0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md))
-and graph features
-([ADR-0051](../adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md))
-— and in the five campaign pipelines they are configured exactly like this:
+disambiguation and graph assembly — and the campaign's generator configures them exactly like
+this (`s3-multihop_rag` is the corpus id of one of the five pipelines):
 
 ```yaml
 - name: consolidate_types
@@ -36,19 +28,21 @@ and graph features
   depends_on: [disambiguate]
   config:
     corpus_id: s3-multihop_rag
-    hyperedges:
-      weak_hyperedges: true
-      max_arity: 12
-      min_tokens: 25
-      max_tokens: 180
-      max_window_sentences: 3
-    graph_features:
-      provider: graph_features.degree
 ```
 
-Four stages, one model between them: **none**. Every provider named above is pure Python,
+Three stages, one model between them: **none**. Every provider named above is pure Python,
 deterministic and dependency-free. The learned options exist — and this chapter covers them —
-but the measured stack ran without them, which is why a campaign run reproduces byte for byte.
+but the campaign stack does not use them, so these three stages give the same graph for the same
+input records.
+
+The five pipeline files committed under `benchmark/sota-campaign/stages/s3-pipeline/pipelines/`
+are the record of the August 2026 run. Their `graph` stage carries two more config blocks,
+`hyperedges` and `graph_features`. Both features were removed by
+[ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md).
+Those files no longer load, because each also declares an `enrich` Stage whose Capability is
+gone. The two blocks alone would not stop a run: `graph.canonical` reads `corpus_id` and
+`max_evidence_per_node` and ignores every other key. `latence stack check` reports
+`graph_features` as an error and says nothing about `hyperedges`.
 
 ---
 
@@ -111,13 +105,15 @@ about the **capability**, so it is declared once, as a field, next to its siblin
     CapabilityDescriptor(
         kind=CapabilityKind.TYPE_CONSOLIDATION,
         protocol=TypeConsolidator,
+        # T3/ADR-0054: a mention→mention transform re-emitting BOTH carriers relabelled, so it
+        # checkpoints the same MIXED carrier a fused extractor does.
         carrier=Record,
         # Corpus-level BY CONSTRUCTION: a canonical type vocabulary cannot be elected from a prefix
         # of the labels, only from all of them. THIS is the fact that was missing from
         # phase_boundary — declaring it here is what closes the hole for every consumer at once.
         level=CapabilityLevel.CORPUS,
 ```
-<small>`packages/latence-core/src/latence_core/capability_descriptor.py:522`</small>
+<small>`packages/latence-core/src/latence_core/capability_descriptor.py:498-507`</small>
 
 The derived sets every other module used to hand-maintain — `CORPUS_LEVEL_KINDS`,
 `DOCUMENT_LEVEL_KINDS`, `ACCUMULATOR_KINDS` — are now *computed* from the descriptors, and
@@ -140,7 +136,6 @@ flowchart TB
         direction LR
         MEN["EntityMention<br/>text · label · confidence<br/>document char offsets"]
         REL["RelationMention<br/>head/tail mention id<br/>label · confidence"]
-        CHK["ChunkRecord<br/>content · offset_map<br/>pii_spans · masked_content"]
     end
 
     subgraph Resolve["corpus-level — the whole run at once"]
@@ -158,46 +153,22 @@ flowchart TB
         direction TB
         NODE["NODE scope<br/>one per canonical entity<br/>content-addressed node_id"]
         EDGE["EDGE scope<br/>one per normalized relation<br/>endpoint-validated"]
-        HYPE["HYPEREDGE scope<br/>one per bounded sentence window<br/>m-ary · deduped corpus-wide"]
-        GF["graph_features.degree<br/>centrality + community"]
     end
 
     MEN --> TC
     REL --> TC
     CE --> NODE
     NR --> EDGE
-    NODE --> GF
-    EDGE --> GF
-    GF -.->|stamped onto node properties| NODE
-    CHK -.->|streamed only when hyperedges configured| HYPE
-    MEN -.-> HYPE
-    REL -.-> HYPE
-    NODE -.->|node ids + arity| HYPE
 
-    NODE --> OUT[("graph-nodes · graph-edges<br/>graph-hyperedges .parquet + .kv")]
+    NODE --> OUT[("graph-nodes.parquet · graph-edges.parquet<br/>graph.ttl · graph.graphml")]
     EDGE --> OUT
-    HYPE --> OUT
 ```
 
-The dotted arrows into `HYPEREDGE` are the interesting wiring. `graph` declares
-`depends_on: [disambiguate]` and nothing else — yet the hyperedge projection needs the chunks,
-mentions and relations that were produced five stages earlier. The runner resolves that without a
-DAG edge, via an opt-in attribute on the provider:
-
-```python
-    @property
-    def wants_document_streams(self) -> bool:
-        """True when the Runner should feed chunks/mentions/relations (hyperedges on)."""
-        return self._hyperedge_config is not None
-```
-<small>`packages/latence-core/src/latence_core/stages/graph_assembly.py:335-344`</small>
-
-When it answers `True`, the runner gathers those three carriers from the **whole pipeline** — every
-stage's live output or checkpoint — as three independent lazy streams, and calls
-`assemble_with_documents` instead of `assemble`. When it answers `False` (the default on every
-other provider, where the attribute is simply absent), nothing extra is read and the emitted record
-stream is byte-identical. That is what "genuinely optional" means here: not a branch that costs
-nothing at run time, but a branch that changes what the runner even loads.
+The wiring is a straight line. `graph` declares `depends_on: [disambiguate]` and reads one
+stream, the `DisambiguationRecord`s: its `assemble` method takes nothing else
+(`packages/latence-core/src/latence_core/stages/graph_assembly.py:91`). In the campaign stack no
+stage of this chapter reads chunk text. The learned disambiguators below do: the Runner hands them
+the run's chunks so that they can read the text around a mention.
 
 ---
 
@@ -227,7 +198,7 @@ overridable, because the rung set *is* the varying behaviour behind the seam:
 <small>`packages/latence-core/src/latence_core/stages/type_consolidation.py:319-325`</small>
 
 What survives is normalized-surface equality plus an operator alias map. The campaign configures no
-aliases, so in the measured stack **only the first rung ever fires**, and the whole behaviour of the
+aliases, so in the campaign stack **only the first rung ever fires**, and the whole behaviour of the
 stage reduces to one function:
 
 ```python
@@ -384,21 +355,20 @@ The reasoning in the surrounding comment: under `exact_only`, the exact rung is 
 grouping already resolved them — which leaves ALIAS as the only rung that can fire. A surface named
 by no alias can therefore never produce a decision, at any position, against any partner. Scanning
 it is provably pure waste: `uda`'s ~1M distinct surfaces are ~5×10¹¹ pair evaluations that each
-return `None`. Measured: **5.8 hours of 100%-CPU producing nothing**, with an ETA in days.
+return `None`. Measured on the campaign's `uda` run of 2026-08-05, on the earlier pipeline:
+**5.8 hours of 100%-CPU producing nothing**, with an ETA in days.
 Restricting the scan preserves the enumeration *order*, so audits, merges and clusters are
 byte-identical — a dead-iteration elimination, not a behaviour change.
 
-The consequence for the measured campaign is worth stating flatly, because it is the single most
-important fact about the benchmark's entity layer. The campaign configures no aliases. So the scan
+The consequence for the campaign is worth stating flatly, because it is the single most
+important fact about its entity layer. The campaign configures no aliases. So the scan
 list is empty, no pair is ever compared, and:
 
 > **In the campaign configuration, a canonical entity is exactly the set of mentions whose surface
 > strings NFKC-normalise, casefold and whitespace-collapse to the same string.** Nothing else.
 
-Everything the graph achieves downstream — every multi-hop join, every hyperedge, everything the
-`graph_rescue` lanes reach — is built on that austere a notion of identity. Which is either
-reassuring or alarming, depending on your priors, and is exactly why the alternatives below matter.
-(How much they reach, measured: very little. See `05-retrieval.md` §5.4.)
+Every node and every edge downstream is built on that notion of identity. That is why the
+alternatives below matter.
 
 ### What a resolved cluster becomes
 
@@ -472,9 +442,8 @@ two ship as their own packages, the enterprise linker being
 **What exact-surface genuinely cannot do.** Four things, in rough order of how often they bite:
 
 1. **Abbreviations and acronyms.** `IBM` and `International Business Machines` are two nodes. So are
-   `Acme` and `Acme Corporation`. On a corpus that uses both forms — which is most enterprise
-   corpora — this fragments the highest-degree nodes in the graph, precisely the ones multi-hop
-   retrieval depends on.
+   `Acme` and `Acme Corporation`. On a corpus that uses both forms, one entity's mentions and edges
+   are split across several nodes.
 2. **Spelling and OCR variants.** `Müller` / `Mueller`, `rn` read as `m`. Nothing folds them.
 3. **Cross-script look-alikes.** Deliberate, as discussed — but it means a Cyrillic-`А` `Аcme` is a
    separate node from `Acme`, forever.
@@ -532,8 +501,8 @@ identical, which is what lets the rest of this chapter stay true regardless of w
 
 ## Stage 11 · Graph assembly
 
-`graph.canonical` turns the disambiguation stream into `GraphRecord`s at three scopes: `NODE`,
-`EDGE` and — when configured — `HYPEREDGE`.
+`graph.canonical` turns the disambiguation stream into `GraphRecord`s at two scopes: `NODE` and
+`EDGE`.
 
 ### How a node id is derived
 
@@ -550,14 +519,14 @@ def make_graph_id(corpus_id: str, *parts: str) -> str:
     raw = "|".join([corpus_id, *parts])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:_ID_LEN]
 ```
-<small>`packages/latence-core/src/latence_core/graph.py:42-50`</small>
+<small>`packages/latence-core/src/latence_core/graph.py:41-49`</small>
 
 ```python
     def node_id_for(self, entity_id: str) -> str:
         """The deterministic node id an entity maps to (shared by edge endpoint resolution)."""
         return make_graph_id(self._corpus_id, "node", entity_id)
 ```
-<small>`packages/latence-core/src/latence_core/graph.py:106-108`</small>
+<small>`packages/latence-core/src/latence_core/graph.py:105-107`</small>
 
 Chain the two together with the entity id from the previous stage and the whole derivation is:
 
@@ -569,8 +538,7 @@ node_id = sha256("s3-multihop_rag" + "|" + "node" + "|" + "entity:" + normalize_
 Three properties fall out of that, and each one matters to a different reader.
 
 **For a developer:** the id is computable without the graph. Given a corpus id and a surface string
-you can derive the node id in three lines, in any language, and join to it. That is why the corpus
-export can denormalise `kg_node_ids` onto chunks (chapter 4) without a foreign-key lookup.
+you can derive the node id in three lines, in any language, and join to it.
 
 **For an operator:** the id is stable across runs and across *incremental deltas*. Re-running the
 same corpus produces the same ids; adding documents that grow a cluster leaves its id unchanged, as
@@ -584,7 +552,7 @@ Set the same `corpus_id` and node ids are comparable across runs — which is ho
 two disambiguators' graphs node-for-node.
 
 Edge ids use the same function with a different part list — `make_graph_id(corpus_id, "edge",
-relation.record_id)` at `graph.py:172` — which means edge identity is per **source relation**, not
+relation.record_id)` at `graph.py:171` — which means edge identity is per **source relation**, not
 per endpoint pair. `graph.canonical` is therefore a **multigraph**: two documents both asserting
 `Acme —acquired→ Beta` produce two parallel edges, each with its own evidence. That is deliberate;
 `graph.weighted` is the alternative that folds them (below).
@@ -594,16 +562,15 @@ per endpoint pair. `graph.canonical` is therefore a **multigraph**: two document
 A `GraphNode` carries `node_id`, `entity_id` (the source `CanonicalEntity` record id), `label` (the
 entity type), `canonical_name`, `member_mention_ids`, `source_document_ids`, `kb_id`, `confidence`,
 an open `properties` bag, `Evidence`, and the provenance and classification inherited from its
-source record. The properties bag is populated in layers:
+source record. `GraphBuilder` writes four keys into the properties bag
+(`graph.py:143-148`), and nothing else in this chapter adds to it:
 
-| key | written by | value |
-|---|---|---|
-| `mention_count` | `GraphBuilder` | number of mentions folded into the entity |
-| `document_count` | `GraphBuilder` | number of distinct source documents |
-| `confidence` | `GraphBuilder` | the cluster's mean member confidence |
-| `linked` | `GraphBuilder` | whether the external KB link cleared L0 |
-| `centrality`, `community` | `graph_features.*` | see below; absent when unconfigured |
-| `description`, `hyperedge_degree` | the hyperedge pass | see below; absent when hyperedges are off |
+| key | value |
+|---|---|
+| `mention_count` | number of mentions folded into the entity |
+| `document_count` | number of distinct source documents |
+| `confidence` | the cluster's mean member confidence |
+| `linked` | whether the external KB link cleared L0 |
 
 A `GraphEdge` carries `edge_id`, `relation_id`, `source_node_id`, `target_node_id`, `label`,
 `confidence`, properties `{inverted, is_predicted, confidence}`, and its own `Evidence`.
@@ -611,7 +578,7 @@ A `GraphEdge` carries `edge_id`, `relation_id`, `source_node_id`, `target_node_i
 **Endpoint validation.** An edge is emitted only when both its head and tail entity resolved to a
 node that exists, and the two node ids are distinct. A relation pointing at a missing endpoint is
 dropped — never emitted as a dangling edge — and one whose endpoints collapsed onto the same node is
-dropped as a self-loop. Both guards live in `_build_edges` (`graph.py:154-193`), and both are
+dropped as a self-loop. Both guards live in `_build_edges` (`graph.py:153-192`), and both are
 `continue`, not exceptions: a relation whose entity got filtered out is a normal outcome of
 resolution, not a failure.
 
@@ -630,12 +597,14 @@ can be shown a graph edge and click through to the sentence that justified it.
             confidence=edge.evidence_confidence,
         )
 ```
-<small>`packages/latence-core/src/latence_core/stages/graph_assembly.py:437-443`</small>
+<small>`packages/latence-core/src/latence_core/stages/graph_assembly.py:138-144`</small>
 
 An edge's evidence mention ids are its normalized relation's head and tail mentions; those mentions
 carry document-coordinate character offsets and, via the page map, page numbers. So the chain from
-"the graph says Acme acquired Beta" to "document 14, page 3, characters 1180–1214" is a join over
-ids that are already in the parquet — no framework code required to walk it.
+"the graph says Acme acquired Beta" to "document 14, page 3, characters 1180–1214" is a walk over
+ids. The edge row in `graph-edges.parquet` names its mentions and its documents. The mention
+records, which hold the offsets and the `chunk_record_id`, are in the extraction stage's
+checkpoint in the run store; the knowledge-graph export writes `GraphRecord`s only.
 
 One bound worth knowing about: `max_evidence_per_node` (default `0`, unlimited) caps the mention ids
 folded into a **node's** evidence, so a hub entity with tens of thousands of mentions does not
@@ -643,35 +612,33 @@ produce an unbounded evidence blob. Note the asymmetry in `_build_nodes` — the
 `evidence_mention_ids` but `member_mention_ids` still carries the full set, so nothing is lost, only
 the justification list is trimmed.
 
-### The other assembler, and a trap in swapping to it
+### The other assembler
 
 `graph.weighted` satisfies the same seam and emits the same contract, but folds every parallel
 same-`(head, tail, label)` relation into **one weighted edge**: `edge_id` content-addressed over the
 endpoint pair plus label (not the relation id), `confidence` the maximum over the folded relations,
 evidence the deduplicated **union** of their mention and document ids, and
-`properties["weight"]` recording the multiplicity. It is the right choice when a downstream ranker
-wants "how many independent sources assert this" as a first-class feature rather than as a group-by.
+`properties["weight"]` recording the multiplicity, with the folded relation ids beside it. It is
+the right choice when a consumer wants "how many independent sources assert this" as a
+first-class value rather than as a group-by.
 
-The trap: `WeightedGraphAssembler.__init__` reads only `corpus_id`, `max_evidence_per_node` and
-`graph_features`. It has no `hyperedges` handling and no `wants_document_streams` property. Move a
-campaign-shaped config from `graph.canonical` to `graph.weighted` and the `hyperedges` block is
-**silently ignored** — the whole hypergraph disappears, the `graph-hyperedges.parquet` and `.kv`
-files are never written, and nothing warns you. Worth knowing before you swap.
+Both assemblers read the same two config keys, `corpus_id` and `max_evidence_per_node`, and
+build their nodes with the same code, so the swap changes edges only.
 
 ---
 
 ## Edge prediction — and a prominent caveat
 
 > **`graph_completion` is not in any of the five campaign pipelines.** Not as `reference`, not as
-> `ultra`, not at all. Every benchmark number in this guide was produced from **asserted edges
-> only** — edges that a model read out of actual text. No inferred edge contributed to any reported
-> recall, and the numbers should be read that way.
+> `ultra`, not at all. Every campaign count in this guide was produced from **asserted edges
+> only** — edges that a model read out of actual text.
 
 The capability exists, it is wired, it is tested, and it ships in two providers
 ([ADR-0037](../adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md)).
-It is simply not part of the measured stack. The stacks that do configure it are
-`stacks/linkpred-base.yaml` (which exists specifically so a bake-off can hold every other stage
-constant) and `stacks/gpu-sota.yaml`.
+It is simply not part of the campaign stack. The stacks that do configure it are
+`stacks/linkpred-base.yaml` (the reference scorer; it exists so a bake-off can hold every other
+stage constant) and the three GPU stacks `stacks/gpu-sota.yaml`, `stacks/gpu-sota-pod.yaml` and
+`stacks/gpu-sota-glinker.yaml` (the learned scorer).
 
 ### The contract an inferred edge must satisfy
 
@@ -707,7 +674,7 @@ inferred edges carry `properties["inferred"] = True` and *no* `is_predicted` key
 edge reads as missing, which a naive `.get()` treats as "extracted"). `inferred` is the real marker
 — it is what the Quality Report tallies. And the module docstring of `graph.py` still asserts that
 "v1 has no link-prediction Stage (that is the post-v1 P3 plugin)", which stopped being true when
-`GraphCompletion` became its own capability; `capability.py:518` records the transition.
+`GraphCompletion` became its own capability; `capability.py:515` records the transition.
 
 ### The two scorers
 
@@ -735,8 +702,8 @@ It exists to prove the seam and to give the learned scorer a baseline to beat.
    `tasks.build_relation_graph`, all-negative tail batches, `[B, num_nodes]` score vectors. The
    graceful fallback is a transductive **PyKEEN** model (default `DistMult`) trained on the observed
    triples. If neither is available the provider raises a **typed error**, never a silent no-op —
-   unless a stack explicitly opts into `skip_if_unavailable`, which the GPU stack does for the
-   optional trailing stage.
+   unless a stack explicitly opts into `skip_if_unavailable`, which `stacks/gpu-sota.yaml` does for
+   the optional trailing stage.
 3. **Calibration** — because a raw ULTRA score is an unbounded logit-like number whose scale is
    arbitrary, and presenting it as a `0..1` confidence would be a fabricated calibration.
    Temperature scaling (Guo et al. 2017) fits `T` over a fixed 14-value grid by minimising NLL on a
@@ -781,45 +748,41 @@ supplies the first two:
 2. **A controlled bake-off.** `stacks/linkpred-base.yaml` exists so `graph_completion.reference` and
    `graph_completion.ultra` can be compared with every other stage byte-identical. A learned scorer
    that cannot beat a 2-hop transitive closure is not earning its dependencies.
-3. **The end-to-end lens, which is on you.** Held-out MRR measures whether the scorer reconstructs
-   edges the extractor already found. It does not measure whether inferred edges improve *retrieval*.
-   The only test that answers that is the campaign's own: run the retrieval matrix with and without
-   the completion stage and compare recall@k per dataset. Because `inferred` is a first-class
-   property on every predicted edge, you can also run the ablation the other way — keep the stage on
-   and filter inferred edges out at query time — which isolates their contribution without
-   re-running the pipeline.
+3. **A check on your own data, which is on you.** Held-out MRR measures whether the scorer
+   reconstructs edges the extractor already found. It does not measure whether an edge the scorer
+   proposes is true. This repository has no measured answer to that:
+   [`RELEASE-GATES.md`](https://github.com/ddickmann/latence/blob/main/RELEASE-GATES.md) lists
+   link-prediction precision on a held-out sample as an open gate. Because `inferred` is a
+   first-class property on every predicted edge, a consumer can keep the stage on and filter
+   inferred edges out afterwards, without re-running the pipeline.
 
-The honest posture, and the one the campaign took: an inferred edge is a *hypothesis with a
-calibrated probability and no textual evidence*. It is marked as such at every layer, it never
-merges into the asserted graph, and it did not contribute to a single published number.
+The posture in one sentence: an inferred edge is a *hypothesis with a score and no textual
+evidence*. It is marked as such at every layer and it never merges into the asserted graph. The
+campaign configured no completion stage, so no inferred edge is in any count on these pages.
 
 ---
 
 ## What crosses the line into chapter 4
 
-Three artefacts leave this chapter, and they are joined by ids rather than by a database.
+Two things leave this chapter, and they are joined by ids rather than by a database.
 
-**The graph itself**, as `GraphRecord`s at three scopes, which the KG export writes as
-`graph-nodes.parquet`, `graph-edges.parquet`, `graph.ttl`, `graph.graphml`,
-`graph-hyperedges.parquet` and the `graph-hyperedges.kv` sidecar. Every node and edge carries its
-evidence; every hyperedge carries its span in original document coordinates.
+**The graph itself**, as `GraphRecord`s at two scopes, which the KG export writes as
+`graph-nodes.parquet`, `graph-edges.parquet`, `graph.ttl` and `graph.graphml`. Every node and
+every edge carries its evidence.
 
-**The node ids**, which are the join key. Context enrichment reads the graph and the chunk stream
-together and writes each chunk a compact `ContextHeader` carrying `kg_node_ids` (the chunk's own
-entities), `neighbor_node_ids` (what its triples reach), the rendered `neighbor_triples`, and —
-because `graph_features.degree` ran — `kg_node_centrality` and `kg_node_community` aligned 1:1 with
-`kg_node_ids`. Those columns are denormalised onto every row of the corpus export. That is the whole
-crossing from text to graph: a retriever that got a chunk back from a vector search already holds
-the graph keys for it, and the 1-hop rescore in chapter 5 reads them off the row without touching a
-graph store.
+**The ids**, which are the join keys. A node lists its `member_mention_ids` and its
+`source_document_ids`; an edge's evidence lists the mention and document ids that justify it. A
+document id is the `document_id` in the provenance of every corpus row of that document, so the
+graph and the corpus export join on it with no framework code. A mention id resolves to one chunk,
+one page and one character range through the mention records in the run store.
 
 **The operational shape**, for anyone sizing this. Everything in this chapter is corpus-level: it
 runs **once**, after the document phase, on already-extracted records rather than on raw text. Its
 cost scales with the size of the *graph* — mentions, relations, entities — not with corpus bytes,
 and not with worker count. The document phase is the opposite: it scales with workers and is
-independent of corpus size. That asymmetry is why a 220k-chunk corpus and a 2.4k-chunk corpus run
-the same DAG, and why the engineering effort in this chapter went into memory shape rather than
-parallelism.
+independent of corpus size. That asymmetry is why a 220k-chunk corpus and a 2.4k-chunk corpus ran
+the same DAG in the August 2026 campaign, and why the engineering effort in this chapter went into
+memory shape rather than parallelism.
 
 The two exports turn all of this into files that need no framework code to read. The
 knowledge-graph export, and what it does not redact, is [chapter 4](04-knowledge-graph-export.md);

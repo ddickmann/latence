@@ -30,6 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PAGES = (
     "ROADMAP.md",
     "docs/anatomy/02-extraction-and-privacy.md",
+    "docs/anatomy/03-corpus-to-knowledge-graph.md",
 )
 
 #: What a paragraph must say when it names a removed capability.
