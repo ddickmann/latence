@@ -85,6 +85,15 @@ python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet(
 
 `run_scale.sh` runs all of Part A in sequence. Its 1M step is the open one.
 
+## Exports for the workbench prototype (ticket 22)
+
+`run_a.py --export-review <file>` writes the review band as items a reviewer can decide
+(`review_export.py`, schema `review-export/1`), and `--export-graph <file>` writes the machine
+clusters as a graph (`graph_export.py`, schema `graph-export/1`; it needs `--export-review`).
+Both are synthetic-estate only. `../workbench/README.md` has the exact command and where the
+files go. On the pod, exports from the re-scored arms give the workbench items with the
+neural scores in their evidence; that wiring is not written yet.
+
 ## What the CPU smoke test showed (2026-11-09; not results)
 
 All four small models load and run through `models.py` on a CPU: EmbeddingGemma 2 (256-d,

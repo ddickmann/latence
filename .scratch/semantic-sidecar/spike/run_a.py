@@ -398,6 +398,8 @@ def run(
     scorers: dict[str, Any] | None = None,
     export_review: Path | None = None,
     export_groups: int = 150,
+    export_graph: Path | None = None,
+    export_graph_entities: int = 400,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes)."""
@@ -531,6 +533,19 @@ def run(
         )
         export_review.parent.mkdir(parents=True, exist_ok=True)
         export_review.write_text(json.dumps(export, indent=1, default=str))
+        if export_graph is not None and kind == "org":
+            from generate import INDUSTRY
+            from graph_export import build_graph_export
+
+            graph = build_graph_export(
+                raw=raw, clusters=pred_machine, cand=cand, p=p, band=band,
+                focus_records={r for g in export["groups"] for r in g["records"]},
+                review_item_ids={it["id"] for it in export["items"]},
+                industry_names={code: word for word, code in INDUSTRY},
+                max_entities=export_graph_entities, source=str(path),
+            )
+            export_graph.parent.mkdir(parents=True, exist_ok=True)
+            export_graph.write_text(json.dumps(graph, indent=1, default=str))
 
     result: dict[str, Any] = {
         "dataset": dataset,
@@ -593,11 +608,14 @@ def main() -> None:
     ap.add_argument("--n-ltt2", type=int, default=1500)
     ap.add_argument("--export-review", type=Path, default=None, help="write the review-band items for the workbench")
     ap.add_argument("--export-groups", type=int, default=150, help="review groups to export, highest priority first")
+    ap.add_argument("--export-graph", type=Path, default=None, help="write the resolved graph for the workbench (needs --export-review)")
+    ap.add_argument("--export-graph-entities", type=int, default=400, help="organisations to carry in full in the graph export")
     a = ap.parse_args()
     res = run(
         a.dataset, a.path, a.n_cal, a.n_ltt, a.seed, a.baseline_max, a.reject_target,
         rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
         export_review=a.export_review, export_groups=a.export_groups,
+        export_graph=a.export_graph, export_graph_entities=a.export_graph_entities,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))

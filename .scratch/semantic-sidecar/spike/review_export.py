@@ -71,7 +71,8 @@ def _why_unsure(evidence: list[dict[str, Any]], p: float) -> str:
         parts.append("against: " + ", ".join(e["label"].lower() for e in con[:3]))
     if gone:
         parts.append("no evidence from: " + ", ".join(e["label"].lower() for e in gone[:3]))
-    return f"Calibrated probability {p:.2f}. " + "; ".join(parts) + "."
+    said = "; ".join(parts)
+    return f"Calibrated probability {p:.2f}. " + (said[:1].upper() + said[1:] + "." if said else "No field gives evidence either way.")
 
 
 def build_review_export(

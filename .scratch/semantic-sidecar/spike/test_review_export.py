@@ -41,6 +41,8 @@ def test_every_item_is_a_review_pair_with_field_evidence(export: tuple[dict, dic
         assert it["match_weight"] == pytest.approx(it["prior_weight"] + sum(e["weight"] for e in it["evidence"]), abs=0.02)
         assert it["left"]["unique_id"] != it["right"]["unique_id"]
         assert it["why_unsure"].startswith("Calibrated probability")
+        said = it["why_unsure"].split(". ", 1)[1]
+        assert said[0].isupper() and said.endswith(".")
     for g in data["groups"]:
         assert set(g["items"]) <= set(by_id)
         members = set(g["records"])
