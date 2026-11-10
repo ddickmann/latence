@@ -192,6 +192,9 @@ owner's question left under item 2 is answered first.
   `latence stack check` reports only `graph_features` and `bm25`.
 - `latence tune` maps `ner.endpoint` to the endpoint knob family. The registered name is
   `entity.endpoint`, so that Provider is never swept.
+- `latence tune --sample N` does not size the sample. The real probe times a run of the whole
+  stack over the bundled validation corpus and reports `N` divided by that time as records per
+  second. The tutorial now says how to read the figure.
 - `benchmark/enterprise-gold/run_eval.py` and `benchmark/rfc/run_benchmark.py` import
   `latence_retrieval` and cannot run. They are outside the three folders this pass covered.
 - `latence-campaign run <stage> --fresh` does not redo a stage whose artifacts are intact.
