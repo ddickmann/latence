@@ -88,8 +88,14 @@ def main() -> int:
     baseline = json.loads(_BASELINE.read_text())
 
     # A fresh scan (no --baseline) never mutates any tracked file; it just prints JSON.
+    # ``--no-verify``: by default detect-secrets calls the vendor's API for some key shapes
+    # (a Stripe-shaped string goes to api.stripe.com) and DROPS a finding the vendor reports
+    # invalid. That made this gate's verdict depend on the network: a fixture key vanished
+    # where the host was reachable and stayed where it was blocked. With verification off the
+    # scan makes no call and keeps every finding, so a fixture is accounted for by an audited
+    # baseline entry and the same tree gets the same verdict everywhere.
     proc = subprocess.run(
-        ["detect-secrets", "scan", "--exclude-files", _EXCLUDE_FILES],
+        ["detect-secrets", "scan", "--no-verify", "--exclude-files", _EXCLUDE_FILES],
         capture_output=True,
         text=True,
         check=True,

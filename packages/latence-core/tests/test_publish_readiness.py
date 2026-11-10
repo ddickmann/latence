@@ -1012,6 +1012,26 @@ def test_secret_scan_gate_script_exists_and_is_wired() -> None:
     assert "is_secret" in body
 
 
+def test_secret_scan_gate_does_not_depend_on_the_network() -> None:
+    """The gate scans with vendor verification off, so its verdict is the same everywhere.
+
+    ``detect-secrets`` verifies some key shapes by calling the vendor's API (a Stripe-shaped
+    string goes to ``api.stripe.com``). A string the vendor reports invalid is then dropped
+    from the scan. With verification on, a fixture key was dropped where the host was
+    reachable and kept where it was blocked: the same tree passed in CI and failed on a
+    machine without open internet, and every CI run sent key-shaped strings from the tree to
+    third parties. ``--no-verify`` keeps every finding and makes no call, so a fixture is
+    accounted for by an audited baseline entry, not by a network round trip.
+    """
+    body = (_REPO_ROOT / "scripts" / "secret_scan_gate.py").read_text()
+    call = re.search(r'\[\s*"detect-secrets",\s*"scan"[^\]]*\]', body)
+    assert call, "could not find the detect-secrets scan invocation in the gate script"
+    assert '"--no-verify"' in call.group(0), (
+        "the secret-scan gate must pass --no-verify: with verification on, its result "
+        "depends on whether vendor APIs are reachable"
+    )
+
+
 def test_secrets_baseline_line_numbers_are_in_range() -> None:
     """Every baseline finding's line_number is within its (still-present) tracked file.
 
