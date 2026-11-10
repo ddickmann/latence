@@ -1,10 +1,40 @@
 # Ticket 03 report — Incremental ingest: document churn without full rebuild
 
-!!! warning "Written before the retrieval tooling was removed"
-    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
-    BM25 / sparse / multi-vector export signals and the Qdrant sink. This is measured evidence of record: the pipeline it measured included the Context Enrichment and Hyperedge stages. The numbers are not re-measured.
-    The page is kept until it is rewritten.
+!!! note "Dated record: measured 2026-08-12 and 2026-08-13, on a pipeline that has since changed"
+    Everything below this note is the report as it was written on 2026-08-13. It has not been
+    edited and nothing in it has been re-measured.
+
+    The pipeline it measured contained four parts that
+    [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
+    later removed:
+
+    - **Context Enrichment**: the `enrich` Stage (`context.kg_header`) and the context header
+      it added to each chunk and to the embedding input.
+    - **Hyperedges**: weak hyperedges in Graph Assembly, `graph-hyperedges.parquet` and the
+      `graph-hyperedges.kv` store.
+    - **Graph features**: the degree features (centrality and community) on graph nodes.
+    - **The BM25 export**: `bm25-stats.json` and `bm25-postings.parquet`, and with them the
+      BM25 and dense ranking comparisons.
+
+    Every row and sentence about those artifacts describes the pipeline of that date. The
+    current pipeline does not produce them, so the hyperedge counts, the BM25 results and the
+    ranking results are not statements about the current product.
+
+    What the report covers that still exists: `latence delta` (with `--dry-run`),
+    `latence retract` and `latence purge`; reuse of unchanged documents' doc-level records;
+    the order-preserving fold, which now lives in
+    `latence_core.reuse_overlay.merge_overlay_doc_ordered`; the corpus export with optional
+    embeddings; and the knowledge-graph export of nodes, edges, Turtle and GraphML.
+
+    Some names in the report no longer resolve. The test
+    `test_e2e_delta_enrichment_incremental.py` is now
+    `packages/latence-core/tests/test_e2e_delta_churn_equals_rebuild.py`, without the
+    enrichment Stage. Several of the private Runner methods it names
+    (`LocalRunner._merge_overlay_doc_ordered`, `_stream_all_records_of_type`,
+    `_stream_parent_inputs_of_type`, `DeltaRunner._reuse_supported`) were renamed or removed
+    in later refactors. The `latence-splade` package was removed. The commit hashes are not
+    in this repository's history. The current behaviour is described in the
+    [incremental ingest guide](../guides/incremental-ingest.md).
 
 Status: **done — gate PASSED** (2026-08-13; every comparison identical, zero divergences,
 zero tolerances used)
