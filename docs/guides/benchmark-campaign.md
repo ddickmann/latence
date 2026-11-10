@@ -62,11 +62,11 @@ Three details of `s3-pipeline` are worth knowing before you run it:
   not a number of dollars, so the stage turns the USD cap into one `max_induction_calls` per
   dataset when it generates the YAML. The allocation is proportional to the measured chunk
   counts and scaled down when the estimate would exceed the cap.
-* **`musique` and `hotpotqa` are not re-run.** For these two the stage only verifies that an
-  earlier export exists under `benchmark/official-data/` and records it as `reused_from_m6`.
-  That check still looks for `graph-hyperedges.kv`, a file that only the pipeline before
-  ADR-0068 wrote. It therefore passes only on an export made before the removal; drop the two
-  datasets from the selection if you do not have one.
+* **`musique` and `hotpotqa` are not processed.** Both stay selectable: `s1-corpus` references
+  their source files in place and `s2-ocr` records them as text-native. `s3-pipeline` generates
+  no pipeline for them and lists them under `not_processed` in its `metrics.json`. The stage
+  used to verify an export of an earlier campaign for the two; that export fed the removed
+  retrieval matrix, nothing reads it now, and the check was removed with it.
 
 Each dataset's corpus and toolkit licence, and its lane, are declared in the stage's source
 (`packages/latence-benchmark/src/latence_benchmark/campaign/corpus_stage.py`) and written to
@@ -97,10 +97,12 @@ The files under `benchmark/sota-campaign/stages/` are the record of the campaign
 August 2026 (`s3-pipeline/metrics.json` is dated 2026-08-06, with one dataset re-run on
 2026-08-09). They were produced by the pipeline of that date, which included parts that
 ADR-0068 has since removed: Context Enrichment, hyperedges, graph features and the BM25
-export. Two consequences:
+export. Three consequences:
 
 * `s3-pipeline/metrics.json` contains `hyperedges` and `chunks_enriched` counts. They describe
   that run, not the current pipeline, which produces neither.
+* The same file lists `musique` and `hotpotqa` inside `datasets`, as reused from an earlier
+  export. The current stage writes no such entry; it lists the two under `not_processed`.
 * The five files under `s3-pipeline/pipelines/` are the configurations that run used. They
   name an `enrich` Stage and config keys the current code rejects, so `latence stack check`
   fails on them. Running `s3-pipeline` again (`--fresh`) regenerates them in the current

@@ -25,10 +25,6 @@ def make_repo(tmp_path: Path) -> Path:
         d = repo / "benchmark" / "official-data" / incumbent
         d.mkdir(parents=True)
         (d / "data.jsonl").write_text('{"q": 1}\n')
-        # The M6 export the s3-pipeline stage verifies for its reused_from_m6 record.
-        export = d / "export"
-        export.mkdir()
-        (export / "graph-hyperedges.kv").write_bytes(b"LHKV1-fixture")
     dst = repo / "benchmark" / "corpus" / "manifest.py"
     dst.parent.mkdir(parents=True)
     shutil.copy(REPO_ROOT / "benchmark" / "corpus" / "manifest.py", dst)
@@ -274,9 +270,9 @@ class TestStatusAndFlow:
         assert rc == 0
         capsys.readouterr()
 
-        # resume advances into s3-pipeline, the last stage; a reused-only selection
-        # (musique, hotpotqa) verifies the M6 exports without touching any pod, then awaits
-        # sign-off.
+        # resume advances into s3-pipeline, the last stage; the stage has no pipeline for
+        # musique or hotpotqa, so it records both as not processed without touching any
+        # pod, then awaits sign-off.
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
         assert rc == 0
         assert "s3-pipeline: done" in capsys.readouterr().out

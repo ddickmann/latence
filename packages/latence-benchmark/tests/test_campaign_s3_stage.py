@@ -1,12 +1,13 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""The s3-pipeline stage, fully offline: gating, reuse verification, preps, the pod loop.
+"""The s3-pipeline stage, fully offline: gating, unprocessed datasets, preps, the pod loop.
 
 Same posture as the s2 suite: no ssh, no GPU, no OpenRouter — the pod is a scripted
 :class:`FakePod` behind the transport seam and the poll loop runs on a fake clock. What is
 proven here is every decision the stage makes AROUND the real run: refusal until s2 is
-approved, blocked-with-reason on a lost M6 export, deterministic prep bytes, launch/
-re-enter/relaunch semantics, stall + death handling, and the consolidated metrics contract.
+approved, a named record for the datasets it has no pipeline for, deterministic prep
+bytes, launch/re-enter/relaunch semantics, stall + death handling, and the consolidated
+metrics contract.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ from latence_benchmark.campaign.pipeline_stage import (
     prepare_wiki2multihop,
     run_s3_stage,
     s3_done_probe,
-    verify_reused_export,
 )
 from latence_benchmark.campaign.s3_lib import REMOTE_ROOT
 from latence_benchmark.campaign.stages import (
@@ -43,6 +43,8 @@ from latence_benchmark.campaign.wizard import CampaignAnswers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # -- fixtures --------------------------------------------------------------------------------
@@ -111,12 +113,6 @@ def make_repo(tmp_path: Path, *, datasets: Sequence[str] = ("ohr_bench",)) -> Pa
         cast("Any", pq).write_table(
             pa.table({"context": contexts}), raw / "dev.parquet"
         )
-    for incumbent, name in (("musique", "musique-full"), ("hotpotqa", "hotpot-full")):
-        if incumbent in datasets:
-            export = repo / "benchmark" / "official-data" / name / "export"
-            export.mkdir(parents=True)
-            (export / "graph-hyperedges.kv").write_bytes(b"LHKV1-fixture")
-            (export / "corpus.jsonl").write_text("{}\n", encoding="utf-8")
     return repo
 
 
@@ -196,28 +192,59 @@ class TestGating:
             run_stage(specs, STAGE_NAME, ctx, state)
 
 
-# -- reuse verification ----------------------------------------------------------------------
+# -- datasets the stage has no pipeline for ---------------------------------------------------
 
 
-class TestReuse:
-    def test_present_export_is_recorded_not_reprocessed(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique",))
-        entry = verify_reused_export(repo, "musique")
-        assert entry["reused_from_m6"] is True
-        assert entry["export"] == "benchmark/official-data/musique-full/export"
-        assert entry["hyperedge_kv_bytes"] > 0
+class TestNotProcessed:
+    """``musique`` / ``hotpotqa`` are selectable, and this stage does nothing for them.
 
-    def test_missing_export_blocks_with_the_fix(self, tmp_path: Path) -> None:
+    The stage used to demand an export of an earlier campaign for the two (keyed on a
+    hyperedge file no pipeline writes any more) and block without one. Nothing reads such an
+    export now, so the stage neither looks for it nor claims to have reused it; it names the
+    datasets it did not process.
+    """
+
+    def test_an_incumbent_needs_no_earlier_export(self, tmp_path: Path) -> None:
+        # No benchmark/official-data/*/export anywhere under the repo root.
         repo = make_repo(tmp_path, datasets=())
-        with pytest.raises(StageBlockedError, match="graph-hyperedges.kv"):
-            verify_reused_export(repo, "hotpotqa")
+        assert not (repo / "benchmark" / "official-data").exists()
+        ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
+        note = run_s3_stage(ctx)  # no transport at all: nothing to process
+        assert "0 dataset(s) processed" in note
+        assert "2 not processed" in note
+        assert "musique, hotpotqa" in note
+        metrics = json.loads(
+            (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
+        )
+        assert metrics["datasets"] == {}
+        assert metrics["not_processed"] == ["musique", "hotpotqa"]
+        assert "reused_from_m6" not in json.dumps(metrics)
+        assert s3_done_probe(ctx) is True
 
-    def test_empty_kv_blocks_too(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique",))
-        kv = repo / "benchmark/official-data/musique-full/export/graph-hyperedges.kv"
-        kv.write_bytes(b"")
-        with pytest.raises(StageBlockedError, match="missing/empty"):
-            verify_reused_export(repo, "musique")
+    def test_the_reuse_check_is_gone_from_the_module(self) -> None:
+        assert not hasattr(pipeline_stage, "verify_reused_export")
+        assert not hasattr(pipeline_stage, "REUSED_EXPORTS")
+        source = Path(pipeline_stage.__file__).read_text(encoding="utf-8")
+        assert "graph-hyperedges" not in source
+
+    def test_the_guide_no_longer_describes_a_reuse_check(self) -> None:
+        guide = (REPO_ROOT / "docs" / "guides" / "benchmark-campaign.md").read_text(
+            encoding="utf-8"
+        )
+        assert "graph-hyperedges.kv" not in guide
+        assert "reused_from_m6" not in guide
+        # What the stage does instead is stated, in the stage's own vocabulary.
+        assert "not_processed" in guide
+
+    def test_adding_an_unprocessed_dataset_reopens_the_stage(self, tmp_path: Path) -> None:
+        # The metrics cover exactly the selection: a selection edit that only adds a
+        # dataset the stage does not process still invalidates the recorded metrics.
+        repo = make_repo(tmp_path, datasets=())
+        ctx = make_ctx(tmp_path, ("musique",), repo)
+        run_s3_stage(ctx)
+        assert s3_done_probe(ctx) is True
+        wider = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
+        assert s3_done_probe(wider) is False
 
 
 # -- local preps -----------------------------------------------------------------------------
@@ -310,7 +337,7 @@ class TestStageRun:
         clock = FakeClock()
         note = run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
         assert "1 dataset(s) processed" in note
-        assert "1 reused from M6" in note
+        assert "1 not processed" in note
 
         # Launched exactly once: nohup + pid file + the same-run-id resume contract.
         launches = [c for c in pod.commands if "nohup" in c]
@@ -336,14 +363,14 @@ class TestStageRun:
         metrics = json.loads(
             (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
         )
-        assert set(metrics["datasets"]) == {"musique", "ohr_bench"}
+        assert set(metrics["datasets"]) == {"ohr_bench"}
+        assert metrics["not_processed"] == ["musique"]
         ohr = metrics["datasets"]["ohr_bench"]
         assert (ohr["chunks"], ohr["mentions"], ohr["relations"]) == (42, 120, 30)
         assert (ohr["entities"], ohr["edges"], ohr["pii_total"]) == (80, 25, 5)
         # Priced at the default deepseek card: 100k @ $0.09/M + 20k @ $0.18/M.
         assert ohr["induction"]["usd_actual"] == pytest.approx(0.0126)
         assert ohr["run_id"] == "s3-ohr_bench-v1"
-        assert metrics["datasets"]["musique"]["reused_from_m6"] is True
         budget = metrics["induction_budget"]
         assert budget["induced_datasets"] == ["ohr_bench"]
         # Proportional allocation: ohr_bench's measured 13909 chunks × 1.10 headroom.
@@ -450,7 +477,9 @@ class TestStageRun:
         with pytest.raises(StageBlockedError, match="pod_ssh"):
             run_s3_stage(ctx)  # no transport injected, no pod_ssh configured
 
-    def test_reused_only_selection_never_needs_a_pod(self, tmp_path: Path) -> None:
+    def test_a_selection_with_nothing_to_process_never_needs_a_pod(
+        self, tmp_path: Path
+    ) -> None:
         repo = make_repo(tmp_path, datasets=("musique", "hotpotqa"))
         ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
         note = run_s3_stage(ctx)  # no transport at all: nothing to process

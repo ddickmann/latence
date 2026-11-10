@@ -6,27 +6,30 @@ The stage runs CLIENT-side (the ocr_stage pattern: the pod is a file server plus
 long-lived job at a time) and, per dataset of the plan, in a fixed sequential order — the
 pod has ONE GPU, and the framework runs its GPU stages sequentially anyway:
 
-1. **Reuse verification** — musique + hotpotqa ride their M6 v20 exports untouched
-   (settings comparability with the official gates); the stage only VERIFIES the export
-   bytes exist (``graph-hyperedges.kv``) and records them ``reused_from_m6``. A missing
-   export blocks: "we did not re-run it" must never degrade into "we quietly have nothing".
-2. **Local corpus preps** (pure functions + skip-if-exists writes): MultiHop-RAG's 609
+1. **Local corpus preps** (pure functions + skip-if-exists writes): MultiHop-RAG's 609
    news articles and the 2Wiki dev question-pool paragraphs become deterministic
    content-addressed markdown under ``benchmark/sota-corpus/<ds>/markdown/``.
-3. **Pipeline generation** — one full-feature pipeline.yaml per dataset, rendered from the
+2. **Pipeline generation** — one full-feature pipeline.yaml per dataset, rendered from the
    campaign's ``s3:`` block (:func:`latence_benchmark.campaign.s3_lib.generate_pipeline_yaml`)
    into ``stages/s3-pipeline/pipelines/<ds>.yaml`` — committed alongside the campaign, so
    the exact configs that produced the data are reviewable forever.
-4. **Remote run** behind the same :class:`~latence_benchmark.campaign.ocr_stage.PodTransport`
+3. **Remote run** behind the same :class:`~latence_benchmark.campaign.ocr_stage.PodTransport`
    seam: push markdown + yaml, launch ``latence process --run-id s3-<ds>-v1`` under
    ``nohup`` with a pid file, then poll a one-line remote status probe (done/running/dead +
    a monotone byte counter) under a stall budget. Re-invoking with the same run_id IS the
    framework's resume (finalized checkpoints replay from disk), so a dead run is relaunched
    with the same id and a live one is re-entered, never doubled.
-5. On completion per dataset: pull ``quality-report.{json,md}`` + the export file listing
+4. On completion per dataset: pull ``quality-report.{json,md}`` + the export file listing
    into the stage dir, then fold the report's numbers (chunks, mentions, relations,
    entities, PII, induction cost actuals) into one consolidated metrics.json —
    the stage's gate artifact.
+
+``musique`` and ``hotpotqa`` are selectable (s1 references their source files in place, s2
+records them as text-native) but this stage has no pipeline for them. It used to verify an
+export of an earlier campaign for the two and record it as reused; that export fed the
+retrieval matrix removed by ADR-0068 and nothing reads it now, so the check is gone. The
+stage records the two under ``not_processed`` in its metrics and names them in its one-line
+note: a dataset it did nothing for is named, never silently dropped.
 """
 
 from __future__ import annotations
@@ -63,12 +66,9 @@ INDUCED_DATASETS: tuple[str, ...] = ("ohr_bench", "vidoseek", "uda")
 TEXT_DATASETS: tuple[str, ...] = ("multihop_rag", "wiki2multihop")
 PROCESS_ORDER: tuple[str, ...] = INDUCED_DATASETS + TEXT_DATASETS
 
-#: The incumbents ride their M6 exports — verified + recorded, never re-processed.
-REUSED_EXPORTS: Mapping[str, str] = {
-    "musique": "benchmark/official-data/musique-full/export",
-    "hotpotqa": "benchmark/official-data/hotpot-full/export",
-}
-REUSED_ORDER: tuple[str, ...] = ("musique", "hotpotqa")
+#: Selectable datasets this stage has no pipeline for, in record order. They are recorded
+#: under ``not_processed`` in the stage metrics (see the module docstring).
+NOT_PROCESSED: tuple[str, ...] = ("musique", "hotpotqa")
 
 #: The pod venv's `latence` CLI (the framework + GPU provider packages live there; see the
 #: operator runbook in the S3 ticket). A missing venv surfaces as a blocked launch.
@@ -277,36 +277,14 @@ def prepare_wiki2multihop(repo_root: Path) -> dict[str, int]:
     return {"files": len(files), "written": written, "skipped": skipped}
 
 
-# -- reuse verification ----------------------------------------------------------------------
-
-
-def verify_reused_export(repo_root: Path, dataset: str) -> dict[str, Any]:
-    """Verify one M6 export exists locally (the hyperedge KV is the load-bearing artifact)."""
-    export_rel = REUSED_EXPORTS[dataset]
-    export_dir = repo_root / export_rel
-    kv = export_dir / "graph-hyperedges.kv"
-    if not kv.is_file() or kv.stat().st_size == 0:
-        msg = (
-            f"{dataset}: reuse requires the M6 export at {export_dir} "
-            "(graph-hyperedges.kv missing/empty). Restore benchmark/official-data or drop "
-            "the dataset from the corpus selection."
-        )
-        raise StageBlockedError(msg)
-    return {
-        "reused_from_m6": True,
-        "export": export_rel,
-        "export_files": sum(1 for p in export_dir.iterdir() if p.is_file()),
-        "hyperedge_kv_bytes": kv.stat().st_size,
-    }
-
-
 # -- pipeline generation ---------------------------------------------------------------------
 
 
 def _active(ctx: CampaignContext) -> tuple[list[str], list[str]]:
+    """``(processed, not_processed)`` for the selection, each in its fixed order."""
     processed = [d for d in PROCESS_ORDER if d in ctx.answers.datasets]
-    reused = [d for d in REUSED_ORDER if d in ctx.answers.datasets]
-    return processed, reused
+    not_processed = [d for d in NOT_PROCESSED if d in ctx.answers.datasets]
+    return processed, not_processed
 
 
 def _induced_active(ctx: CampaignContext, processed: Sequence[str]) -> list[str]:
@@ -387,8 +365,10 @@ def s3_done_probe(ctx: CampaignContext) -> bool:
     datasets = recorded.get("datasets")
     if not isinstance(datasets, dict):
         return False
-    processed, reused = _active(ctx)
-    if set(datasets) != set(processed) | set(reused):
+    processed, not_processed = _active(ctx)
+    if set(datasets) != set(processed):
+        return False
+    if recorded.get("not_processed") != not_processed:
         return False
     return all((_report_dir(ctx, ds) / "quality-report.json").is_file() for ds in processed)
 
@@ -507,31 +487,27 @@ def run_s3_stage(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Verify reuse → prep → generate → (push → launch/re-enter → poll → pull) per dataset.
+    """Prep → generate → (push → launch/re-enter → poll → pull) per dataset.
 
     :param transport: The pod seam; ``None`` builds the real ssh/rsync transport from the
         campaign config's ``pod_ssh``. Tests inject fakes here.
     :param clock: Monotonic-seconds source for the stall budget (seam, tests fake it).
     :param sleep: Poll-interval sleeper (seam, tests fake it).
     """
-    processed, reused = _active(ctx)
+    processed, not_processed = _active(ctx)
     s3 = ctx.answers.s3
     out_dir = stage_dir(ctx.campaign_root, STAGE_NAME)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Reuse verification — before anything moves, so a lost incumbent export is loud.
     dataset_metrics: dict[str, Any] = {}
-    for dataset in reused:
-        dataset_metrics[dataset] = verify_reused_export(ctx.repo_root, dataset)
 
-    # 2. Local corpus preps (pure functions + skip-if-exists writes; never touch the pod).
+    # 1. Local corpus preps (pure functions + skip-if-exists writes; never touch the pod).
     preps: dict[str, dict[str, int]] = {}
     if "multihop_rag" in processed:
         preps["multihop_rag"] = prepare_multihop_rag(ctx.repo_root)
     if "wiki2multihop" in processed:
         preps["wiki2multihop"] = prepare_wiki2multihop(ctx.repo_root)
 
-    # 3. Generate every pipeline.yaml (committed-able gate artifacts) + the budget split
+    # 2. Generate every pipeline.yaml (committed-able gate artifacts) + the budget split
     # (proportional to the measured chunk counts, scaled to the cap — see s3_lib).
     induced = _induced_active(ctx, processed)
     call_budgets = s3_lib.induction_call_budgets(
@@ -539,7 +515,7 @@ def run_s3_stage(
     )
     generate_pipelines(ctx, processed)
 
-    # 4. The transport, built late: a reused-only selection never needs ssh at all.
+    # 3. The transport, built late: a selection with nothing to process never needs ssh.
     if processed:
         if transport is None:
             if not ctx.answers.pod_ssh:
@@ -550,7 +526,7 @@ def run_s3_stage(
                 raise StageBlockedError(msg)
             transport = SubprocessTransport(ctx.answers.pod_ssh)
 
-        # 5. Sequential per-dataset runs (one GPU; the pod runs exactly one job at a time).
+        # 4. Sequential per-dataset runs (one GPU; the pod runs exactly one job at a time).
         for dataset in processed:
             local_report = _report_dir(ctx, dataset) / "quality-report.json"
             resumed = False
@@ -586,7 +562,7 @@ def run_s3_stage(
                 "resumed": resumed,
             }
 
-    # 6. Consolidated gate metrics — the one artifact Dennis reads before approving.
+    # 5. Consolidated gate metrics — the one artifact Dennis reads before approving.
     usd_actual_total = round(
         sum(
             m["induction"]["usd_actual"]
@@ -625,6 +601,7 @@ def run_s3_stage(
         },
         "preps": preps,
         "datasets": dataset_metrics,
+        "not_processed": not_processed,
         "pod": {"remote_root": REMOTE_ROOT, "remote_latence": REMOTE_LATENCE},
     }
     tmp = _metrics_path(ctx).with_name("metrics.json.tmp")
@@ -634,9 +611,15 @@ def run_s3_stage(
     total_chunks = sum(
         int(m.get("chunks", 0)) for m in dataset_metrics.values() if "chunks" in m
     )
+    skipped = (
+        f"{len(not_processed)} not processed, this stage has no pipeline for them "
+        f"({', '.join(not_processed)})"
+        if not_processed
+        else "0 not processed"
+    )
     return (
-        f"{len(processed)} dataset(s) processed ({total_chunks} chunks), "
-        f"{len(reused)} reused from M6; induction actuals ${usd_actual_total:.2f} "
+        f"{len(processed)} dataset(s) processed ({total_chunks} chunks), {skipped}; "
+        f"induction actuals ${usd_actual_total:.2f} "
         f"(cap ${s3.induction_budget_usd_cap:.2f}); reports under {out_dir / 'reports'}"
     )
 
