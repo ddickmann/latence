@@ -39,9 +39,9 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
 | Estate 100k, with the acronym cap | 98,971 | 0.990 | 0.858 | 0.956 | n/a | union pair completeness 0.915; 22 s; 1.6 GB |
 
 - **Result files:** `results/estate_4k_with_baseline.json`, `results/historical_50k.json`, `results/estate_100k.json`, `results/estate_100k_acronym_cap.json`.
-- **The acronym cap** (commit `20c69f7`) is the version meant to scale. The REPORT shows both 100k results side by side.
+- **The acronym cap** (commit `7c9f590`) is the version meant to scale. The REPORT shows both 100k results side by side.
 - **The 1M run has not finished.** The latest attempt (2026-11-09, 4 CPUs, 15 GB RAM, code at
-  `20c69f7`) was killed for lack of memory: blocking ended after 74 s at 12.2 GB peak RSS, and
+  `7c9f590`) was killed for lack of memory: blocking ended after 74 s at 12.2 GB peak RSS, and
   scoring then died. A count inside DuckDB shows why:
   - 989,658 records give **29.5M candidate pairs** (about 30 per record), against 518k at 100k
     records (about 5 per record). Union pair completeness is 0.898.
