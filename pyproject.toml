@@ -184,17 +184,15 @@ line-length = 100
 target-version = "py311"
 src = ["packages"]
 # Frozen measurement-evidence scripts and one-off prototypes, retained VERBATIM because they
-# produced numbers that are cited (RFC proof, M6 official evals, calibration judgments,
-# residency prototypes). They are not shipped, not imported by any package, and restyling them
-# would churn recorded provenance for zero product value — so they are declared out of lint
-# scope rather than left as permanent red. Everything else in the repo (packages/, the campaign
-# library, scripts/) IS in scope and clean (ticket wayfinder-enterprise-serving/04).
+# produced numbers that are cited (the RFC proof and its dogfood run, one pod probe). They are
+# not shipped, not imported by any package, and restyling them would churn recorded provenance
+# for zero product value — so they are declared out of lint scope rather than left as permanent
+# red. Everything else in the repo (packages/, the campaign library, scripts/) IS in scope and
+# clean (ticket wayfinder-enterprise-serving/04). The scripts of benchmark/official,
+# benchmark/official-data and benchmark/musique-subset were removed with the retrieval layer on
+# 2026-11-10, so those folders hold no Python and are no longer listed.
 exclude = [
-    "benchmark/official",
-    "benchmark/official-data",
     "benchmark/rfc",
-    "benchmark/musique-subset",
-    "issues/wayfinder-hypergraph-coe/prototypes",
     "scripts/_pod_probe_gliner.py",
     "results/dogfood-rfc",
 ]

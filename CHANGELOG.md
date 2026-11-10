@@ -35,6 +35,18 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   validate. Graph Assembly emits nodes and edges exactly as before — same ids, same fields, same
   order. Embedder Providers stay, as a signal of the resolution phase; the corpus Export still
   accepts an opt-in `embedder` block.
+- **`musique` and `hotpotqa` left the benchmark campaign's dataset registry.** The campaign had
+  no pipeline for either. `KNOWN_DATASETS` now holds five names, and a test requires each of them
+  to have an acquisition plan in `s1-corpus` and a pipeline in `s3-pipeline`. A `campaign.yaml`
+  that lists either removed name is rejected as an unknown dataset. Gone with them: the
+  `local-reference` acquisition kind, the `attribution` lane and the `not_processed` list in the
+  `s3-pipeline` metrics. The committed records under `benchmark/sota-campaign/stages/` are
+  unchanged and still name both.
+- **Eight benchmark scripts that could no longer run.** The four under `benchmark/official/` and
+  `benchmark/musique-subset/run_eval_final.py` imported `latence_retrieval`; the three under
+  `benchmark/official-data/` read a hyperedge export the current pipeline does not write. Their
+  result files, question sets and export data stay as dated records, and each folder carries a
+  note saying so.
 
 ### Changed
 
