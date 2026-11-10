@@ -160,8 +160,8 @@ performance baseline and determinism, with residuals included:
 **Not yet proven, stated plainly:**
 
 - **The end-to-end benchmark protocol has not been run.** [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md)
-  pins a specific reproduction (named hardware, per-stage VRAM, hop-stratified retrieval, the KG
-  ablation) and **every value on it is still a `PENDING:` token**. A large staged GPU run has
+  pins a specific reproduction (named hardware, per-stage wall-clock and VRAM, a device-honesty
+  check, link-prediction precision) and **every value on it is still a `PENDING:` token**. A large staged GPU run has
   executed, but it is not *that* protocol, and a number from a different corpus or card would be
   worse than a missing one.
 - **The graph's *necessity* is argued, not gated.** The eight necessity gates (closed-book, per-edge
