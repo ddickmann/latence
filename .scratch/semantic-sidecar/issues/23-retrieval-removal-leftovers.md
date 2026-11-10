@@ -2,7 +2,7 @@
 
 Type: task
 Mode: HITL
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -122,7 +122,7 @@ Status stays `open`: items 5, 6 and 12–17 are documentation and are not done.
 
 ## Progress (2026-11-10, documentation)
 
-Status stays `open`; the owner closes it. Items 5, 6 and 12–17 are worked through below. The
+Items 5, 6 and 12–17 are worked through below. The
 owner's question left under item 2 is answered first.
 
 - **2, the registry question, decided and done.** `musique` and `hotpotqa` left
@@ -202,3 +202,21 @@ owner's question left under item 2 is answered first.
   cap into a call budget; calls past it fail open.
 - `benchmark/corpus/test_manifest.py` has two failing tests. The file is outside
   `pytest packages` and was not touched.
+
+## Answer (2026-11-10)
+
+Every item is closed: 1 and 7 by the owner's decisions, 2–4 and 8–11 by the code pass, 5, 6
+and 12–17 by the documentation pass, each as recorded in the two Progress sections above.
+
+- **Owner's decisions on the way:** `musique` and `hotpotqa` leave the campaign's dataset
+  registry, and the scripts that could no longer run are deleted while their recorded results
+  stay; the manifest keeps showing all five numeric token-count keys.
+- **What this ticket did not finish** is carried by
+  [Defects the documentation pass found and did not fix](24-defects-found-by-the-documentation-pass.md):
+  seven defects in kept code and benchmark folders, one performance figure that is still
+  stated without a record in three places, and the compose and Helm commands, which were
+  checked by reading and never executed.
+- **Gates on the final tree of the documentation pass:** ruff, strict mypy on 30 packages, the
+  full suite (4,382 passed, 17 skipped) and the secret scan exit 0. `mkdocs build --strict`
+  stops on the Mermaid URL check, which needs a host this machine cannot reach.
+  `scripts/verify-local.sh` was not run.
