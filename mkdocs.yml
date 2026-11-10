@@ -187,6 +187,7 @@ nav:
           - "1 · Ingest & document understanding": anatomy/01-ingest-and-document-understanding.md
           - "2 · Extraction & privacy": anatomy/02-extraction-and-privacy.md
           - "3 · Corpus → knowledge graph": anatomy/03-corpus-to-knowledge-graph.md
+          - "4 · The knowledge-graph export": anatomy/04-knowledge-graph-export.md
 
   # --- The Provider author's entry point -----------------------------------------------------
   - Providers:

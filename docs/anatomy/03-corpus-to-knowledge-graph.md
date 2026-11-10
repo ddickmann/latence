@@ -821,5 +821,6 @@ independent of corpus size. That asymmetry is why a 220k-chunk corpus and a 2.4k
 the same DAG, and why the engineering effort in this chapter went into memory shape rather than
 parallelism.
 
-The two exports turn all of this into files that need no framework code to read; their layout
-is covered in [Tutorial 2](../tutorials/02-understanding-the-output.md).
+The two exports turn all of this into files that need no framework code to read. The
+knowledge-graph export, and what it does not redact, is [chapter 4](04-knowledge-graph-export.md);
+the layout of both is walked through in [Tutorial 2](../tutorials/02-understanding-the-output.md).
