@@ -24,7 +24,7 @@ framework — every Stage, Provider, and ADR — reads cleanly.
   and the words to avoid.
 
 - :material-scale-balance: **[Decision Log (ADRs)](../adr/index.md)**
-  All 70 architecture decisions, in order — the reasoning behind every seam above.
+  All 71 architecture decisions, in order — the reasoning behind every seam above.
 
 </div>
 

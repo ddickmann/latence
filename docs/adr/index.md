@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 70 records numbered 0001–0071.
+    the sequence simply skipped it), so the log holds 71 records numbered 0001–0072.
 
 ## Re-scope: the semantic-resolution and ontology engine
 
@@ -22,6 +22,7 @@ wayfinder map in `.scratch/semantic-sidecar/map.md`.
 | [0069](0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md) | The semantic layer is a replay of an append-only ledger of Assertions and Decisions; two levels (Entities may be auto-accepted in the calibrated band, Concepts are proposals a human approves); Bindings are keyed on Unity Catalog ids |
 | [0070](0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md) | Metis consumes the engine through one reviewable proposal file; everything else reaches it through Unity Catalog. No shared code, one route per source for new measures, and no importer plugin or live tool calls in v1 |
 | [0071](0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md) | Warehouse readers are new Source kinds in the one Pipeline and meet the text path in one resolution phase; row values are matched inside the customer's workspace; filters and masks are labelled and masked data excluded; signals come in three tiers with a hosted referee off by default |
+| [0072](0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md) | On Databricks the engine runs as jobs in the customer's workspace and keeps the ledger, results and review state in Delta tables in Unity Catalog; the review surface is an in-workspace app with a local mode; neural models run on GPU job compute; review explanations are built in, hosted ones opt-in |
 
 ## Foundations & scope
 
