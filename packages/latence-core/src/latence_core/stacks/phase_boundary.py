@@ -4,7 +4,7 @@ The extraction pipeline has two phases and they are not interchangeable:
 
     source → parse → chunk → [content_screen] → induce → extract → redact     ← the FRONT half
     ────────────────────────── every stage here is per-CHUNK or per-DOCUMENT ──────────────────
-    profiling → disambiguate → graph → complete → enrich → export             ← the BACK half
+    profiling → consolidate_types → disambiguate → graph → complete → export  ← the BACK half
     ─────────────────────── the first corpus-wide operations, and the only ones ───────────────
 
 **``redact`` is the LAST chunk-level stage.** Everything before it sees one chunk (or one document)

@@ -1552,7 +1552,7 @@ def contracts(
         typer.Option(
             "--capability",
             help="Print only this Capability's entry — a Stage kind (e.g. 'parse', "
-            "'entity_extraction') or a signal-seam prefix (e.g. 'tokenizer').",
+            "'entity_extraction') or a signal-seam prefix (e.g. 'delta').",
         ),
     ] = None,
     write: Annotated[

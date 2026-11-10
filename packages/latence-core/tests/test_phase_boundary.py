@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from latence_core.pipeline import Pipeline
+from latence_core.capability_descriptor import CORPUS_LEVEL_KINDS, DOCUMENT_LEVEL_KINDS
+from latence_core.pipeline import CapabilityKind, Pipeline
 from latence_core.setup import (
     SetupAnswers,
     SetupConfigError,
@@ -29,6 +30,7 @@ from latence_core.setup import (
     validate_config_text,
 )
 from latence_core.setup.wizard import PARSER_OCR_VLLM, PARSER_UNIVERSAL, PROFILE_LITE, PROFILE_SOTA
+from latence_core.stacks import phase_boundary
 from latence_core.stacks.phase_boundary import check_phase_boundary, is_corpus_level
 
 
@@ -266,3 +268,51 @@ def test_every_committed_stack_satisfies_the_phase_boundary() -> None:
         if violations:
             offenders[path.name] = "; ".join(v.describe() for v in violations)
     assert offenders == {}
+
+
+# -- the module's own diagram --------------------------------------------------
+
+
+#: The stage names the diagram in ``phase_boundary``'s docstring may use, with the Capability each
+#: conventionally names (the names the wizard, the shipped stacks and the campaign generator use).
+_DIAGRAM_STAGE_KINDS: dict[str, CapabilityKind] = {
+    "source": CapabilityKind.SOURCE,
+    "parse": CapabilityKind.PARSE,
+    "chunk": CapabilityKind.CHUNK,
+    "content_screen": CapabilityKind.CONTENT_SCREENING,
+    "induce": CapabilityKind.SCHEMA_INDUCTION,
+    "extract": CapabilityKind.FUSED_ENTITY_RELATION,
+    "redact": CapabilityKind.REDACTION,
+    "profiling": CapabilityKind.PROFILING,
+    "consolidate_types": CapabilityKind.TYPE_CONSOLIDATION,
+    "disambiguate": CapabilityKind.DISAMBIGUATION,
+    "graph": CapabilityKind.GRAPH_ASSEMBLY,
+    "complete": CapabilityKind.GRAPH_COMPLETION,
+    "export": CapabilityKind.EXPORT,
+}
+
+
+def _diagram_stages(marker: str) -> list[str]:
+    doc = phase_boundary.__doc__ or ""
+    lines = [line for line in doc.splitlines() if marker in line]
+    assert len(lines) == 1, f"expected one diagram line carrying {marker!r}, found {len(lines)}"
+    stages = lines[0].split("←")[0]
+    return [name.strip().strip("[]") for name in stages.split("→")]
+
+
+def test_the_docstring_diagram_names_only_stages_that_exist_on_the_right_side() -> None:
+    """The two-phase diagram is a claim about the code, so it is held to the descriptor table.
+
+    It showed an ``enrich`` Stage in the back half after Context Enrichment had left the tree.
+    Every name on it must be a Stage the framework has, the front half must be document-level
+    Capabilities only, and the back half corpus-level Capabilities only.
+    """
+    front = _diagram_stages("the FRONT half")
+    back = _diagram_stages("the BACK half")
+    unknown = [name for name in [*front, *back] if name not in _DIAGRAM_STAGE_KINDS]
+    assert unknown == []
+    assert [n for n in front if _DIAGRAM_STAGE_KINDS[n] not in DOCUMENT_LEVEL_KINDS] == []
+    assert [n for n in back if _DIAGRAM_STAGE_KINDS[n] not in CORPUS_LEVEL_KINDS] == []
+    assert front[-1] == "redact"
+    # Every corpus-level Capability is shown: the back half is "the only" corpus-wide phase.
+    assert {_DIAGRAM_STAGE_KINDS[n] for n in back} == set(CORPUS_LEVEL_KINDS)
