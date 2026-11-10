@@ -308,7 +308,7 @@ deliberate-sabotage exercise is [Bringing your own Provider](tutorials/04-bringi
 ## 9 · Verifying your work
 
 ```bash
-uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+uv run ruff check packages benchmark/sota-campaign scripts
 MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
 PYTHONHASHSEED=0 uv run pytest packages
 uv sync --extra docs && uv run mkdocs build --strict     # if you touched docs/
