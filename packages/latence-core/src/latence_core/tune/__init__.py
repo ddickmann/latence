@@ -3,7 +3,7 @@
 A client's GPU decides which perf knobs win — and which even WORK (compile support is
 env-dependent: gliner2-multi-v1 + torch 2.4.1 raised ``BackendCompilerFailed`` at inference on one
 pod). :mod:`latence_core.tune` profiles the actual device, sweeps each heavy Provider's perf knobs
-(dtype/quantize/compile/batch_size/ocr_batch_size/max_concurrency) over a small real sample, applies
+(dtype/quantize/compile/batch_size/ocr_batch_size/max_concurrency) on timed stack runs, applies
 a HARD CORRECTNESS GATE (reject any setting that raises ANY error — including inference-time compile
 failures via :func:`~latence_core.providers.perf.is_compile_backend_failure` — OR changes output
 beyond tolerance vs the fp32/plain baseline), picks the fastest ELIGIBLE setting per Provider, and

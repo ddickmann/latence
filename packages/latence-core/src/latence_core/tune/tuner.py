@@ -44,9 +44,10 @@ from latence_core.tune.sweep import is_tunable_provider, knob_grid_for_provider
 if TYPE_CHECKING:
     from latence_core.tune.probe import SampleProbe
 
-# The default small real sample + timed-run count (the spec's N default 8; K timed runs after a
-# warmup so a cold-start does not skew the median). Kept small so ``latence tune`` is a quick sweep
-# on a rig, not a benchmark suite.
+# The default figure numerator + timed-run count (N defaults to 8; K timed runs after a warmup so a
+# cold-start does not skew the median). N does not size anything: the real probe times a run of
+# the whole stack over the bundled validation corpus, and N is only what the median is divided
+# into (see ``_throughput``).
 DEFAULT_SAMPLE_SIZE = 8
 DEFAULT_REPEATS = 3
 DEFAULT_SEED = 0
@@ -74,7 +75,12 @@ def _capped(exc: BaseException) -> str:
 
 
 def _throughput(sample_size: int, outcome: ProbeOutcome) -> float | None:
-    """records/sec from the outcome's median timed-run seconds, or ``None`` (uncrashed-but-untimed).
+    """``sample_size`` over the outcome's median timed-run seconds, or ``None`` (untimed).
+
+    This is the figure the report prints. It is a rate of records only if the probe really ran
+    ``sample_size`` records per timed run. The registry probe does not: it runs the whole stack
+    over the bundled validation corpus whatever ``sample_size`` is, so the figure is good for
+    comparing settings on one device and nothing else.
 
     A zero/negative median (an instant fake run) yields ``None`` rather than a divide-by-zero or an
     infinite rate — the candidate is still eligible (it ran correctly), it just carries no measured

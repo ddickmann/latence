@@ -5,7 +5,8 @@ The measuring half of :mod:`latence_core.tune`. It reuses the bake-off's timing/
 deterministic corpus, holds every OTHER stage of a base stack constant, swaps the tuned Provider's
 knobs onto its stage, runs the stack through the :class:`~latence_core.runner.LocalRunner`, and:
 
-* **times** the target-stage run (the K repeats' seconds → the tuner's median throughput);
+* **times** each run of the whole stack (the K repeats' seconds → the tuner's median). The run is
+  over the whole bundled corpus: ``sample_size`` is accepted and not used, so it does not size it;
 * **fingerprints** the target-stage CHECKPOINT bytes (the newline-delimited ``model_dump_json``
   records — labels/spans/offsets/text, the deterministic G1 fingerprint the bake-off already uses
   for

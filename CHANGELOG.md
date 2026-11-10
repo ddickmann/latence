@@ -134,6 +134,12 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   now requires every name in the mapping to be an entry point a workspace package declares.
   `PERF-RESULTS.md` carried the same wrong name, and `embedder.endpoint` for
   `embedding.endpoint`.
+- **`latence tune --sample` says what it is.** The help read "Records to time each candidate on"
+  and the report labelled its figures `r/s`. The probe never sized a run by that number: it
+  times the whole stack over the bundled validation corpus and the tuner divides `--sample` by
+  the median wall time. The behaviour is unchanged. The help text, the report's field
+  descriptions and table header, `docs/tuning.md` and `scripts/tune-on-gpu.md` now say that a
+  figure compares settings on one device and is not records per second.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept

@@ -78,8 +78,11 @@ class SampleProbe(Protocol):
 
     The single seam the tuner drives. A probe MUST NOT raise for a candidate that crashes — it
     catches the fault and returns it in :attr:`ProbeOutcome.error` (so the gate rejects it as a
-    documented rejection, never an aborted sweep). ``sample_size`` is the N records the caller wants
-    timed; ``repeats`` is the K timed runs after warmup whose median is the throughput.
+    documented rejection, never an aborted sweep). ``sample_size`` is the caller's N, passed through
+    for a probe that can size its run; the registry probe
+    (:class:`~latence_core.tune.realprobe.RegistrySampleProbe`) cannot and ignores it, timing the
+    whole stack over the bundled validation corpus. ``repeats`` is the K timed runs after warmup
+    whose median the tuner divides N by.
     """
 
     def probe(

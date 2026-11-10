@@ -78,8 +78,11 @@ class ProviderTuning(BaseModel):
       present:
       the baseline itself is eligible by construction (it defines the correctness reference), so a
       Provider on which every acceleration was rejected still wins the baseline (slow-but-correct).
-    * ``baseline_throughput`` / ``winner_throughput`` — records/sec (median of the timed runs). The
-      baseline is the fp32/plain reference; the winner's is what the tune buys.
+    * ``baseline_throughput`` / ``winner_throughput`` — the report's ``sample_size`` divided by the
+      median wall seconds of the timed runs. The real probe times a run of the whole stack over the
+      bundled validation corpus and does not cut it down to ``sample_size`` records, so the figure
+      compares settings on one device and is not a count of records per second. The baseline is
+      the fp32/plain reference; the winner's is what the tune buys.
     * ``speedup`` — ``winner_throughput / baseline_throughput`` (``1.0`` when the baseline wins).
     * ``rejected`` — the REJECTED candidates with reasons (compile crash, output change, …) — the
       honest half a reader audits.
@@ -90,8 +93,20 @@ class ProviderTuning(BaseModel):
 
     provider: str
     winner: KnobSetting
-    baseline_throughput: float | None = Field(default=None, description="records/sec, baseline.")
-    winner_throughput: float | None = Field(default=None, description="records/sec, winner.")
+    baseline_throughput: float | None = Field(
+        default=None,
+        description=(
+            "sample_size divided by the median wall seconds of the baseline's timed runs. "
+            "Comparable between settings on one device; not a count of records."
+        ),
+    )
+    winner_throughput: float | None = Field(
+        default=None,
+        description=(
+            "sample_size divided by the median wall seconds of the winner's timed runs. "
+            "Comparable between settings on one device; not a count of records."
+        ),
+    )
     speedup: float | None = Field(default=None, description="winner/baseline throughput ratio.")
     speedup_suspect: bool = Field(
         default=False,
@@ -124,7 +139,12 @@ class TuneReport(BaseModel):
 
     schema_version: int = Field(default=TUNE_SCHEMA_VERSION)
     stack: str = Field(description="The stack file name the tune was measured against.")
-    sample_size: int = Field(description="Records the sweep timed each candidate on.")
+    sample_size: int = Field(
+        description=(
+            "The numerator of every figure in this report (the --sample value). It is not the "
+            "size of the corpus a candidate ran on."
+        )
+    )
     seed: int = Field(description="The seed the sweep used (determinism).")
     device_fingerprint: DeviceFingerprint
     providers: list[ProviderTuning] = Field(default_factory=list)
@@ -159,8 +179,11 @@ class TuneReport(BaseModel):
             f"cuda_ver={fp.cuda_version or 'n/a'}",
             f"- **sample_size**: {self.sample_size}  **seed**: {self.seed}  "
             f"**schema**: v{self.schema_version}",
+            "- **figure**: sample_size divided by the median wall seconds of the timed runs. A "
+            "timed run is one run of the whole stack over the bundled validation corpus, so a "
+            "figure compares settings on this device and is not records per second.",
             "",
-            "| provider | winner | baseline r/s | winner r/s | speedup | eligible/total |",
+            "| provider | winner | baseline figure | winner figure | speedup | eligible/total |",
             "| --- | --- | --- | --- | --- | --- |",
         ]
         for p in self.providers:
@@ -192,8 +215,9 @@ class TuneReport(BaseModel):
             lines.append("- (none — every swept candidate passed the correctness gate)")
         lines.append("")
         lines.append(
-            "_Throughput is machine-relative (this device only). A tuned config applies ONLY on a "
+            "_Figures are machine-relative (this device only). A tuned config applies ONLY on a "
             "matching device_fingerprint; a mismatch falls back to stack defaults (never silently "
-            "applied). No number here is fabricated — each is the median of the seeded timed runs._"
+            "applied). No number here is fabricated — each is computed from the median of the "
+            "timed runs._"
         )
         return "\n".join(lines)

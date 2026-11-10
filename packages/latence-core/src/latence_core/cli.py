@@ -14,7 +14,7 @@
   ONE Stage, writing a signed-style ``MATRIX-RESULTS-<stage>.md`` + a JSON companion with
   per-candidate quality/latency/memory/cost/license/determinism/error-rate (ADR-0036 §4, P3-F5).
 * ``latence tune <stack.yaml>`` — profile the device, sweep each heavy Provider's perf knobs
-  over a small real sample under a HARD correctness gate (reject any setting that crashes —
+  on timed runs of the whole stack under a HARD correctness gate (reject any setting that crashes —
   incl. inference-time ``BackendCompilerFailed`` — or changes output), pick the fastest eligible
   per Provider, and write a device-fingerprinted ``tuned/<device>.yaml`` + an honest report
   (winners AND rejected knobs). ``latence run --tuned tuned/<device>.yaml`` overlays it ONLY on
@@ -501,10 +501,22 @@ def tune(
         Path, typer.Argument(help="Path to the stack YAML to tune (e.g. stacks/gpu-sota.yaml).")
     ],
     sample: Annotated[
-        int, typer.Option("--sample", help="Records to time each candidate on (the small sample).")
+        int,
+        typer.Option(
+            "--sample",
+            help="The numerator of every figure in the report: a figure is this number divided "
+            "by the median wall time of one timed run of the whole stack over the bundled "
+            "validation corpus. It does not size the run; no candidate is cut down to this many "
+            "records.",
+        ),
     ] = 8,
     repeats: Annotated[
-        int, typer.Option("--repeats", help="Timed runs per candidate after warmup (median → r/s).")
+        int,
+        typer.Option(
+            "--repeats",
+            help="Timed runs per candidate after an untimed warm-up. Their median wall time is "
+            "the divisor of the reported figure.",
+        ),
     ] = 3,
     seed: Annotated[int, typer.Option("--seed", help="Sweep seed (determinism).")] = 0,
     out: Annotated[
@@ -528,11 +540,14 @@ def tune(
     """Profile the device, sweep each heavy Provider's perf knobs correctness-gated, write a tune.
 
     For each GPU/heavy Provider in the stack it sweeps dtype/quantize/compile/batch_size/
-    ocr_batch_size/max_concurrency over the small real sample, REJECTS any setting that crashes
-    (including an inference-time ``BackendCompilerFailed`` — the W9 lesson) or changes output vs the
-    fp32/plain baseline, picks the fastest ELIGIBLE per Provider, and writes a device-fingerprinted
-    ``tuned/<device>.yaml`` + an honest report (winners AND rejected knobs). Never fabricates a
-    number — every throughput is the median of the seeded timed runs on THIS device.
+    ocr_batch_size/max_concurrency. Each candidate is timed on runs of the whole stack over the
+    bundled validation corpus, with only that Provider's knobs changed. It REJECTS any setting that
+    crashes (including an inference-time ``BackendCompilerFailed`` — the W9 lesson) or changes
+    output vs the fp32/plain baseline, picks the fastest ELIGIBLE per Provider, and writes a
+    device-fingerprinted ``tuned/<device>.yaml`` + a report (winners AND rejected knobs).
+
+    A figure in the report is ``--sample`` divided by the median wall time of the timed runs on
+    THIS device. It compares settings with each other; it is not a count of records per second.
     """
     _configure_logging(verbose)
     if not stack_path.exists():
