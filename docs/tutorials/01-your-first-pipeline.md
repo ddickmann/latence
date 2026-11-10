@@ -16,9 +16,11 @@ the shape of the system before you spend anything on it.
 
 ## 1. Make a corpus
 
-Anywhere outside the repo:
+Anywhere outside the repo. Activate the clone's environment first: outside the clone, `uv run`
+only finds `latence` when that environment is the active one.
 
 ```bash
+source /path/to/latence/.venv/bin/activate
 mkdir -p first-pipeline/documents && cd first-pipeline
 ```
 

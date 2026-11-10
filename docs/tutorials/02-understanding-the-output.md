@@ -265,7 +265,7 @@ print(sorted(r.keys()))
 ```
 
 Four of them are `null` for this run. `delta` is filled by [`latence delta`](05-production.md),
-`goldset` by a gold-set evaluation, `conformance` when a conformance roll-up is folded in, and
+`goldset` by a gold-set evaluation, `conformance` when a conformance roll-up is attached, and
 `type_consolidation` when the stack has a type-consolidation stage, which this one does not.
 
 The blocks worth knowing:

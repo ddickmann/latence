@@ -34,7 +34,7 @@ same file passes on a CPU CI box and on a GPU pod. `latence process` runs this c
 and refuses to start on an error.
 
 **`latence stack validate`** is the expensive one: it runs a named stack end-to-end on the bundled
-corpus and asserts the full battery.
+corpus and asserts the full battery. Run it from the clone, where `stacks/` lives.
 
 ```bash
 uv run latence stack validate stacks/default.yaml
@@ -85,7 +85,7 @@ reader always sees either the previous checkpoint or the complete new one, never
 Simulate a run that died before the graph was built and before either export was written:
 
 ```bash
-cd first-pipeline
+cd /path/to/first-pipeline
 rm latence-out/_latence/runs/run-0001/checkpoints/{graph,export_kg,export_corpus}.jsonl
 uv run latence run latence.stack.yaml --run-id run-0001
 ```
@@ -334,7 +334,7 @@ a CUDA build without `sm_120` kernels — all discovered at runtime, on a pod, h
 
 The framework's answer is that **the pins are enforced constraints the build checks**, not a wiki
 page. Each environment under `deploy/env/<name>/` is a spec plus generated `requirements.in` /
-`constraints.txt` / lock, and the CLI verifies they agree:
+`constraints.txt` / lock, and the CLI verifies they agree. Run these from the clone:
 
 ```bash
 uv run latence env verify deploy/env/cpu-text/environment.yaml
@@ -395,8 +395,12 @@ The wizard generates this stack directly:
 uv run latence setup --profile enterprise-sota \
   --source ./documents \
   --ocr-base-url http://localhost:8000/v1 \
-  --ocr-model lightonocr
+  --ocr-model lightonocr \
+  --output gpu.stack.yaml
 ```
+
+`--output` matters here: without it the wizard writes `latence.stack.yaml`, which in this
+directory is the stack you wrote by hand in Tutorial 1.
 
 `--profile enterprise-sota` pins `device: cuda` for every learned stage and recommends the parse path
 from your detected file types: a corpus that is entirely born-digital text routes to the CPU
@@ -441,7 +445,7 @@ Every throughput in that report is the median of seeded timed runs on that devic
 extrapolated.
 
 ```bash
-uv run latence run latence.stack.yaml --tuned tuned/<device>.yaml
+uv run latence run gpu.stack.yaml --tuned tuned/<device>.yaml
 ```
 
 Pass your own stack here, not one of the files under `stacks/`: those carry `{STORAGE_URI}` and
