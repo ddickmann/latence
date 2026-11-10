@@ -78,8 +78,8 @@ class S3Answers:
     All defaults are the S3 spec's rulings (chunk {640,80,8} = the blessed gpu-sota operating
     point under the GLiNER2 768 mdeberta window; extraction fused_entity_relation.gliner2 @
     0.5; induction per_chunk on deepseek-v4-flash via OpenRouter — reasoning pinned OFF —
-    under a hard USD cap; learned redaction with guardrails ON). Contradictions are rejected
-    here, not discovered on the pod.
+    under a USD cap the stage turns into a call budget; learned redaction with guardrails ON).
+    Contradictions are rejected here, not discovered on the pod.
     """
 
     chunk_max_tokens: int = 640

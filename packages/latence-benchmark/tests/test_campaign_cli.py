@@ -192,6 +192,43 @@ class TestInit:
         assert "musique" not in text
         assert "hotpotqa" not in text
 
+    def test_the_budget_prompt_says_what_the_cap_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The prompt's "why" line and the flag's help describe the cap as the stage applies it.
+
+        Both said the cap was hard and that the run blocks at it. The stage does neither: it
+        turns the USD figure into a per-dataset limit on induction calls from an estimated price
+        per call (``s3_lib.induction_call_budgets``), and the inducer gives a chunk past the limit
+        no call and the configured labels, then carries on (``latence-schema-inducer``'s
+        ``test_label_inducer_provider.py`` holds that behaviour). The wording is pinned loosely:
+        the two false claims are forbidden and the three facts are required.
+        """
+        monkeypatch.setattr("builtins.input", lambda: "")
+        assert cli.main(["init", "-o", str(tmp_path / "campaign.yaml")]) == 0
+        lines = capsys.readouterr().err.splitlines()
+        (prompt_at,) = [i for i, line in enumerate(lines) if "budget cap (USD)" in line]
+        # A prompt ends without a newline, so the "why" line follows the previous prompt's text.
+        why = lines[prompt_at - 1].rsplit("]: ", 1)[-1]
+        assert why.strip().startswith("("), why
+
+        # The flag's help, out of `init --help`: the text between its last mention (the first is
+        # the usage line) and the next option.
+        with pytest.raises(SystemExit):
+            cli.main(["init", "--help"])
+        help_text = " ".join(capsys.readouterr().out.split())
+        flag_help = help_text.rsplit("--s3-budget-usd-cap", 1)[1].split(" --s3-", 1)[0]
+        assert "USD" in flag_help, flag_help
+
+        for text in (why, flag_help):
+            lowered = text.lower()
+            assert "hard" not in lowered or "not a hard" in lowered, text
+            assert "blocks" not in lowered, text
+            assert "never silently overruns" not in lowered, text
+            assert "calls" in lowered, text  # the cap becomes a limit on calls
+            assert "labels" in lowered, text  # past it, a chunk keeps the configured labels
+            assert "continues" in lowered or "does not stop" in lowered, text
+
     def test_explicit_zero_overlap_is_honored_not_defaulted(self, tmp_path: Path) -> None:
         # 0 is a VALID overlap; an explicit falsy answer must never fall back to the default.
         out = tmp_path / "campaign.yaml"

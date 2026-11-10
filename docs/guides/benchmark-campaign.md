@@ -66,7 +66,11 @@ Two details of `s3-pipeline` are worth knowing before you run it:
 * **The budget cap is converted into a call budget.** The inducer enforces a number of calls,
   not a number of dollars, so the stage turns the USD cap into one `max_induction_calls` per
   dataset when it generates the YAML. The allocation is proportional to the measured chunk
-  counts and scaled down when the estimate would exceed the cap.
+  counts and scaled down when the estimate would exceed the cap. The cap is not a hard stop. A
+  chunk past its dataset's call budget gets no call and keeps the configured labels, the run
+  continues, and the Quality Report sets `induction_budget_exhausted`. The conversion uses an
+  estimated price per call; the actual spend is written to `stages/s3-pipeline/metrics.json`
+  (`usd_actual_total`) after the run and is not checked against the cap.
 
 Each dataset's corpus and toolkit licence, and its lane, are declared in the stage's source
 (`packages/latence-benchmark/src/latence_benchmark/campaign/corpus_stage.py`) and written to

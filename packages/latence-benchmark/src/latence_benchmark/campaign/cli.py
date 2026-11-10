@@ -106,7 +106,11 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--s3-budget-usd-cap",
         default=None,
-        help="Hard USD cap for LLM label induction across the whole S3 run (default 150).",
+        help="USD cap for LLM label induction across the whole S3 run (default 150). The stage "
+        "turns it into a per-dataset limit on induction calls, using an estimated price per "
+        "call. A chunk past the limit gets no call and keeps the configured labels; the run "
+        "does not stop. The actual spend is written to the stage metrics afterwards; it is not "
+        "checked against the cap.",
     )
     for flag, help_text in (
         ("--s3-chunk-max-tokens", "chunk.markdown max_tokens (default 640)."),
@@ -253,7 +257,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
     budget_raw = _ask(
         args.s3_budget_usd_cap,
         "S3 induction budget cap (USD)",
-        "a HARD cap: the run blocks at the cap, it never silently overruns",
+        "not a hard stop: the cap becomes a limit on induction calls, from an estimated price "
+        "per call; a chunk past the limit gets no call and keeps the configured labels, and "
+        "the run continues",
         "150",
         interactive=interactive,
     )

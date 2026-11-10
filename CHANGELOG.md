@@ -145,6 +145,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   running. With `--fresh` the entry probe is now skipped and the stage's `run` is called; the
   probe still decides `done` afterwards, and a redone stage needs approving again. `--fresh`
   deletes nothing: units of work a stage finds already written are still skipped.
+- **The campaign wizard's budget prompt describes the cap as the stage applies it.** The prompt
+  and the `--s3-budget-usd-cap` help called it a hard cap at which the run blocks. The stage
+  turns the cap into a per-dataset limit on induction calls from an estimated price per call; a
+  chunk past the limit gets no call and keeps the configured labels, and the run continues. The
+  behaviour is unchanged; the prompt, the help text and the campaign guide now say this.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept

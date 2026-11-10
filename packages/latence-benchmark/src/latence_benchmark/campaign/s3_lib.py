@@ -122,8 +122,9 @@ def induction_call_budgets(
     2. A dataset NOT in the estimates falls back to an even share of the budget the known
        datasets leave over (never a share of the whole cap, which would double-spend it).
     3. If the estimated total spend (allocated calls × the model's per-call estimate)
-       exceeds ``budget_usd_cap``, EVERY allocation is scaled down proportionally — the cap
-       is the hard bound; generation is never blocked and the cap is never exceeded.
+       exceeds ``budget_usd_cap``, EVERY allocation is scaled down proportionally.
+       Generation is never blocked, and the ESTIMATED spend never exceeds the cap. The actual
+       spend depends on what each call really costs and is not checked against it.
 
     Floor division throughout, so the summed spend estimate never exceeds the cap.
     """
