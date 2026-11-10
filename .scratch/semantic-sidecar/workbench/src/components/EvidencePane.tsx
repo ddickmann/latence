@@ -10,6 +10,7 @@ import { fieldLabel, nameOf, path, show, signed } from "../format";
 import { useHost } from "../host";
 import type { Decision, EvidenceRow, NodeRef, ReviewGroup, ReviewItem, ReviewMeta, Scalar } from "../types";
 import { ClusterGraph } from "./ClusterGraph";
+import { SuggestionCard } from "./SuggestionCard";
 
 function agreement(a: Scalar | undefined, b: Scalar | undefined): "same" | "differ" | "missing" {
   if (a == null || b == null) return "missing";
@@ -81,6 +82,7 @@ export function EvidencePane(props: {
   meta: ReviewMeta;
   decisions: ReadonlyMap<string, Decision>;
   graph: GraphDataSource | undefined;
+  onTake: () => void;
 }) {
   const { t, base } = useHost();
   const { item, group, meta } = props;
@@ -130,6 +132,10 @@ export function EvidencePane(props: {
         </h2>
         <ProbabilityScale item={item} meta={meta} />
       </header>
+
+      {item.suggestion != null && (
+        <SuggestionCard suggestion={item.suggestion} summary={meta.suggester} taken={props.decisions.get(item.id)?.verdict === item.suggestion.verdict} onTake={props.onTake} />
+      )}
 
       <section className="rw-section" aria-labelledby="rw-why">
         <h3 id="rw-why">{t("evidence.whyUnsure")}</h3>

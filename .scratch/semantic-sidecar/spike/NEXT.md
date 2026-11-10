@@ -114,6 +114,24 @@ Both are synthetic-estate only. `../workbench/README.md` has the exact command a
 files go. On the pod, exports from the re-scored arms give the workbench items with the
 neural scores in their evidence; that wiring is not written yet.
 
+## A suggester for the review band (2026-11-10)
+
+`suggest.py` fits a decision tree of depth 3 on the matcher's agreement level per field, using
+labelled review pairs, two folds, so each pair's suggestion comes from a tree that did not see
+its label. On the 12k estate's review band (1,424 pairs) the suggestion matches the truth for
+96.4% of pairs out of sample; calling every pair the same would be right for 69.8%. The
+workbench shows the suggestion with its conditions and that record.
+
+- **Why it works here:** the matcher weighs each field on its own; what separates the review
+  band is combinations (same postcode area, similar name, industry given: different in 164 of
+  164 labelled pairs). A tree sees combinations.
+- **What it does not show:** the labels are the generator's truth, and the generator's hard
+  negatives follow a few patterns a tree can learn. A real estate will be harder. No real
+  labels have been used.
+- **For ticket 13:** a second stage over field-agreement combinations, fitted on the decisions
+  reviewers record, may shrink the review band before any neural scorer is needed. It has to
+  go through the same calibrated bands as every other score; a suggestion decides nothing.
+
 ## What the CPU smoke test showed (2026-11-09; not results)
 
 All four small models load and run through `models.py` on a CPU: EmbeddingGemma 2 (256-d,

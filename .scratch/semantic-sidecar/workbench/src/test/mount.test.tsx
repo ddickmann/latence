@@ -117,6 +117,45 @@ describe("mounted in a host's router", () => {
     expect(ledger.decisions[1]?.note).toBe("the city is missing on one side");
   });
 
+  it("shows a suggestion with its grounds, takes it with Y, and records whether the reviewer agreed", async () => {
+    const user = userEvent.setup();
+    const { reviewSource } = mount("/x/y/review/r1~r2");
+    await screen.findByTestId("evidence");
+    const card = screen.getByTestId("suggestion");
+    expect(card).toHaveTextContent("Different");
+    expect(card).toHaveTextContent("41 of 44 were different");
+    expect(card).toHaveTextContent("Industry differs");
+    expect(card).toHaveTextContent("Name not the same");
+    expect(screen.getByTestId("suggestion-trust")).toHaveTextContent("Checked on 300 decided pairs the suggestion had not seen: right in 96 of 100.");
+    expect(screen.getByTestId("suggestion-trust")).toHaveTextContent("Calling every pair the same would be right in 70 of 100.");
+    expect(screen.getByTestId("qa-agreed")).toHaveTextContent("–");
+
+    // Y takes it: "different" is recorded without the reason dialog, with the suggestion as the reason.
+    await user.keyboard("y");
+    await waitFor(() => expect(where()).toBe("/x/y/review/r2~r3"));
+    expect(screen.queryByTestId("decision-sheet")).toBeNull();
+    expect(screen.getByTestId("qa-agreed")).toHaveTextContent("1 of 1");
+    // This pair has no suggestion: no card, and Y does nothing.
+    expect(screen.queryByTestId("suggestion")).toBeNull();
+    await user.keyboard("y");
+    expect(where()).toBe("/x/y/review/r2~r3");
+
+    // Going against a suggestion is recorded as that.
+    await user.click(screen.getByTestId("filter-all"));
+    await user.click(screen.getAllByTestId("queue-row")[2]!);
+    expect(await screen.findByTestId("suggestion")).toHaveTextContent("29 of 30 were the same");
+    await user.keyboard("r");
+    await user.click(within(await screen.findByTestId("decision-sheet")).getByTestId("reason-location"));
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(screen.getByTestId("qa-agreed")).toHaveTextContent("1 of 2"));
+
+    const ledger = await reviewSource.loadLedger();
+    expect(ledger.decisions.map((d) => [d.item, d.verdict, d.reason, d.suggested])).toEqual([
+      ["r1~r2", "different", "as_suggested", "different"],
+      ["r4~r5", "different", "location", "same"],
+    ]);
+  });
+
   it("decides a whole group as one with M, and takes it back with undo", async () => {
     const user = userEvent.setup();
     const { reviewSource } = mount("/x/y/review/r1~r2");

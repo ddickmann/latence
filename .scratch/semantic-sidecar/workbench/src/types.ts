@@ -24,6 +24,39 @@ export interface EvidenceRow {
   right: Scalar;
 }
 
+/** One condition of a suggestion: the range of agreement levels a field has in pairs like this. */
+export interface SuggestionCondition {
+  comparison: string;
+  label: string;
+  levels: number[];
+  /** Plain words for the range, e.g. "agrees", "differs", "close or the same". */
+  text: string;
+}
+
+/**
+ * A suggested verdict with its grounds: among already decided pairs that meet the same
+ * conditions (`like_this`), how many had this verdict (`like_this_agree`).
+ */
+export interface Suggestion {
+  verdict: "same" | "different";
+  like_this: number;
+  like_this_agree: number;
+  conditions: SuggestionCondition[];
+}
+
+/** How the suggestions were made and how often they were right on pairs they had not seen. */
+export interface SuggesterSummary {
+  available: boolean;
+  how?: string;
+  labelled_pairs?: number;
+  out_of_sample_right?: number;
+  out_of_sample_share?: number;
+  /** How often "always the same" would have been right: the bar a suggestion has to beat. */
+  always_same_share?: number;
+  labels?: string;
+  reason?: string;
+}
+
 export interface ReviewItem {
   id: string;
   group: string | null;
@@ -36,6 +69,7 @@ export interface ReviewItem {
   evidence: EvidenceRow[];
   why_unsure: string;
   vetoed: boolean;
+  suggestion?: Suggestion | null;
   /** The generator's truth. Present on synthetic data only. */
   gold_same?: boolean;
 }
@@ -70,6 +104,7 @@ export interface ReviewMeta {
   review_groups_exported: number;
   record_fields: string[];
   comparisons: { comparison: string; label: string; field: string }[];
+  suggester?: SuggesterSummary;
 }
 
 export interface ReviewExport {
@@ -96,6 +131,8 @@ export interface Decision {
   actor: Actor;
   /** ISO 8601, UTC. */
   at: string;
+  /** What the suggestion said when this was decided, if the pair had one. */
+  suggested?: "same" | "different";
   /** Set when a group action made this entry: the id shared by every entry of that action. */
   batch?: string;
   /**
@@ -110,6 +147,7 @@ export interface DecisionInput {
   verdict: Verdict;
   reason?: string;
   note?: string;
+  suggested?: "same" | "different";
 }
 
 /**

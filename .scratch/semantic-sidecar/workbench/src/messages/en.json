@@ -126,7 +126,8 @@
     "business": "A different line of business",
     "related": "Related, but not the same (parent, subsidiary, division)",
     "other": "Something else (say what)",
-    "group_split": "Split off by a decision about the whole group"
+    "group_split": "Split off by a decision about the whole group",
+    "as_suggested": "As suggested"
   },
   "sheet": {
     "cancel": "Cancel",
@@ -158,7 +159,8 @@
     "close": "Back to the queue",
     "confirm": "Record what a dialog asks",
     "merge": "Whole group: all one organisation",
-    "split": "Whole group: split it"
+    "split": "Whole group: split it",
+    "take": "Take the suggestion"
   },
   "notice": {
     "same": "Recorded: same",
@@ -175,7 +177,9 @@
     "perHour": "{{n}} an hour",
     "band": "Review band",
     "bandValue": "{{pairs}} pairs in {{groups}} groups; the {{loaded}} groups that settle most are loaded",
-    "audit": "Audit the {{count}} auto-accepted pairs"
+    "audit": "Audit the {{count}} auto-accepted pairs",
+    "agreed": "With the suggestion",
+    "agreedValue": "{{agreed}} of {{of}}"
   },
   "audit": {
     "title_one": "A sample of {{count}} pair the machine accepted on its own",
@@ -272,5 +276,31 @@
     "undo_other": "Undo ({{count}} pairs)",
     "undoShort": "Undo",
     "undone": "Undone, or decided again since: no pair still rests on this group decision."
+  },
+  "suggest": {
+    "title": "Suggestion",
+    "record": {
+      "same": "Among pairs already decided that look like this one, {{agree}} of {{total}} were the same. What they have in common:",
+      "different": "Among pairs already decided that look like this one, {{agree}} of {{total}} were different. What they have in common:"
+    },
+    "trust": "Checked on {{pairs}} decided pairs the suggestion had not seen: right in {{right}} of 100.",
+    "baseline": "Calling every pair the same would be right in {{right}} of 100.",
+    "synthetic": "On this synthetic data the generator's truth stands in for recorded decisions.",
+    "take": {
+      "same": "Take it: same",
+      "different": "Take it: different"
+    },
+    "taken": "Taken"
+  },
+  "condition": {
+    "agrees": "agrees",
+    "differs": "differs",
+    "missing on one side": "missing on one side",
+    "differs or is missing": "differs or is missing",
+    "not the same, or missing": "not the same, or missing",
+    "not the same": "not the same",
+    "close, not the same": "close, not the same",
+    "close or the same": "close or the same",
+    "present on both sides": "present on both sides"
   }
 }

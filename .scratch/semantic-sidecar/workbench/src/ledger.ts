@@ -33,6 +33,22 @@ export function tally(decisions: readonly Decision[]): Record<Verdict, number> {
 }
 
 /**
+ * How often the reviewer's decisions in force went with the suggestion: of the pairs that had
+ * a suggestion and were called same or different, how many got the suggested verdict. "Not
+ * sure" neither agrees nor disagrees.
+ */
+export function agreement(decisions: readonly Decision[]): { agreed: number; of: number } {
+  let agreed = 0;
+  let of = 0;
+  for (const d of inForce(decisions).values()) {
+    if (d.suggested === undefined || d.verdict === "unsure") continue;
+    of += 1;
+    if (d.verdict === d.suggested) agreed += 1;
+  }
+  return { agreed, of };
+}
+
+/**
  * Decisions per hour over the last hour of work, or null while there is too little to say:
  * fewer than three decisions, or less than a minute between the first and now.
  */

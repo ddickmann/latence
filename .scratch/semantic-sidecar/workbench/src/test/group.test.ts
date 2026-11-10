@@ -25,7 +25,8 @@ describe("a decision about a whole group", () => {
 
   it("merge decides every open pair as same and leaves decided pairs alone", () => {
     expect(planMerge(group, items, none)).toEqual({
-      decisions: [{ item: "r1~r2", verdict: "same" }, { item: "r2~r3", verdict: "same" }],
+      // r1~r2 had a suggestion (different); what it said is recorded with the decision.
+      decisions: [{ item: "r1~r2", verdict: "same", suggested: "different" }, { item: "r2~r3", verdict: "same" }],
       kept: 0, disagree: [], separatesAccepted: [],
     });
     const plan = planMerge(group, items, decided("r1~r2", "different"));
@@ -37,7 +38,7 @@ describe("a decision about a whole group", () => {
   it("split calls pairs inside a part the same and pairs across parts different", () => {
     const plan = planSplit(group, items, none, [["r1"], ["r2", "r3"]]);
     expect(plan.decisions).toEqual([
-      { item: "r1~r2", verdict: "different", reason: "group_split" },
+      { item: "r1~r2", verdict: "different", reason: "group_split", suggested: "different" },
       { item: "r2~r3", verdict: "same" },
     ]);
     expect(count(plan)).toEqual({ same: 1, different: 1 });

@@ -106,6 +106,15 @@ async function run(browser, base, name, viewport, colorScheme) {
   await moved(page, third);
   check(Number(await page.textContent('[data-testid="qa-decided"]')) === 2, `${tag} Space skips without recording`);
 
+  // A suggestion: the card says what it rests on and how far to trust it; Y takes it.
+  const card = page.locator('[data-testid="suggestion"]');
+  check((await card.count()) === 1 && (await page.locator('[data-testid="suggestion-trust"]').count()) === 1, `${tag} a pair shows its suggestion and how often suggestions were right`);
+  const wasDecided = Number(await page.textContent('[data-testid="qa-decided"]'));
+  const fifth = page.url();
+  await page.keyboard.press("y");
+  await moved(page, fifth);
+  check(Number(await page.textContent('[data-testid="qa-decided"]')) === wasDecided + 1 && /\d+ of \d+/.test(await page.textContent('[data-testid="qa-agreed"]')), `${tag} Y takes the suggestion and the agreement is counted`);
+
   // A whole group at once: merge with M, then undo from the notice.
   const before = Number(await page.textContent('[data-testid="qa-decided"]'));
   const fourth = page.url();

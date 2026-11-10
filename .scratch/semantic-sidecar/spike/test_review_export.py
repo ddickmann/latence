@@ -50,6 +50,25 @@ def test_every_item_is_a_review_pair_with_field_evidence(export: tuple[dict, dic
         assert set(g["labels"]) == members
 
 
+def test_review_items_carry_a_suggestion_and_the_file_says_how_far_to_trust_it(export: tuple[dict, dict]) -> None:
+    data, result = export
+    summary = data["meta"]["suggester"]
+    assert summary["available"] is True
+    assert summary["labelled_pairs"] == result["bands"]["counts"]["review"]
+    assert 0 < summary["out_of_sample_right"] <= summary["labelled_pairs"]
+    comparisons = {c["comparison"] for c in data["meta"]["comparisons"]}
+    for it in data["items"]:
+        s = it["suggestion"]
+        assert s["verdict"] in {"same", "different"}
+        assert 0 < s["like_this_agree"] <= s["like_this"] and 2 * s["like_this_agree"] >= s["like_this"]
+        assert s["conditions"] and {c["comparison"] for c in s["conditions"]} <= comparisons
+        # A pair meets the conditions it is said to meet.
+        level = {e["comparison"]: e["level"] for e in it["evidence"]}
+        assert all(level[c["comparison"]] in c["levels"] for c in s["conditions"])
+    # A pair the machine accepted on its own gets no suggestion.
+    assert all(a["suggestion"] is None for a in data["audit"])
+
+
 def test_groups_are_ranked_and_the_audit_sample_is_accepted_pairs(export: tuple[dict, dict]) -> None:
     data, _ = export
     priorities = [g["priority"] for g in data["groups"]]

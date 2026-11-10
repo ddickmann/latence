@@ -19,6 +19,14 @@ Synthetic data only. The sample comes from the spike's 12,004-record synthetic e
   and what is missing; the matcher's weight per field with a one-line explanation computed from
   the numbers (no model call); the group around the pair, drawn, with a warning when the pair
   is the only link between two parts of it.
+- **Suggestion:** a suggested verdict per pair, with what it rests on: the combination of
+  field agreement the pair shows, and how already decided pairs with that combination turned
+  out ("41 of 44 were different"). Below it, how often suggestions were right on pairs they had
+  not seen, next to how often "always the same" would have been. `Y` takes the suggestion.
+  Every decision records what the suggestion said, and the numbers strip counts how often the
+  reviewer went with it. The suggestions come from the export (`../spike/suggest.py`: a shallow
+  decision tree over the matcher's agreement levels, fitted on labelled review pairs); the
+  workbench only shows them. On the synthetic sample the labels are the generator's truth.
 - **Decision:** one key each — `A` same, `R` different, `U` not sure, `Space` skip, `J`/`K`
   through the queue, `Esc` back. "Different" asks for a reason; changing a recorded decision
   asks for a note; both record with `⌘↵` / `Ctrl+Enter`. The log is append-only, with who and
@@ -46,7 +54,7 @@ Synthetic data only. The sample comes from the spike's 12,004-record synthetic e
 - **Open links:** organisations the review band has not decided are drawn dashed and link
   straight into the review of the pair. A record in the evidence links back to its organisation.
 
-Not in this cut: AI suggestions, turning a decision into a rule, four-eyes approval, version
+Not in this cut: suggestions from a language model, turning a decision into a rule, four-eyes approval, version
 certification, reviewer agreement, and acting on the objections a split records against
 machine-accepted pairs.
 
@@ -55,7 +63,7 @@ machine-accepted pairs.
 ```bash
 npm ci
 npm run dev                 # the standalone app with hot reload
-npm test                    # 38 unit and mount tests (Vitest, jsdom)
+npm test                    # 40 unit and mount tests (Vitest, jsdom)
 npm run build               # type check, the library (dist/), the standalone app (dist-standalone/)
 npm run build:preview       # one self-contained page: preview/resolution-workbench.html
 npm run e2e                 # browser check of the two builds above, with accessibility scans

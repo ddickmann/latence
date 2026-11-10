@@ -17,7 +17,7 @@ own, at a path it did not choose, with a host's chrome and a host's own button.
 | `@carbon/react` | 1.92.0 |
 | `@carbon/icons-react` | 11.90.0 (any `^11.64.0`) |
 
-They are peer dependencies. The library build (`dist/resolution-workbench.js`, 97 kB) leaves
+They are peer dependencies. The library build (`dist/resolution-workbench.js`, 101 kB) leaves
 all of them out, so the host's copies are the only ones on the page.
 
 ## The mount, in five edits
@@ -71,7 +71,8 @@ route alone and take the seams one at a time.
 
 `useCrumbs` and `useListKeys` are called as hooks, so pass the host's hooks themselves and
 keep them the same functions for the life of the mount. The decision keys (`A`, `R`, `U`,
-`Space`, and `M` and `S` for the whole group) are always the workbench's own; they are ignored while a person types in a field and
+`Space`, `Y` for the suggestion, and `M` and `S` for the whole group) are always the
+workbench's own; they are ignored while a person types in a field and
 while a modifier key is held.
 
 The control props are deliberately small (`src/host.ts`): `Button` takes `kind`
@@ -137,7 +138,9 @@ for its own service: the review state in Delta (ADR-0072) behind a small API, or
 backend-for-frontend. The interfaces are asynchronous throughout for that reason.
 `decideGroup` is one call on purpose: a service appends the group record and all its pair
 decisions in one transaction, under one batch id, and `withdrawBatch` appends the withdrawals
-for what still stands. The rules for which pairs a group decision touches are in
+for what still stands. A review item may carry a `suggestion` and the queue's `meta` a
+`suggester` summary (`src/types.ts`); a source without suggestions leaves both out and the
+card does not appear. The rules for which pairs a group decision touches are in
 `src/groupActions.ts` (`planMerge`, `planSplit`), pure functions a service can port or call. Two things a
 real source has to add that the static one does not need: paging of the queue, and the signed-in
 person as the actor on each decision (the static source is given a fixed one).

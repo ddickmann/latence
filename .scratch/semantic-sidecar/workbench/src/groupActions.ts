@@ -61,6 +61,11 @@ export interface GroupPlan {
   separatesAccepted: [string, string][];
 }
 
+/** What the pair's suggestion said, to be recorded with the decision; nothing when it had none. */
+export function suggested(item: ReviewItem): { suggested?: "same" | "different" } {
+  return item.suggestion == null ? {} : { suggested: item.suggestion.verdict };
+}
+
 function itemsOf(group: ReviewGroup, items: ReadonlyMap<string, ReviewItem>): ReviewItem[] {
   return group.items.map((id) => items.get(id)).filter((i): i is ReviewItem => i !== undefined);
 }
@@ -70,7 +75,7 @@ export function planMerge(group: ReviewGroup, items: ReadonlyMap<string, ReviewI
   const plan: GroupPlan = { decisions: [], kept: 0, disagree: [], separatesAccepted: [] };
   for (const item of itemsOf(group, items)) {
     const existing = decisions.get(item.id);
-    if (existing === undefined) plan.decisions.push({ item: item.id, verdict: "same" });
+    if (existing === undefined) plan.decisions.push({ item: item.id, verdict: "same", ...suggested(item) });
     else {
       plan.kept += 1;
       if (existing.verdict !== "same") plan.disagree.push(item.id);
@@ -108,7 +113,9 @@ export function planSplit(
     const same = together(item.left.unique_id, item.right.unique_id);
     const existing = decisions.get(item.id);
     if (existing === undefined) {
-      plan.decisions.push(same ? { item: item.id, verdict: "same" } : { item: item.id, verdict: "different", reason: "group_split" });
+      plan.decisions.push(
+        same ? { item: item.id, verdict: "same", ...suggested(item) } : { item: item.id, verdict: "different", reason: "group_split", ...suggested(item) },
+      );
     } else {
       plan.kept += 1;
       if (existing.verdict !== (same ? "same" : "different")) plan.disagree.push(item.id);

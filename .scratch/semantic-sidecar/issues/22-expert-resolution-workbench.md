@@ -99,6 +99,13 @@ AI suggestions with a rationale; rule proposals from a decision; acting on the o
 split records against machine-accepted pairs; conflict items; audit of auto-rejects with
 precision intervals; four-eyes approval; version certification; reviewer agreement.
 
+**Added after the answer (2026-11-10, third cut): a suggestion card.** Each review pair can
+carry a suggested verdict with its grounds and a measured record, taken with one key; every
+decision records what the suggestion said. The suggestions come from the export, learned from
+labelled review pairs; no language model is involved. On the synthetic sample they match the
+truth for 96 of 100 pairs out of sample, against 70 of 100 for "always the same"; real data
+will be harder. Still not covered: a language model's rationale, and rule proposals.
+
 **Checked on the second cut:** 38 unit and mount tests; 106 browser checks on the built pages
 at phone and desktop width in light and dark, including WCAG 2.2 AA rule scans. **Not
 checked:** a mount in a real host.

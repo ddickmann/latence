@@ -6,9 +6,10 @@ import { Link, useNavigate } from "react-router";
 
 import type { GraphDataSource, ReviewDataSource } from "../dataSource";
 import { nameOf, path } from "../format";
+import { suggested } from "../groupActions";
 import { useHost } from "../host";
 import { actionFor, isTyping, onControl, type KeyAction } from "../keys";
-import { historyOf, inForce, latestIntent, pace, standing, tally } from "../ledger";
+import { agreement, historyOf, inForce, latestIntent, pace, standing, tally } from "../ledger";
 import { DEFAULT_FILTER, nextOpen, order, step, systemsOf, visibleGroups, type QueueFilter } from "../queue";
 import type { Decision, ReviewItem, Verdict } from "../types";
 import type { ReviewState } from "../useReview";
@@ -53,7 +54,7 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
 
   const record = async (target: ReviewItem, verdict: Verdict, extra: { reason?: string; note?: string } = {}) => {
     try {
-      const decision = await props.state.decide({ item: target.id, verdict, ...extra });
+      const decision = await props.state.decide({ item: target.id, verdict, ...extra, ...suggested(target) });
       chrome.notify({ tone: "positive", title: t(`notice.${verdict}`), detail: `${nameOf(target.left)} · ${nameOf(target.right)}` });
       chrome.recount();
       const after = new Map(decisions).set(target.id, decision);
@@ -85,6 +86,14 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
       return;
     }
     const existing = decisions.get(item.id);
+    if (action === "take") {
+      // The suggestion as it stands: one key, and "different" needs no reason of its own.
+      const verdict = item.suggestion?.verdict;
+      if (verdict === undefined || existing?.verdict === verdict) return;
+      if (existing !== undefined) setSheet({ kind: "decide", verdict, replacing: existing });
+      else void record(item, verdict, verdict === "different" ? { reason: "as_suggested" } : {});
+      return;
+    }
     if (existing?.verdict === action) return;
     if (action === "different" || existing !== undefined) setSheet({ kind: "decide", verdict: action, replacing: existing });
     else void record(item, action);
@@ -158,6 +167,7 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
         open={counts.open}
         tally={tally(ledger.decisions)}
         pace={pace(ledger.decisions, new Date())}
+        agreement={queue.meta.suggester?.available === true ? agreement(ledger.decisions) : null}
         onAudit={() => void props.source.loadAudit().then((audit) => setSheet({ kind: "audit", items: audit }))}
       />
       <div className="rw-panes">
@@ -180,7 +190,7 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
               <Link className="rw-link" to={path(base, "review")} data-testid="back-to-queue"><ChevronLeft size={16} aria-hidden /> {t("review.back")}</Link>
               {position >= 0 && <span className="rw-muted rw-num">{t("review.of", { n: position + 1, total: ids.length })}</span>}
             </nav>
-            <EvidencePane item={item} group={group} meta={queue.meta} decisions={decisions} graph={props.graph} />
+            <EvidencePane item={item} group={group} meta={queue.meta} decisions={decisions} graph={props.graph} onTake={() => act("take")} />
             <DecisionPane
               item={item}
               group={group}

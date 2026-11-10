@@ -239,6 +239,21 @@
   b { font-size: 16px; line-height: 20px; font-weight: 600; color: var(--rw-text); }
 }
 
+.rw-suggest {
+  background: var(--rw-layer); border-inline-start: 3px solid var(--rw-border-strong);
+  display: flex; flex-direction: column; gap: 8px;
+  > h3 { margin: 0; }
+  &--same { border-inline-start-color: var(--rw-for); }
+  &--different { border-inline-start-color: var(--rw-against); }
+  p { max-inline-size: 68ch; }
+  .rw-note { margin: 0; }
+  .rw-intent { margin: 0; }
+}
+.rw-suggest-verdict .rw-verdict { font-size: 16px; line-height: 20px; font-weight: 600; }
+.rw-suggest-conditions {
+  display: flex; flex-direction: column; gap: 2px;
+  li { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 8px; }
+}
 .rw-why { display: flex; flex-direction: column; gap: 6px; }
 .rw-why-line {
   display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 8px; padding-inline-start: 10px; border-inline-start: 3px solid var(--rw-border-strong);
@@ -505,6 +520,7 @@
   .rw-keys, .rw-sheet-actions .rw-kbd { display: none; }
   .rw-cluster { grid-template-columns: minmax(0, 1fr); }
   .rw-why-line { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rw-suggest-conditions li { grid-template-columns: 124px minmax(0, 1fr); }
 }
 
 // ---------- A desk: three panes in one window, each scrolling on its own ----------

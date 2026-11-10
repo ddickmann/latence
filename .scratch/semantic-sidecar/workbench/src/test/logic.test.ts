@@ -5,7 +5,7 @@ import { bridge, explain, lean, markShared } from "../explain";
 import { layers, layoutFocus, layoutSchema } from "../graphLayout";
 import { translator } from "../i18n";
 import { actionFor } from "../keys";
-import { historyOf, inForce, pace, tally } from "../ledger";
+import { agreement, historyOf, inForce, pace, tally } from "../ledger";
 import { DEFAULT_FILTER, hasConflict, nextOpen, order, step, visibleGroups } from "../queue";
 import type { Decision, ReviewGroup } from "../types";
 import { graphExport, reviewExport } from "./fixtures";
@@ -21,6 +21,19 @@ describe("the decision log", () => {
     expect(inForce(log).get("r1~r2")?.verdict).toBe("different");
     expect(historyOf(log, "r1~r2").map((d) => d.verdict)).toEqual(["same", "different"]);
     expect(tally(log)).toEqual({ same: 0, different: 1, unsure: 1 });
+  });
+
+  it("counts how often decisions in force went with the suggestion", () => {
+    const log: Decision[] = [
+      { ...decision("a", "same", 0), suggested: "same" },
+      { ...decision("b", "same", 1), suggested: "different" },
+      { ...decision("c", "unsure", 2), suggested: "same" }, // neither agrees nor disagrees
+      decision("d", "same", 3), // the pair had no suggestion
+      { ...decision("b", "different", 4), suggested: "different" }, // changed mind: the later one counts
+    ];
+    expect(agreement(log)).toEqual({ agreed: 2, of: 2 });
+    expect(agreement([{ ...decision("a", "different", 0), suggested: "same" }])).toEqual({ agreed: 0, of: 1 });
+    expect(agreement([])).toEqual({ agreed: 0, of: 0 });
   });
 
   it("says nothing about pace until there is enough to go on", () => {

@@ -28,6 +28,18 @@ function item(left: SourceRecord, right: SourceRecord, group: string, probabilit
   };
 }
 
+const DIFFERENT = {
+  verdict: "different" as const, like_this: 44, like_this_agree: 41,
+  conditions: [
+    { comparison: "industry", label: "Industry", levels: [0], text: "differs" },
+    { comparison: "name", label: "Name", levels: [0, 1], text: "not the same" },
+  ],
+};
+const SAME = {
+  verdict: "same" as const, like_this: 30, like_this_agree: 29,
+  conditions: [{ comparison: "name", label: "Name", levels: [1], text: "agrees" }],
+};
+
 const r1 = record("r1", "erp", "Acme Capital Inc", "Leeds", "CAP");
 const r2 = record("r2", "crm", "Acme Consulting Inc", "Leeds", "CON");
 const r3 = record("r3", "billing", "ACME CAPITAL", "Leeds", "CAP");
@@ -43,6 +55,7 @@ export const reviewExport: ReviewExport = {
     review_groups_total: 2, review_groups_exported: 2,
     record_fields: ["unique_id", "source_system", "name", "city", "postcode", "country", "industry", "reg_id"],
     comparisons: [{ comparison: "name", label: "name", field: "name" }, { comparison: "city", label: "city", field: "city" }, { comparison: "industry", label: "industry", field: "industry" }],
+    suggester: { available: true, labelled_pairs: 300, out_of_sample_right: 288, out_of_sample_share: 0.96, always_same_share: 0.7, labels: "synthetic" },
   },
   groups: [
     {
@@ -63,9 +76,10 @@ export const reviewExport: ReviewExport = {
     },
   ],
   items: [
-    item(r1, r2, "r1", 0.55, { name: 2, city: 4, industry: -1.4 }),
-    item(r2, r3, "r1", 0.5, { name: 1.5, city: 4, industry: -1.4 }),
-    item(r4, r5, "r4", 0.57, { name: 6, city: null, industry: 2 }),
+    { ...item(r1, r2, "r1", 0.55, { name: 2, city: 4, industry: -1.4 }), suggestion: DIFFERENT },
+    // No suggestion for this one: a source may have none to give.
+    { ...item(r2, r3, "r1", 0.5, { name: 1.5, city: 4, industry: -1.4 }), suggestion: null },
+    { ...item(r4, r5, "r4", 0.57, { name: 6, city: null, industry: 2 }), suggestion: SAME },
   ],
   audit: [{ ...item(r1, r3, "r1", 0.97, { name: 8, city: 4, industry: 2 }), band: "accept", group: null }],
 };

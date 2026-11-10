@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from er import plain_closure
+from suggest import suggest
 
 SCHEMA = "review-export/1"
 RECORD_FIELDS = {
@@ -137,10 +138,16 @@ def build_review_export(
             "evidence": ev,
             "why_unsure": _why_unsure(ev, float(p[i])),
             "vetoed": bool(veto[i]),
+            "suggestion": suggestion_of.get(i),
             "gold_same": bool(y[i]),
         }
 
     rev = np.where(band == "review")[0]
+    # A suggestion per review pair, learned from the labels of the other half of the band.
+    scored = [(int(i), pred.loc[(ls[i], rs[i])]) for i in rev if (ls[i], rs[i]) in pred.index]
+    gammas = np.array([[int(row[f"gamma_{c}"]) for c in comps] for _i, row in scored], dtype=int).reshape(len(scored), len(comps))
+    suggestions, suggester = suggest(gammas, np.array([int(y[i]) for i, _row in scored], dtype=int), comps, LABEL_OF, labels, seed)
+    suggestion_of = {i: s for (i, _row), s in zip(scored, suggestions)}
     group_of = plain_closure(set(ls[rev]) | set(rs[rev]), zip(ls[rev], rs[rev])) if len(rev) else {}
     by_group: dict[str, list[int]] = defaultdict(list)
     for i in rev:
@@ -192,6 +199,7 @@ def build_review_export(
             "review_groups_total": len(by_group),
             "review_groups_exported": len(groups),
             "record_fields": fields,
+            "suggester": suggester,
             "comparisons": [{"comparison": c, "label": LABEL_OF.get(c, c), "field": FIELD_OF.get(c, c)} for c in comps],
         },
         "groups": groups,
