@@ -1,5 +1,5 @@
 // One key per action. Pure, so the map is tested without a DOM and a host can show it.
-export type KeyAction = "same" | "different" | "unsure" | "skip" | "next" | "previous" | "close";
+export type KeyAction = "same" | "different" | "unsure" | "skip" | "merge" | "split" | "next" | "previous" | "close";
 
 export interface KeyLike {
   key: string;
@@ -15,6 +15,8 @@ export const KEYS: Record<KeyAction, string> = {
   different: "R",
   unsure: "U",
   skip: "Space",
+  merge: "M",
+  split: "S",
   next: "J",
   previous: "K",
   close: "Esc",
@@ -30,6 +32,8 @@ export function actionFor(event: KeyLike): KeyAction | null {
     case "r": return "different";
     case "u": return "unsure";
     case " ": return "skip";
+    case "m": return "merge";
+    case "s": return "split";
     case "j": return "next";
     case "k": return "previous";
     default: return null;

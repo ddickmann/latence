@@ -1,8 +1,10 @@
 // The seam to wherever review items and decisions live. The workbench only ever talks to these
 // two interfaces; the static implementations below serve an export file and keep decisions in
 // the browser, which is all a prototype needs. A deployment puts its own service behind them.
+import { planMerge, planSplit } from "./groupActions";
+import { inForce, standing } from "./ledger";
 import type {
-  Actor, Decision, DecisionInput, GraphEntity, GraphExport, GraphReferenceNode, GraphSchema, GroupIntent,
+  Actor, Decision, DecisionInput, GraphEntity, GraphExport, GraphReferenceNode, GraphSchema, GroupInput, GroupIntent,
   Ledger, NeighbourGroup, NodeDetail, NodeRef, NodeType, ReviewExport, ReviewGroup, ReviewItem, ReviewMeta,
 } from "./types";
 
@@ -19,8 +21,18 @@ export interface ReviewDataSource {
   loadLedger(): Promise<Ledger>;
   /** Append a decision. Deciding an item again supersedes; nothing is ever edited. */
   decide(input: DecisionInput): Promise<Decision>;
-  /** Record what a reviewer says about a whole group. */
-  proposeGroup(input: { group: string; intent: "merge" | "split"; note?: string }): Promise<GroupIntent>;
+  /**
+   * Decide a whole group in one step: "merge" calls every open pair the same; "split" calls
+   * open pairs inside a part the same and open pairs across parts different. Pairs that already
+   * carry a decision are left alone. One call, so a service can apply it in one transaction;
+   * it returns the group record and the pair decisions it appended, all sharing one batch id.
+   */
+  decideGroup(input: GroupInput): Promise<{ intent: GroupIntent; decisions: Decision[] }>;
+  /**
+   * Take a group action back: append a withdrawal for every pair whose decision from that
+   * batch is still in force. Pairs decided again since are left alone.
+   */
+  withdrawBatch(batch: string): Promise<Decision[]>;
   /** A sample of pairs the machine accepted on its own, for a reviewer to audit. */
   loadAudit(): Promise<ReviewItem[]>;
 }
@@ -124,11 +136,38 @@ export class StaticReviewSource implements ReviewDataSource {
     return Promise.resolve(decision);
   }
 
-  proposeGroup(input: { group: string; intent: "merge" | "split"; note?: string }): Promise<GroupIntent> {
-    const intent: GroupIntent = { ...input, actor: this.options.actor, at: this.now().toISOString() };
+  decideGroup(input: GroupInput): Promise<{ intent: GroupIntent; decisions: Decision[] }> {
+    const group = this.data.groups.find((g) => g.id === input.group);
+    if (group === undefined) return Promise.reject(new Error(`unknown group ${input.group}`));
     const ledger = this.read();
-    this.write({ ...ledger, intents: [...ledger.intents, intent] });
-    return Promise.resolve(intent);
+    const items = new Map(this.data.items.map((i) => [i.id, i] as const));
+    const current = inForce(ledger.decisions);
+    let plan;
+    try {
+      plan = input.intent === "merge" ? planMerge(group, items, current) : planSplit(group, items, current, input.parts ?? []);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const at = this.now().toISOString();
+    const batch = `${group.id}@${at}`;
+    const decisions: Decision[] = plan.decisions.map((d) => ({ ...d, actor: this.options.actor, at, batch }));
+    const intent: GroupIntent = {
+      group: group.id, intent: input.intent, actor: this.options.actor, at, batch, decided: decisions.length,
+      ...(input.note === undefined ? {} : { note: input.note }),
+      ...(input.intent === "split" ? { parts: (input.parts ?? []).map((p) => [...p]), separates_accepted: plan.separatesAccepted } : {}),
+    };
+    this.write({ decisions: [...ledger.decisions, ...decisions], intents: [...ledger.intents, intent] });
+    return Promise.resolve({ intent, decisions });
+  }
+
+  withdrawBatch(batch: string): Promise<Decision[]> {
+    const ledger = this.read();
+    const at = this.now().toISOString();
+    const withdrawals: Decision[] = standing(ledger.decisions, batch).map((d) => ({
+      item: d.item, verdict: d.verdict, actor: this.options.actor, at, batch, withdraws: true,
+    }));
+    this.write({ ...ledger, decisions: [...ledger.decisions, ...withdrawals] });
+    return Promise.resolve(withdrawals);
   }
 
   loadAudit(): Promise<ReviewItem[]> {

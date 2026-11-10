@@ -104,10 +104,50 @@ async function run(browser, base, name, viewport, colorScheme) {
   await moved(page, third);
   check(Number(await page.textContent('[data-testid="qa-decided"]')) === 2, `${tag} Space skips without recording`);
 
+  // A whole group at once: merge with M, then undo from the notice.
+  const before = Number(await page.textContent('[data-testid="qa-decided"]'));
+  const fourth = page.url();
+  await page.keyboard.press("m");
+  await page.waitForSelector('[data-testid="merge-sheet"]');
+  await scan(page, `${name} merge sheet`);
+  await shot("3b-merge");
+  const merging = Number((await page.textContent('[data-testid="merge-sheet"] [data-testid="sheet-confirm"]')).match(/\d+/)[0]);
+  await page.keyboard.press("Control+Enter");
+  await page.waitForSelector('[data-testid="notice-action"]');
+  check(merging > 0 && Number(await page.textContent('[data-testid="qa-decided"]')) === before + merging, `${tag} M decides the group's ${merging} open pairs as one`);
+  await page.locator('[data-testid="notice-action"]').click();
+  await page.waitForFunction((n) => Number(document.querySelector('[data-testid="qa-decided"]').textContent) === n, before);
+  check(true, `${tag} undo reopens them`);
+
+  // Split with S: move one record to another letter, then record.
+  if (page.url() !== fourth) {
+    await page.goto(fourth);
+    await page.waitForSelector('[data-testid="evidence"]');
+  }
+  await page.keyboard.press("s");
+  await page.waitForSelector('[data-testid="split-sheet"]');
+  const firstB = page.locator('[data-testid="split-sheet"] [data-testid$="-B"]').first();
+  const firstA = page.locator('[data-testid="split-sheet"] [data-testid$="-A"]').first();
+  await ((await firstB.getAttribute("aria-pressed")) === "true" ? firstA : firstB).click();
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${tag} the split dialog does not scroll sideways`);
+  await scan(page, `${name} split sheet`);
+  await shot("3c-split");
+  const splitting = await page.locator('[data-testid="split-sheet"] [data-testid="sheet-confirm"]');
+  if (await splitting.isDisabled()) {
+    await page.keyboard.press("Escape");
+    check(true, `${tag} a split with one letter cannot be recorded`);
+  } else {
+    const n = Number((await splitting.textContent()).match(/\d+/)[0]);
+    await splitting.click();
+    await page.waitForFunction((want) => Number(document.querySelector('[data-testid="qa-decided"]').textContent) === want, before + n);
+    check(true, `${tag} S records a split of ${n} pairs`);
+  }
+
   // The decisions survive a reload.
+  const decidedNow = Number(await page.textContent('[data-testid="qa-decided"]'));
   await page.reload();
   await page.waitForSelector('[data-testid="evidence"]');
-  check(Number(await page.textContent('[data-testid="qa-decided"]')) === 2, `${tag} decisions survive a reload`);
+  check(Number(await page.textContent('[data-testid="qa-decided"]')) === decidedNow, `${tag} decisions survive a reload`);
 
   // The audit of auto-accepts.
   await page.goto(`${base}/#/resolution/review`);

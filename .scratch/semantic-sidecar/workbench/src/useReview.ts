@@ -2,14 +2,15 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { Queue, ReviewDataSource } from "./dataSource";
-import type { Decision, DecisionInput, GroupIntent, Ledger } from "./types";
+import type { Decision, DecisionInput, GroupInput, GroupIntent, Ledger } from "./types";
 
 export interface ReviewState {
   queue: Queue | null;
   ledger: Ledger;
   failed: boolean;
   decide(input: DecisionInput): Promise<Decision>;
-  propose(input: { group: string; intent: "merge" | "split"; note?: string }): Promise<GroupIntent>;
+  decideGroup(input: GroupInput): Promise<{ intent: GroupIntent; decisions: Decision[] }>;
+  withdrawBatch(batch: string): Promise<Decision[]>;
 }
 
 export function useReview(source: ReviewDataSource): ReviewState {
@@ -39,11 +40,17 @@ export function useReview(source: ReviewDataSource): ReviewState {
     return decision;
   }, [source]);
 
-  const propose = useCallback(async (input: { group: string; intent: "merge" | "split"; note?: string }) => {
-    const intent = await source.proposeGroup(input);
-    setLedger((l) => ({ ...l, intents: [...l.intents, intent] }));
-    return intent;
+  const decideGroup = useCallback(async (input: GroupInput) => {
+    const done = await source.decideGroup(input);
+    setLedger((l) => ({ decisions: [...l.decisions, ...done.decisions], intents: [...l.intents, done.intent] }));
+    return done;
   }, [source]);
 
-  return { queue, ledger, failed, decide, propose };
+  const withdrawBatch = useCallback(async (batch: string) => {
+    const withdrawals = await source.withdrawBatch(batch);
+    setLedger((l) => ({ ...l, decisions: [...l.decisions, ...withdrawals] }));
+    return withdrawals;
+  }, [source]);
+
+  return { queue, ledger, failed, decide, decideGroup, withdrawBatch };
 }

@@ -23,8 +23,14 @@ Synthetic data only. The sample comes from the spike's 12,004-record synthetic e
   through the queue, `Esc` back. "Different" asks for a reason; changing a recorded decision
   asks for a note; both record with `⌘↵` / `Ctrl+Enter`. The log is append-only, with who and
   when on every entry.
-- **Group statements:** "all one organisation" and "several organisations mixed" are recorded
-  as statements. They do not decide pairs in this cut.
+- **The whole group at once:** `M` decides every open pair of the group as the same. `S`
+  splits it: each record gets a letter, records with the same letter are one organisation, and
+  the open pairs follow (same inside a letter, different across). The split starts from the
+  links the machine accepted. A pair you already decided is never replaced, and the dialog
+  says how many are left alone or disagree. Pairs the machine accepted that a split separates
+  are not in the review queue, so they are recorded with the split as objections.
+- **Undo:** a group decision can be taken back from the notice or from any pair it decided.
+  The log stays append-only: undo adds a withdrawal entry per pair, and the pair is open again.
 - **Numbers:** open, decided, pace, the size of the review band, and a read-only sample of the
   pairs the machine accepted on its own.
 
@@ -41,14 +47,15 @@ Synthetic data only. The sample comes from the spike's 12,004-record synthetic e
   straight into the review of the pair. A record in the evidence links back to its organisation.
 
 Not in this cut: AI suggestions, turning a decision into a rule, four-eyes approval, version
-certification, reviewer agreement, and applying group statements.
+certification, reviewer agreement, and acting on the objections a split records against
+machine-accepted pairs.
 
 ## Run it
 
 ```bash
 npm ci
 npm run dev                 # the standalone app with hot reload
-npm test                    # 26 unit and mount tests (Vitest, jsdom)
+npm test                    # 38 unit and mount tests (Vitest, jsdom)
 npm run build               # type check, the library (dist/), the standalone app (dist-standalone/)
 npm run build:preview       # one self-contained page: preview/resolution-workbench.html
 npm run e2e                 # browser check of the two builds above, with accessibility scans
@@ -81,7 +88,7 @@ Copy the two files, minified, to `src/standalone/sample/review-export.json` and
 | `src/ResolutionWorkbench.tsx` | the component; reads its place from the router it is mounted in |
 | `src/host.ts` | the seams to the application around it: chrome, controls, translation |
 | `src/dataSource.ts` | the two data interfaces and their static implementations |
-| `src/ledger.ts`, `queue.ts`, `explain.ts`, `keys.ts`, `graphLayout.ts` | the logic, free of React and tested on its own |
+| `src/ledger.ts`, `queue.ts`, `explain.ts`, `groupActions.ts`, `keys.ts`, `graphLayout.ts` | the logic, free of React and tested on its own |
 | `src/components/` | the screens |
 | `src/styles/workbench.scss` | all styles, on `--rw-*` variables, classes prefixed `rw-` |
 | `src/messages/en.json` | every string |

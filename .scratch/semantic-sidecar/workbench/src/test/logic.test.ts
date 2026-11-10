@@ -113,13 +113,11 @@ describe("the static review source", () => {
     const source = new StaticReviewSource(reviewExport, { actor, store, now: () => new Date(Date.UTC(2026, 0, 1, 9, minute++)) });
     await source.decide({ item: "r1~r2", verdict: "same" });
     await source.decide({ item: "r1~r2", verdict: "different", reason: "business", note: "two firms" });
-    await source.proposeGroup({ group: "r1", intent: "split" });
     const ledger = await source.loadLedger();
     expect(ledger.decisions).toEqual([
       { item: "r1~r2", verdict: "same", actor, at: at(0) },
       { item: "r1~r2", verdict: "different", reason: "business", note: "two firms", actor, at: at(1) },
     ]);
-    expect(ledger.intents).toEqual([{ group: "r1", intent: "split", actor, at: at(2) }]);
     // A second source over the same store sees the same log: it survives a reload.
     expect((await new StaticReviewSource(reviewExport, { actor, store }).loadLedger()).decisions).toHaveLength(2);
     await expect(source.decide({ item: "nope", verdict: "same" })).rejects.toThrow("unknown item");

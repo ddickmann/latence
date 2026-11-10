@@ -18,6 +18,8 @@ export interface Notice {
   tone: "positive" | "caution" | "critical" | "info";
   title: string;
   detail?: string;
+  /** At most one thing a person can do about it, such as undo. */
+  action?: { label: string; run: () => void };
 }
 
 /**

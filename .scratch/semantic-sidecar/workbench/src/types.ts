@@ -96,6 +96,13 @@ export interface Decision {
   actor: Actor;
   /** ISO 8601, UTC. */
   at: string;
+  /** Set when a group action made this entry: the id shared by every entry of that action. */
+  batch?: string;
+  /**
+   * True for an entry that takes a decision back: the pair is open again. `verdict` then names
+   * the verdict that was withdrawn. The entry it withdraws stays in the log.
+   */
+  withdraws?: boolean;
 }
 
 export interface DecisionInput {
@@ -105,13 +112,36 @@ export interface DecisionInput {
   note?: string;
 }
 
-/** A reviewer's statement about a whole group. Recorded; applying it is the engine's job. */
+/**
+ * A reviewer's decision about a whole group. It decides the group's open pairs (each as its own
+ * log entry carrying `batch`), and this record says what was meant.
+ */
 export interface GroupIntent {
   group: string;
   intent: "merge" | "split";
   note?: string;
   actor: Actor;
   at: string;
+  /** The id on every pair decision this action made. */
+  batch: string;
+  /** How many pairs it decided. */
+  decided: number;
+  /** Split only: the records of each part. */
+  parts?: string[][];
+  /**
+   * Split only: pairs the machine accepted on its own that this split puts in different parts.
+   * They are not in the review queue, so they are recorded here as objections for whoever
+   * applies the split.
+   */
+  separates_accepted?: [string, string][];
+}
+
+export interface GroupInput {
+  group: string;
+  intent: "merge" | "split";
+  /** Split only: every record of the group in exactly one part. */
+  parts?: string[][];
+  note?: string;
 }
 
 export interface Ledger {

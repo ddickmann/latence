@@ -17,7 +17,7 @@ own, at a path it did not choose, with a host's chrome and a host's own button.
 | `@carbon/react` | 1.92.0 |
 | `@carbon/icons-react` | 11.90.0 (any `^11.64.0`) |
 
-They are peer dependencies. The library build (`dist/resolution-workbench.js`, 84 kB) leaves
+They are peer dependencies. The library build (`dist/resolution-workbench.js`, 97 kB) leaves
 all of them out, so the host's copies are the only ones on the page.
 
 ## The mount, in five edits
@@ -65,13 +65,13 @@ route alone and take the seams one at a time.
 | `chrome.useCrumbs(crumbs)` | on every render, with `{ label, to? }[]` | no breadcrumb |
 | `chrome.useListKeys({ next, previous, close })` | on every render; the host owns J, K and Esc and calls these | the workbench listens for J, K and Esc on the window |
 | `chrome.recount()` | after each recorded decision | nothing |
-| `chrome.notify({ tone, title, detail? })` | after each recorded decision or failure | the workbench shows its own notice |
+| `chrome.notify({ tone, title, detail?, action? })` | after each recorded decision or failure; a group decision passes an `action` (`{ label, run }`) for undo | the workbench shows its own notice |
 | `controls.Button` etc. | wherever it needs one of the five controls | Carbon's components, unstyled beyond Carbon |
 | `translate(key, vars)` | for every string | the bundled English |
 
 `useCrumbs` and `useListKeys` are called as hooks, so pass the host's hooks themselves and
 keep them the same functions for the life of the mount. The decision keys (`A`, `R`, `U`,
-`Space`) are always the workbench's own; they are ignored while a person types in a field and
+`Space`, and `M` and `S` for the whole group) are always the workbench's own; they are ignored while a person types in a field and
 while a modifier key is held.
 
 The control props are deliberately small (`src/host.ts`): `Button` takes `kind`
@@ -127,13 +127,18 @@ panes separately. Set `--rw-height` instead if the host gives it a box of its ow
 
 The workbench talks to two interfaces (`src/dataSource.ts`):
 
-- `ReviewDataSource`: `loadQueue`, `loadLedger`, `decide`, `proposeGroup`, `loadAudit`.
+- `ReviewDataSource`: `loadQueue`, `loadLedger`, `decide`, `decideGroup`, `withdrawBatch`,
+  `loadAudit`.
 - `GraphDataSource`: `loadSchema`, `loadNode`, `search`, `listInstances`, `entityOfRecord`.
 
 The prototype ships `StaticReviewSource` and `StaticGraphSource`, which serve an export file
 from memory and keep the decision log in the browser. A deployment replaces them with a client
 for its own service: the review state in Delta (ADR-0072) behind a small API, or a host's
-backend-for-frontend. The interfaces are asynchronous throughout for that reason. Two things a
+backend-for-frontend. The interfaces are asynchronous throughout for that reason.
+`decideGroup` is one call on purpose: a service appends the group record and all its pair
+decisions in one transaction, under one batch id, and `withdrawBatch` appends the withdrawals
+for what still stands. The rules for which pairs a group decision touches are in
+`src/groupActions.ts` (`planMerge`, `planSplit`), pure functions a service can port or call. Two things a
 real source has to add that the static one does not need: paging of the queue, and the signed-in
 person as the actor on each decision (the static source is given a fixed one).
 

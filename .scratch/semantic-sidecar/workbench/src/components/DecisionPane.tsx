@@ -23,23 +23,30 @@ export function DecisionPane(props: {
   item: ReviewItem;
   group: ReviewGroup | undefined;
   history: Decision[];
+  /** The latest decision about the whole group, and how many of its pair decisions still stand. */
   intent: GroupIntent | undefined;
-  onIntent: (intent: "merge" | "split") => void;
+  standing: number;
+  onGroup: (intent: "merge" | "split") => void;
+  onUndo: (batch: string) => void;
 }) {
   const { t, locale, controls: { Button } } = useHost();
-  const inForce = props.history[props.history.length - 1];
+  const last = props.history[props.history.length - 1];
+  const inForce = last?.withdraws === true ? undefined : last;
   return (
     <aside className="rw-aside" aria-label={t("decide.recordTitle")}>
       <section className="rw-section">
         <h3>{t("decide.recordTitle")}</h3>
-        {inForce === undefined ? (
-          <p className="rw-muted" data-testid="no-decision">{t("decide.none")}</p>
-        ) : (
+        {inForce === undefined && <p className="rw-muted" data-testid="no-decision">{t("decide.none")}</p>}
+        {props.history.length > 0 && (
           <ol className="rw-history" data-testid="history">
             {[...props.history].reverse().map((d, i) => (
-              <li key={d.at + String(i)} className={i === 0 ? "rw-history-now" : "rw-history-old"}>
-                <VerdictMark verdict={d.verdict} />
-                <span className="rw-muted">{d.actor.name} · {clock(d.at, locale)}{i > 0 ? ` · ${t("decide.superseded")}` : ""}</span>
+              <li key={d.at + String(i)} className={i === 0 && d.withdraws !== true ? "rw-history-now" : "rw-history-old"}>
+                <span className="rw-history-what">
+                  <VerdictMark verdict={d.verdict} />
+                  {d.withdraws === true && <span className="rw-tag">{t("decide.withdrawn")}</span>}
+                  {d.batch !== undefined && d.withdraws !== true && <span className="rw-tag">{t("decide.byGroup")}</span>}
+                </span>
+                <span className="rw-muted">{d.actor.name} · {clock(d.at, locale)}{i > 0 && d.withdraws !== true ? ` · ${t("decide.superseded")}` : ""}</span>
                 {d.reason !== undefined && <span>{t(`reason.${d.reason}`)}</span>}
                 {d.note !== undefined && d.note !== "" && <span className="rw-quote">{d.note}</span>}
               </li>
@@ -50,17 +57,25 @@ export function DecisionPane(props: {
 
       {props.group !== undefined && (
         <section className="rw-section">
-          <h3>{t("intent.title")}</h3>
-          <p className="rw-muted">{t("intent.help", { count: props.group.records.length })}</p>
+          <h3>{t("group.title")}</h3>
+          <p className="rw-muted">{t("group.help", { count: props.group.records.length })}</p>
           <div className="rw-intent">
-            <Button kind="secondary" size="sm" onClick={() => props.onIntent("merge")} testId="intent-merge">{t("intent.merge")}</Button>
-            <Button kind="secondary" size="sm" onClick={() => props.onIntent("split")} testId="intent-split">{t("intent.split")}</Button>
+            <Button kind="secondary" size="sm" kbd={KEYS.merge} onClick={() => props.onGroup("merge")} testId="group-merge">{t("group.merge")}</Button>
+            <Button kind="secondary" size="sm" kbd={KEYS.split} onClick={() => props.onGroup("split")} testId="group-split">{t("group.split")}</Button>
           </div>
           {props.intent !== undefined && (
-            <p className="rw-note" data-testid="intent-recorded">
-              {t(`intent.recorded.${props.intent.intent}`)} · {props.intent.actor.name} · {clock(props.intent.at, locale)}
+            <div className="rw-note" data-testid="group-recorded">
+              <p>
+                {t(`group.recorded.${props.intent.intent}`, { count: props.intent.decided })} · {props.intent.actor.name} · {clock(props.intent.at, locale)}
+              </p>
+              {props.intent.separates_accepted !== undefined && props.intent.separates_accepted.length > 0 && (
+                <p>{t("group.recordedSeparates", { count: props.intent.separates_accepted.length })}</p>
+              )}
               {props.intent.note !== undefined && props.intent.note !== "" && <span className="rw-quote">{props.intent.note}</span>}
-            </p>
+              {props.standing > 0
+                ? <Button kind="quiet" size="sm" onClick={() => props.onUndo(props.intent?.batch ?? "")} testId="group-undo">{t("group.undo", { count: props.standing })}</Button>
+                : <p data-testid="group-undone">{t("group.undone")}</p>}
+            </div>
           )}
         </section>
       )}

@@ -8,7 +8,7 @@ import type { GraphDataSource, ReviewDataSource } from "../dataSource";
 import { nameOf, path } from "../format";
 import { useHost } from "../host";
 import { actionFor, isTyping, onControl, type KeyAction } from "../keys";
-import { historyOf, inForce, latestIntent, pace, tally } from "../ledger";
+import { historyOf, inForce, latestIntent, pace, standing, tally } from "../ledger";
 import { DEFAULT_FILTER, nextOpen, order, step, systemsOf, visibleGroups, type QueueFilter } from "../queue";
 import type { Decision, ReviewItem, Verdict } from "../types";
 import type { ReviewState } from "../useReview";
@@ -16,11 +16,11 @@ import { DecisionBar, DecisionPane } from "./DecisionPane";
 import { EvidencePane } from "./EvidencePane";
 import { QaStrip } from "./QaStrip";
 import { QueuePane } from "./QueuePane";
-import { AuditSheet, DecisionSheet, IntentSheet } from "./Sheets";
+import { AuditSheet, DecisionSheet, MergeSheet, SplitSheet } from "./Sheets";
 
 type SheetState =
   | { kind: "decide"; verdict: Verdict; replacing: Decision | undefined }
-  | { kind: "intent"; intent: "merge" | "split" }
+  | { kind: "group"; intent: "merge" | "split" }
   | { kind: "audit"; items: ReviewItem[] }
   | null;
 
@@ -80,10 +80,44 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
       return;
     }
     if (item === undefined) return;
+    if (action === "merge" || action === "split") {
+      if (group !== undefined) setSheet({ kind: "group", intent: action });
+      return;
+    }
     const existing = decisions.get(item.id);
     if (existing?.verdict === action) return;
     if (action === "different" || existing !== undefined) setSheet({ kind: "decide", verdict: action, replacing: existing });
     else void record(item, action);
+  };
+
+  const undo = async (batch: string) => {
+    try {
+      const withdrawn = await props.state.withdrawBatch(batch);
+      chrome.notify({ tone: "info", title: t("notice.undone", { count: withdrawn.length }) });
+      chrome.recount();
+    } catch {
+      chrome.notify({ tone: "critical", title: t("notice.failed") });
+    }
+  };
+
+  const decideGroup = async (intent: "merge" | "split", note: string, parts?: string[][]) => {
+    if (group === undefined || item === undefined) return;
+    try {
+      const done = await props.state.decideGroup({ group: group.id, intent, ...(parts === undefined ? {} : { parts }), ...(note === "" ? {} : { note }) });
+      const batch = done.intent.batch;
+      chrome.notify({
+        tone: "positive",
+        title: t(`group.recorded.${intent}`, { count: done.decisions.length }),
+        action: { label: t("group.undoShort"), run: () => void undo(batch) },
+      });
+      chrome.recount();
+      const after = new Map(decisions);
+      for (const d of done.decisions) after.set(d.item, d);
+      const next = nextOpen(ids, item.id, after);
+      if (next !== undefined && after.has(item.id)) open(next);
+    } catch {
+      chrome.notify({ tone: "critical", title: t("notice.failed") });
+    }
   };
 
   // The latest `act`, for listeners registered once.
@@ -116,6 +150,7 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
   if (queue === null) return <p className="rw-empty" aria-busy="true">{t("review.loading")}</p>;
 
   const position = props.item === undefined ? -1 : ids.indexOf(props.item);
+  const groupIntent = group === undefined ? undefined : latestIntent(ledger.intents, group.id);
   return (
     <div className={`rw-review${props.item === undefined ? "" : " rw-review--detail"}`}>
       <QaStrip
@@ -150,8 +185,10 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
               item={item}
               group={group}
               history={historyOf(ledger.decisions, item.id)}
-              intent={group === undefined ? undefined : latestIntent(ledger.intents, group.id)}
-              onIntent={(intent) => setSheet({ kind: "intent", intent })}
+              intent={groupIntent}
+              standing={groupIntent === undefined ? 0 : standing(ledger.decisions, groupIntent.batch).length}
+              onGroup={(intent) => setSheet({ kind: "group", intent })}
+              onUndo={(batch) => void undo(batch)}
             />
             <DecisionBar decision={decisions.get(item.id)} onAct={act} />
           </div>
@@ -171,17 +208,28 @@ export function ReviewScreen(props: { state: ReviewState; source: ReviewDataSour
           }}
         />
       )}
-      {sheet?.kind === "intent" && group !== undefined && (
-        <IntentSheet
-          intent={sheet.intent}
-          records={group.records.length}
+      {sheet?.kind === "group" && sheet.intent === "merge" && group !== undefined && (
+        <MergeSheet
+          group={group}
+          items={items}
+          decisions={decisions}
           onCancel={() => setSheet(null)}
           onConfirm={(note) => {
-            const intent = sheet.intent;
             setSheet(null);
-            void props.state.propose({ group: group.id, intent, ...(note === "" ? {} : { note }) }).then(() => {
-              chrome.notify({ tone: "positive", title: t(`intent.recorded.${intent}`) });
-            });
+            void decideGroup("merge", note);
+          }}
+        />
+      )}
+      {sheet?.kind === "group" && sheet.intent === "split" && group !== undefined && item !== undefined && (
+        <SplitSheet
+          group={group}
+          items={items}
+          decisions={decisions}
+          current={item}
+          onCancel={() => setSheet(null)}
+          onConfirm={(parts, note) => {
+            setSheet(null);
+            void decideGroup("split", note, parts);
           }}
         />
       )}

@@ -86,17 +86,21 @@
   -webkit-text-size-adjust: 100%;
 
   *, *::before, *::after { box-sizing: border-box; }
-  h2, h3, h4, p, ul, ol, dl, dd, figure, fieldset { margin: 0; padding: 0; }
-  ul, ol { list-style: none; }
-  fieldset { border: 0; min-inline-size: 0; }
-  table { border-collapse: collapse; inline-size: 100%; }
-  a { color: inherit; }
   :focus-visible { outline: 2px solid var(--rw-focus); outline-offset: -2px; }
-  h3 { font-size: 14px; line-height: 18px; font-weight: 600; }
-  h4 { font-size: 12px; line-height: 16px; font-weight: 400; color: var(--rw-text-muted); margin-block: 16px 4px; }
 }
 
-.rw-root .rw-sr {
+// The element reset carries no specificity, so every class below wins over it without help.
+:where(.rw-root) {
+  :where(h2, h3, h4, p, ul, ol, dl, dd, figure, fieldset) { margin: 0; padding: 0; }
+  :where(ul, ol) { list-style: none; }
+  :where(fieldset) { border: 0; min-inline-size: 0; }
+  :where(table) { border-collapse: collapse; inline-size: 100%; }
+  :where(a) { color: inherit; }
+  :where(h3) { font-size: 14px; line-height: 18px; font-weight: 600; }
+  :where(h4) { font-size: 12px; line-height: 16px; font-weight: 400; color: var(--rw-text-muted); margin-block: 16px 4px; }
+}
+
+.rw-sr {
   position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap; border: 0; padding: 0; margin: -1px;
 }
@@ -148,6 +152,11 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); font-size: 14px;
   span { font-size: 12px; line-height: 16px; opacity: 0.85; }
   &--critical { border-inline-start-color: var(--rw-negative); }
+  &--info { border-inline-start-color: var(--rw-border-strong); }
+}
+.rw-notice-action {
+  pointer-events: auto; align-self: flex-start; margin-block-start: 8px; min-block-size: 32px; padding: 0 12px; cursor: pointer;
+  font: inherit; font-weight: 600; color: inherit; background: none; border: 1px solid currentColor;
 }
 
 // ---------- Review: the strip of numbers ----------
@@ -279,7 +288,7 @@
   &--on circle { fill: var(--rw-text); stroke: var(--rw-text); }
   &--on text { fill: var(--rw-bg); font-weight: 600; }
 }
-.rw-root .rw-cluster-list {
+.rw-cluster-list {
   list-style: decimal; padding-inline-start: 24px; font-size: 12px; line-height: 20px; color: var(--rw-text-muted);
   .rw-on { color: var(--rw-text); font-weight: 600; }
 }
@@ -304,9 +313,22 @@
 .rw-history {
   display: flex; flex-direction: column; gap: 12px;
   li { display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 16px; }
-  .rw-history-old { opacity: 0.7; }
+  // An earlier entry is set apart by a rule, never by fading: faded text falls below AA contrast.
+  .rw-history-old { padding-inline-start: 8px; border-inline-start: 2px solid var(--rw-border); }
 }
 .rw-intent { display: flex; flex-wrap: wrap; gap: 8px; margin-block-start: 8px; }
+.rw-history-what { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rw-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.rw-split-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 6px;
+  border-block-end: 1px solid var(--rw-border);
+}
+.rw-split-name { min-inline-size: 0; overflow-wrap: anywhere; }
+.rw-segments--parts {
+  display: inline-grid; grid-auto-flow: column; grid-auto-columns: 40px; grid-template-columns: none; flex: none;
+  .rw-segment { min-block-size: 36px; padding: 0; font-weight: 600; }
+}
+.rw-cluster--bare { grid-template-columns: minmax(0, 1fr); max-inline-size: 320px; }
 .rw-keys {
   dl { display: grid; gap: 4px; font-size: 12px; line-height: 16px; color: var(--rw-text-muted); }
   dl > div { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; }
@@ -501,6 +523,7 @@
   .rw-ev-head, .rw-section { padding-inline: 24px; }
   .rw-ev-title { font-size: 24px; line-height: 32px; }
   .rw-sheet-veil { padding-block-start: 48px; }
+  .rw-split { grid-template-columns: 320px minmax(0, 1fr); align-items: start; }
   .rw-notices { inset-block-end: 24px; inset-inline-end: 24px; }
   .rw-graph { padding: 24px 32px 48px; gap: 24px; }
   .rw-graph-title { font-size: 28px; line-height: 36px; font-weight: 300; }

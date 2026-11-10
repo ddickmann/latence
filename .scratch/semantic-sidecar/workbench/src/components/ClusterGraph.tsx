@@ -7,7 +7,15 @@ import type { Decision, ReviewGroup, ReviewItem } from "../types";
 const W = 320;
 const H = 220;
 
-export function ClusterGraph({ group, current, decisions }: { group: ReviewGroup; current: ReviewItem; decisions: ReadonlyMap<string, Decision> }) {
+export function ClusterGraph({ group, current, decisions, parts, bare }: {
+  group: ReviewGroup;
+  current: ReviewItem;
+  decisions: ReadonlyMap<string, Decision>;
+  /** While a split is being drawn up: each record's part. Nodes show the part, and a link between parts is drawn as cut. */
+  parts?: ReadonlyMap<string, string>;
+  /** The drawing alone, without the list and legend beside it. */
+  bare?: boolean;
+}) {
   const { t } = useHost();
   const n = group.records.length;
   const at = new Map(group.records.map((id, i) => {
@@ -17,11 +25,13 @@ export function ClusterGraph({ group, current, decisions }: { group: ReviewGroup
   const isCurrent = (l: string, r: string) =>
     (l === current.left.unique_id && r === current.right.unique_id) || (l === current.right.unique_id && r === current.left.unique_id);
   const drawn = group.edges.filter((e) => e.band !== "reject");
-  const state = (e: { left: string; right: string; band: string }) =>
-    e.band === "accept" ? "accepted" : decisions.get(`${e.left}~${e.right}`)?.verdict ?? "open";
+  const state = (e: { left: string; right: string; band: string }) => {
+    if (parts !== undefined && parts.get(e.left) !== parts.get(e.right)) return "different";
+    return e.band === "accept" ? "accepted" : decisions.get(`${e.left}~${e.right}`)?.verdict ?? "open";
+  };
 
   return (
-    <div className="rw-cluster">
+    <div className={bare === true ? "rw-cluster rw-cluster--bare" : "rw-cluster"}>
       <svg className="rw-cluster-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t("cluster.drawing", { count: n, links: drawn.length })}>
         {drawn.map((e) => {
           const a = at.get(e.left);
@@ -31,23 +41,23 @@ export function ClusterGraph({ group, current, decisions }: { group: ReviewGroup
             <line
               key={`${e.left}~${e.right}`}
               x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              className={`rw-edge rw-edge--${state(e)}${isCurrent(e.left, e.right) ? " rw-edge--current" : ""}`}
+              className={`rw-edge rw-edge--${state(e)}${parts === undefined && isCurrent(e.left, e.right) ? " rw-edge--current" : ""}`}
             />
           );
         })}
         {group.records.map((id, i) => {
           const p = at.get(id);
           if (p === undefined) return null;
-          const on = id === current.left.unique_id || id === current.right.unique_id;
+          const on = parts === undefined && (id === current.left.unique_id || id === current.right.unique_id);
           return (
             <g key={id} className={`rw-cnode${on ? " rw-cnode--on" : ""}`}>
               <circle cx={p.x} cy={p.y} r={13} />
-              <text x={p.x} y={p.y} dy="0.35em" textAnchor="middle">{i + 1}</text>
+              <text x={p.x} y={p.y} dy="0.35em" textAnchor="middle">{parts === undefined ? i + 1 : parts.get(id)}</text>
             </g>
           );
         })}
       </svg>
-      <div className="rw-cluster-side">
+      {bare !== true && <div className="rw-cluster-side">
         <ol className="rw-cluster-list">
           {group.records.map((id) => (
             <li key={id} className={id === current.left.unique_id || id === current.right.unique_id ? "rw-on" : undefined}>
@@ -61,7 +71,7 @@ export function ClusterGraph({ group, current, decisions }: { group: ReviewGroup
           <li><span className="rw-swatch rw-swatch--same" aria-hidden="true" />{t("cluster.same")}</li>
           <li><span className="rw-swatch rw-swatch--different" aria-hidden="true" />{t("cluster.different")}</li>
         </ul>
-      </div>
+      </div>}
     </div>
   );
 }

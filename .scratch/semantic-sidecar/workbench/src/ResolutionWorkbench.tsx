@@ -60,7 +60,8 @@ export function ResolutionWorkbench(props: ResolutionWorkbenchProps) {
     counter.current += 1;
     const key = counter.current;
     setNotices((all) => [...all.slice(-2), { ...notice, key }]);
-    window.setTimeout(() => setNotices((all) => all.filter((n) => n.key !== key)), 5000);
+    // A notice that offers an undo stays long enough to be used.
+    window.setTimeout(() => setNotices((all) => all.filter((n) => n.key !== key)), notice.action === undefined ? 5000 : 10000);
   }, []);
 
   const t = props.translate ?? builtinTranslate;
@@ -114,6 +115,19 @@ export function ResolutionWorkbench(props: ResolutionWorkbenchProps) {
               <div key={n.key} className={`rw-notice rw-notice--${n.tone}`} data-testid="notice">
                 <b>{n.title}</b>
                 {n.detail !== undefined && <span>{n.detail}</span>}
+                {n.action !== undefined && (
+                  <button
+                    type="button"
+                    className="rw-notice-action"
+                    data-testid="notice-action"
+                    onClick={() => {
+                      n.action?.run();
+                      setNotices((all) => all.filter((x) => x.key !== n.key));
+                    }}
+                  >
+                    {n.action.label}
+                  </button>
+                )}
               </div>
             ))}
           </div>

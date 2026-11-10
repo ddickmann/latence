@@ -2,7 +2,7 @@
 
 Type: prototype
 Mode: HITL
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -74,3 +74,31 @@ Status stays `open`: the ticket resolves when the owner has reacted to the proto
   width in light and dark (82 checks, including WCAG 2.2 AA rule scans with axe).
 - **Not checked:** the workbench has not been mounted in a real host. The mount test uses a
   stand-in router, chrome and button.
+
+## Answer (2026-11-10)
+
+The owner reacted to the prototype (seen as screenshots and as a clickable preview) and
+settled the interaction model:
+
+- **The direction is right.** Review queue grouped by cluster and ranked by records touched
+  times uncertainty; evidence per field with the matcher's weights and a built-in explanation;
+  one key per decision on an append-only log.
+- **Group actions apply.** One decision for a whole group decides its open pairs: "all one"
+  makes them the same; a split, given as a letter per record, makes pairs inside a letter the
+  same and pairs across letters different. A pair already decided is never replaced. A group
+  decision can be undone, by appended withdrawals. Built as the second cut.
+- **The graph is a tab inside the workbench,** next to the review, with links both ways between
+  a pair and its organisations. It is a schema map with counts and a neighbourhood view per
+  node, walked one step at a time.
+- **In Metis it is one mounted component** (own package, the host's router, chrome, controls,
+  translation and data passed in). The mount itself waits for the owner's go.
+
+**What the prototype does not cover** moves to the review-surface build slice and to *The
+review, certification and versioning lifecycle*: mentions in text and UC object cards;
+AI suggestions with a rationale; rule proposals from a decision; acting on the objections a
+split records against machine-accepted pairs; conflict items; audit of auto-rejects with
+precision intervals; four-eyes approval; version certification; reviewer agreement.
+
+**Checked on the second cut:** 38 unit and mount tests; 106 browser checks on the built pages
+at phone and desktop width in light and dark, including WCAG 2.2 AA rule scans. **Not
+checked:** a mount in a real host.

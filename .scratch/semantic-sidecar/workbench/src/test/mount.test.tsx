@@ -117,6 +117,78 @@ describe("mounted in a host's router", () => {
     expect(ledger.decisions[1]?.note).toBe("the city is missing on one side");
   });
 
+  it("decides a whole group as one with M, and takes it back with undo", async () => {
+    const user = userEvent.setup();
+    const { reviewSource } = mount("/x/y/review/r1~r2");
+    await screen.findByTestId("evidence");
+    await user.keyboard("m");
+    const sheet = await screen.findByTestId("merge-sheet");
+    expect(within(sheet).getByTestId("plan-outcome")).toHaveTextContent("2 open pairs become Same.");
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    // Both pairs of the group are decided, so the workbench moves to the other group.
+    await waitFor(() => expect(where()).toBe("/x/y/review/r4~r5"));
+    expect(screen.getByTestId("qa-decided")).toHaveTextContent("2");
+    expect(screen.getByTestId("notice")).toHaveTextContent("Group decided as one organisation: 2 pairs recorded");
+
+    await user.click(screen.getByTestId("notice-action"));
+    await waitFor(() => expect(screen.getByTestId("qa-decided")).toHaveTextContent("0"));
+    const ledger = await reviewSource.loadLedger();
+    expect(ledger.decisions.map((d) => [d.item, d.verdict, d.withdraws === true])).toEqual([
+      ["r1~r2", "same", false], ["r2~r3", "same", false], ["r1~r2", "same", true], ["r2~r3", "same", true],
+    ]);
+    expect(new Set(ledger.decisions.map((d) => d.batch)).size).toBe(1);
+  });
+
+  it("splits a group with S: letters per record, the pairs follow, and a separated machine link is reported", async () => {
+    const user = userEvent.setup();
+    const { reviewSource } = mount("/x/y/review/r1~r2");
+    await screen.findByTestId("evidence");
+    await user.keyboard("s");
+    const sheet = await screen.findByTestId("split-sheet");
+    // The starting point follows the machine's accepted link: r1 and r3 together, r2 apart.
+    expect(within(sheet).getByTestId("part-r1-A")).toHaveAttribute("aria-pressed", "true");
+    expect(within(sheet).getByTestId("part-r3-A")).toHaveAttribute("aria-pressed", "true");
+    expect(within(sheet).getByTestId("part-r2-B")).toHaveAttribute("aria-pressed", "true");
+    expect(within(sheet).getByTestId("plan-outcome")).toHaveTextContent("2 organisations. Open pairs that become Same: 0. Open pairs that become Different: 2.");
+    expect(within(sheet).queryByTestId("plan-separates")).toBeNull();
+
+    // Move r3 over to r2: that cuts the link the machine accepted.
+    await user.click(within(sheet).getByTestId("part-r3-B"));
+    expect(within(sheet).getByTestId("plan-outcome")).toHaveTextContent("Open pairs that become Same: 1. Open pairs that become Different: 1.");
+    expect(within(sheet).getByTestId("plan-separates")).toHaveTextContent("separates 1 pair the machine accepted");
+
+    // One letter for everything is not a split.
+    await user.click(within(sheet).getByTestId("part-r1-B"));
+    expect(within(sheet).getByTestId("sheet-confirm")).toBeDisabled();
+    await user.click(within(sheet).getByTestId("part-r1-A"));
+
+    await user.click(within(sheet).getByTestId("sheet-confirm"));
+    await waitFor(async () => expect((await reviewSource.loadLedger()).intents).toHaveLength(1));
+    const ledger = await reviewSource.loadLedger();
+    expect(ledger.decisions.map((d) => [d.item, d.verdict, d.reason])).toEqual([
+      ["r1~r2", "different", "group_split"], ["r2~r3", "same", undefined],
+    ]);
+    expect(ledger.intents[0]?.parts).toEqual([["r1"], ["r2", "r3"]]);
+    expect(ledger.intents[0]?.separates_accepted).toEqual([["r1", "r3"]]);
+  });
+
+  it("shows the group decision on a pair it decided, with an undo that stays", async () => {
+    const user = userEvent.setup();
+    mount("/x/y/review/r1~r2");
+    await screen.findByTestId("evidence");
+    await user.click(screen.getByTestId("group-merge"));
+    await user.click(within(await screen.findByTestId("merge-sheet")).getByTestId("sheet-confirm"));
+    await waitFor(() => expect(where()).toBe("/x/y/review/r4~r5"));
+    await user.click(screen.getByTestId("filter-all"));
+    await user.click(screen.getAllByTestId("queue-row")[0]!);
+    expect(await screen.findByTestId("history")).toHaveTextContent("by group decision");
+    expect(screen.getByTestId("group-recorded")).toHaveTextContent("2 pairs recorded");
+    await user.click(screen.getByTestId("group-undo"));
+    await waitFor(() => expect(screen.getByTestId("group-undone")).toBeInTheDocument());
+    expect(screen.getByTestId("history")).toHaveTextContent("withdrawn");
+    expect(screen.getByTestId("no-decision")).toBeInTheDocument();
+  });
+
   it("leaves J, K and Esc to the host and tells it the breadcrumb", async () => {
     const { chrome, seen } = hostChrome();
     mount("/x/y/review/r1~r2", { chrome });

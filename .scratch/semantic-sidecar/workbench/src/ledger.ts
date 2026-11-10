@@ -1,11 +1,19 @@
 // The decision log is append-only: a changed mind is a new entry, never an edit. These read it.
 import type { Decision, GroupIntent, Verdict } from "./types";
 
-/** The decision in force for each item: the latest entry. */
+/** The decision in force for each item: the latest entry, unless that entry withdraws. */
 export function inForce(decisions: readonly Decision[]): Map<string, Decision> {
   const out = new Map<string, Decision>();
-  for (const d of decisions) out.set(d.item, d);
+  for (const d of decisions) {
+    if (d.withdraws === true) out.delete(d.item);
+    else out.set(d.item, d);
+  }
   return out;
+}
+
+/** The pairs a group action decided whose decision from that action is still the one in force. */
+export function standing(decisions: readonly Decision[], batch: string): Decision[] {
+  return [...inForce(decisions).values()].filter((d) => d.batch === batch);
 }
 
 export function historyOf(decisions: readonly Decision[], item: string): Decision[] {
@@ -30,7 +38,7 @@ export function tally(decisions: readonly Decision[]): Record<Verdict, number> {
  */
 export function pace(decisions: readonly Decision[], now: Date): number | null {
   const hourAgo = now.getTime() - 3_600_000;
-  const recent = decisions.map((d) => Date.parse(d.at)).filter((t) => t >= hourAgo && t <= now.getTime());
+  const recent = decisions.filter((d) => d.withdraws !== true).map((d) => Date.parse(d.at)).filter((t) => t >= hourAgo && t <= now.getTime());
   if (recent.length < 3) return null;
   const span = now.getTime() - Math.min(...recent);
   if (span < 60_000) return null;
