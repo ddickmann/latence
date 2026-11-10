@@ -952,8 +952,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
     ) -> QualityReport:
         # A template is refused before anything is written or announced: an unfilled
         # ``{STORAGE_URI}`` would otherwise become a literal directory under the working
-        # directory and the run would report an empty corpus as a success.
-        pipeline.require_resolved()
+        # directory and the run would report an empty corpus as a success. The same call refuses
+        # a Stage config key that ADR-0068 removed, which the Providers would otherwise ignore.
+        pipeline.require_runnable()
         # W17 (ADR-0043): ``reuse`` carries an unchanged document's persisted doc-level records
         # (from the prior Corpus Version) that this run did NOT re-extract (the document is
         # excluded at Source). :class:`~latence_core.reuse_overlay.ReuseOverlay` indexes them by

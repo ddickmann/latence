@@ -164,6 +164,39 @@ class Stage(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
 
 
+# The Stage config keys ADR-0068 removed with the query-time retrieval tooling, by the Stage kind
+# under which each one used to be read. This is the ONE list: ``latence stack check`` reports from
+# it and :meth:`Pipeline.require_runnable` refuses from it. It is closed on purpose. A Provider is
+# free to read config keys the core has never heard of, so an unknown key is not an error. These
+# nine are different: a stack that carries one was written for a feature that no longer exists,
+# and the Providers that used to read them now ignore them without a message. A key is policed
+# only under the kind that read it: ``graph_features`` and ``hyperedges`` on Graph Assembly; the
+# corpus Export's ``bm25``, ``context_columns``, ``fde_converter``, ``keep_multivectors``,
+# ``multivector_embedder`` and ``sparse_embedder`` and the knowledge-graph Export's
+# ``hyperedge_kv`` on Export. If one of these features returns, its key leaves this list in the
+# same change.
+REMOVED_CONFIG_KEYS: dict[CapabilityKind, frozenset[str]] = {
+    CapabilityKind.GRAPH_ASSEMBLY: frozenset({"graph_features", "hyperedges"}),
+    CapabilityKind.EXPORT: frozenset(
+        {
+            "bm25",
+            "context_columns",
+            "fde_converter",
+            "hyperedge_kv",
+            "keep_multivectors",
+            "multivector_embedder",
+            "sparse_embedder",
+        }
+    ),
+}
+
+
+def removed_config_keys(stage: Stage) -> tuple[str, ...]:
+    """The config keys of ``stage`` that ADR-0068 removed for its Stage kind, sorted."""
+    removed = REMOVED_CONFIG_KEYS.get(stage.capability, frozenset())
+    return tuple(sorted(key for key in stage.config if key in removed))
+
+
 class Pipeline(BaseModel):
     """A DAG of Stages over a set of input documents, declared once."""
 
@@ -278,12 +311,13 @@ class Pipeline(BaseModel):
     def require_resolved(self) -> None:
         """Raise :class:`~latence_core.errors.ConfigError` if a template placeholder is unfilled.
 
-        Called at the top of every path that executes a Pipeline, before anything is written. A
-        Pipeline that still says ``storage_uri: "{STORAGE_URI}"`` is a template, not a run: executed
-        as it is, it writes into a directory literally named ``{STORAGE_URI}`` under the working
-        directory, reads no document from the relative path ``{CORPUS_DIR}`` and reports an empty
-        corpus as a completed run. The message names each location and its placeholder and no
-        other config value, so it cannot quote a credential.
+        Called through :meth:`require_runnable` at the top of every path that executes a
+        Pipeline, before anything is written. A Pipeline that still says
+        ``storage_uri: "{STORAGE_URI}"`` is a template, not a run: executed as it is, it writes
+        into a directory literally named ``{STORAGE_URI}`` under the working directory, reads no
+        document from the relative path ``{CORPUS_DIR}`` and reports an empty corpus as a
+        completed run. The message names each location and its placeholder and no other config
+        value, so it cannot quote a credential.
         """
         found = self.unresolved_placeholders()
         if not found:
@@ -297,6 +331,46 @@ class Pipeline(BaseModel):
             "{STORAGE_URI} and {CORPUS_DIR} itself."
         )
         raise ConfigError(msg)
+
+    def removed_config_keys(self) -> list[tuple[str, str]]:
+        """Every config key ADR-0068 removed that this Pipeline still carries, as ``(stage, key)``.
+
+        Stages in declaration order, keys sorted within a Stage. An empty list means none. A key
+        counts only under the Stage kind that used to read it (:data:`REMOVED_CONFIG_KEYS`).
+        """
+        return [(stage.name, key) for stage in self.stages for key in removed_config_keys(stage)]
+
+    def require_no_removed_keys(self) -> None:
+        """Raise :class:`~latence_core.errors.ConfigError` if a Stage carries a removed config key.
+
+        ADR-0068 removed the query-time retrieval tooling. The Providers that used to read these
+        keys no longer do, so a Pipeline that carries one would run to completion and produce none
+        of what the key asks for. The message names each Stage and key and no config value, so it
+        cannot quote a credential.
+        """
+        found = self.removed_config_keys()
+        if not found:
+            return
+        listing = "; ".join(f"Stage {stage!r} carries {key!r}" for stage, key in found)
+        msg = (
+            f"Pipeline {self.name!r} carries config key(s) that ADR-0068 removed with the "
+            f"query-time retrieval tooling: {listing}. Nothing reads these keys any more, so the "
+            "run would not produce what they ask for. Delete each one from the file "
+            "(`latence stack check` lists them without running anything)."
+        )
+        raise ConfigError(msg)
+
+    def require_runnable(self) -> None:
+        """Raise :class:`~latence_core.errors.ConfigError` if this Pipeline cannot run as written.
+
+        The one call every path that executes a Pipeline makes first, before anything is written:
+        the Runners (local, Delta, Airflow) and the CLI's loader. Two refusals, in this order: an
+        unfilled template placeholder (:meth:`require_resolved`), then a config key ADR-0068
+        removed (:meth:`require_no_removed_keys`). Parsing stays permissive about both, because
+        the static tools read templates as they are and report a removed key as a finding.
+        """
+        self.require_resolved()
+        self.require_no_removed_keys()
 
     @classmethod
     def from_yaml_text(cls, text: str) -> Pipeline:

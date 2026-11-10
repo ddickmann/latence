@@ -275,3 +275,28 @@ def test_a_template_pipeline_is_refused_before_anything_is_written(
     with pytest.raises(ConfigError, match=r"\{STORAGE_URI\}"):
         AirflowRunner().build_dag(template)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_pipeline_with_a_removed_config_key_is_refused_before_anything_is_written(
+    docs_dir: Path, tmp_path: Path
+) -> None:
+    """A config key ADR-0068 removed is a config error under this Runner too.
+
+    ``export.jsonl_parquet`` no longer reads ``context_columns``, so without the refusal this run
+    completes and the corpus carries none of the columns the key asks for. The refusal names the
+    key, the Stage and the ADR, and comes before the storage root exists. ``build_dag`` refuses as
+    well, before it needs Airflow.
+    """
+    from latence_core.errors import ConfigError
+
+    store = tmp_path / "store"
+    pipeline = _pipeline(f"file://{store}", docs_dir)
+    next(s for s in pipeline.stages if s.name == "export").config["context_columns"] = True
+
+    with pytest.raises(ConfigError, match="'context_columns'") as excinfo:
+        AirflowRunner().run(pipeline, run_id="af")
+    assert "Stage 'export'" in str(excinfo.value)
+    assert "ADR-0068" in str(excinfo.value)
+    with pytest.raises(ConfigError, match="'context_columns'"):
+        AirflowRunner().build_dag(pipeline)
+    assert not store.exists()

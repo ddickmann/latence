@@ -99,6 +99,8 @@ def _load_pipeline(pipeline_path: Path) -> Pipeline:
     fsspec supports. Exits 2 (a usage error) when the file is missing, and when the file is a
     template that still carries a placeholder such as ``{STORAGE_URI}``: every command that loads
     a Pipeline through here executes it, and a template executed as written is a silent empty run.
+    It exits 2 as well when a Stage carries a config key ADR-0068 removed, which a run would
+    ignore without a message.
     """
     if not pipeline_path.exists():
         typer.echo(f"Pipeline file not found: {pipeline_path}", err=True)
@@ -106,7 +108,7 @@ def _load_pipeline(pipeline_path: Path) -> Pipeline:
     text = pipeline_path.read_text(encoding="utf-8")
     pipeline = Pipeline.from_yaml_text(text)
     try:
-        pipeline.require_resolved()
+        pipeline.require_runnable()
     except ConfigError as exc:
         typer.echo(f"Not running {pipeline_path} [{error_category(exc)}]: {exc}", err=True)
         raise typer.Exit(code=2) from exc

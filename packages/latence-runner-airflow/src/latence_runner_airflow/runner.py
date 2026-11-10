@@ -122,8 +122,9 @@ class AirflowRunner:
         Storage (they are *data artifacts*, not run state), so the shared report builder produces
         the same Quality Report — now stamped ``runner="airflow"`` on every Stage.
         """
-        # This path never calls the engine's ``run()``, so it makes the template refusal itself.
-        pipeline.require_resolved()
+        # This path never calls the engine's ``run()``, so it makes the two refusals itself: an
+        # unfilled template placeholder, and a config key ADR-0068 removed.
+        pipeline.require_runnable()
         storage = Storage.for_uri(pipeline.storage_uri)
         # The Export Stage writes into this run's export dir; reuse the engine's own layout so the
         # data artifacts land where the report builder expects them (public run_dir, H-F1).
@@ -206,8 +207,9 @@ class AirflowRunner:
         ``airflow`` is imported here (lazily) so the rest of the adapter — and the in-process
         proof — needs no Airflow install (ADR-0016).
         """
-        # A DAG built from a template would carry the unfilled placeholder into every task.
-        pipeline.require_resolved()
+        # A DAG built from a template would carry the unfilled placeholder into every task, and
+        # one built with a removed config key would run tasks that ignore it.
+        pipeline.require_runnable()
         try:
             from airflow import DAG
             from airflow.operators.python import PythonOperator

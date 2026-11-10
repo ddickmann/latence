@@ -111,7 +111,8 @@ export. Three consequences:
   satisfy them for any selection the wizard now accepts.
 * The five files under `s3-pipeline/pipelines/` are the configurations that run used. Each
   declares an `enrich` Stage whose Capability no longer exists, so the file does not load and
-  `latence stack check` fails on it. They also carry removed config keys. With the `enrich`
-  Stage taken out, `stack check` reports two of them as errors (`graph_features`, `bm25`);
-  the Providers ignore the others (`hyperedges`, `hyperedge_kv`, `context_columns`) without a
-  message. When `s3-pipeline` runs again it writes the five files in the current shape.
+  `latence stack check` fails on it. They also carry five removed config keys
+  (`graph_features`, `hyperedges`, `hyperedge_kv`, `bm25`, `context_columns`). With the `enrich`
+  Stage taken out, `stack check` reports each of the five as an error, and a run refuses the
+  file with a `ConfigError` that names the key and its Stage. When `s3-pipeline` runs again it
+  writes the five files in the current shape.

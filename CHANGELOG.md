@@ -120,6 +120,15 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Fixed
 
+- **A Stage config key that ADR-0068 removed is refused instead of ignored.** A stack that still
+  carried `hyperedges`, `context_columns` or `hyperedge_kv` ran to completion and produced none
+  of what the key asked for; `latence stack check` reported only `graph_features` and `bm25`,
+  and only when written as a `{provider, config}` block. The nine removed keys are now one list,
+  `REMOVED_CONFIG_KEYS` in `latence_core.pipeline`, each under the Stage kind that used to read
+  it. `latence stack check` reports every one, and `Pipeline.require_runnable()` — the call the
+  local, Delta and Airflow Runners and the CLI loader make before writing anything — raises a
+  `ConfigError` naming the key, the Stage and the ADR. Unknown keys in general are still
+  accepted.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept

@@ -40,9 +40,12 @@ are the record of the August 2026 run. Their `graph` stage carries two more conf
 `hyperedges` and `graph_features`. Both features were removed by
 [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md).
 Those files no longer load, because each also declares an `enrich` Stage whose Capability is
-gone. The two blocks alone would not stop a run: `graph.canonical` reads `corpus_id` and
-`max_evidence_per_node` and ignores every other key. `latence stack check` reports
-`graph_features` as an error and says nothing about `hyperedges`.
+gone. The two blocks alone stop a run as well. `graph.canonical` reads `corpus_id` and
+`max_evidence_per_node` and no other key, so both blocks would be ignored; the framework
+refuses instead. `latence stack check` reports each as an error, and every command that
+executes a Pipeline raises a `ConfigError` that names the key, the Stage and ADR-0068 before it
+writes anything. The list of removed keys is `REMOVED_CONFIG_KEYS` in
+`packages/latence-core/src/latence_core/pipeline.py`.
 
 ---
 

@@ -175,7 +175,7 @@ class DeltaRunner:
         exact) — the preview is a planning signal, never the commit. Durably deleted ids (prior
         retract/purge) are excluded exactly as the delta excludes them.
         """
-        pipeline.require_resolved()
+        pipeline.require_runnable()
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
         prior_deletions = self._prior_deletions(store, parent_version)
@@ -223,7 +223,7 @@ class DeltaRunner:
         vocabulary to move with the data — accepting that canonical type labels may be re-elected,
         which is exactly why it is not the default. It reuses nothing (``documents_reused == 0``).
         """
-        pipeline.require_resolved()
+        pipeline.require_runnable()
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
         # A document deleted (retracted or purged) in an earlier Version stays deleted: exclude it
@@ -351,7 +351,7 @@ class DeltaRunner:
         document_ids: list[str],
         deletion_mode: DeletionMode,
     ) -> QualityReport:
-        pipeline.require_resolved()
+        pipeline.require_runnable()
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
         if parent_version is None:

@@ -43,8 +43,9 @@ What it checks, in one pass over the DAG:
     every nested ``{provider, config}`` block (:mod:`latence_core.subprovider`) — shape, Provider
     resolution, and a class-only check against the slot's declared Protocol.
 ``config_key``
-    a ``{provider, ...}`` block under a Capability that declares no such slot (silently ignored at
-    run time).
+    a config key ADR-0068 removed (the closed list in :mod:`latence_core.pipeline`, which a run
+    refuses), and a ``{provider, ...}`` block under a Capability that declares no such slot
+    (silently ignored at run time).
 ``wiring``
     a Stage whose parents cannot supply a carrier its Capability REQUIRES (a Relation-Extraction
     Stage with no Entity-Extraction parent). Both halves are declarations — what a Capability's
@@ -75,7 +76,7 @@ from typing import TYPE_CHECKING
 
 from latence_core.capability_descriptor import input_plan_for
 from latence_core.errors import ConfigError
-from latence_core.pipeline import Pipeline
+from latence_core.pipeline import Pipeline, removed_config_keys
 from latence_core.reuse_overlay import stage_produces
 from latence_core.run_store import stage_output_type
 from latence_core.subprovider import (
@@ -393,11 +394,28 @@ def _wiring_findings(stage: Stage, pipeline: Pipeline) -> tuple[Finding, ...]:
 
 
 def _config_key_findings(stage: Stage) -> tuple[Finding, ...]:
-    """Sub-Provider blocks that go nowhere.
+    """Config keys that go nowhere: removed keys first, then sub-Provider blocks nobody reads.
 
-    A wiring mistake that otherwise never surfaces at all: an undeclared block is read by nobody.
+    A key ADR-0068 removed (:data:`~latence_core.pipeline.REMOVED_CONFIG_KEYS`, the one list the
+    run-time refusal reads too) is reported whatever its value. An undeclared sub-Provider block is
+    a wiring mistake that otherwise never surfaces at all: it is read by nobody. A removed key
+    written as a block is reported once, as removed, because that says what to do about it.
     """
-    return tuple(
+    removed = removed_config_keys(stage)
+    removed_findings = tuple(
+        Finding(
+            check="config_key",
+            severity=Severity.ERROR,
+            message=(
+                f"config key {key!r} was removed by ADR-0068 with the query-time retrieval "
+                f"tooling; nothing reads it any more, and a run refuses a Pipeline that carries "
+                f"it. Delete the key."
+            ),
+            stage=stage.name,
+        )
+        for key in removed
+    )
+    return removed_findings + tuple(
         Finding(
             check="config_key",
             severity=Severity.ERROR,
@@ -409,4 +427,5 @@ def _config_key_findings(stage: Stage) -> tuple[Finding, ...]:
             stage=stage.name,
         )
         for key in undeclared_sub_provider_keys(stage)
+        if key not in removed
     )
