@@ -50,8 +50,7 @@ class CampaignContext:
 
     :param campaign_root: The campaign directory (campaign.yaml, STATE.json, stages/).
     :param repo_root: The latence-framework checkout the stage operates on — corpus stages
-        write under ``<repo_root>/benchmark/sota-corpus`` and reference
-        ``<repo_root>/benchmark/official-data``.
+        write under ``<repo_root>/benchmark/sota-corpus``.
     :param answers: The parsed campaign.yaml.
     :param accept_non_commercial: The operator's explicit research-only acknowledgement,
         threaded into the license gate (:func:`latence_benchmark.licensing.require_usable`)

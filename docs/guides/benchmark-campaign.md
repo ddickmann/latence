@@ -53,7 +53,12 @@ and `approve` is an explicit operator sign-off, never automatic:
 | `s2-ocr` | OCRs the PDF corpora (`ohr_bench`, `vidoseek`, `uda`) into markdown with served LightOn-OCR-2, page boundaries carried in a `.pagemap.json` sidecar beside each document; the text-native datasets are recorded as skipped | `stages/s2-ocr/metrics.json` + a spot-check directory of sampled pages |
 | `s3-pipeline` | Generates one pipeline YAML per dataset from the `s3:` block and runs it on the pod: chunking, optional per-chunk label induction, fused entity and relation extraction, redaction, profiling, type consolidation, disambiguation, graph assembly, the knowledge-graph export and the corpus export with embeddings | `stages/s3-pipeline/metrics.json`, folded from each dataset's Quality Report |
 
-Three details of `s3-pipeline` are worth knowing before you run it:
+The registry holds five datasets: `wiki2multihop`, `multihop_rag`, `ohr_bench`, `vidoseek`
+and `uda`. Each has an acquisition plan in `s1-corpus` and a pipeline in `s3-pipeline`.
+`musique` and `hotpotqa` were in the registry until 2026-11-10; the campaign had no pipeline
+for them, and a `campaign.yaml` that still lists either is now rejected as an unknown dataset.
+
+Two details of `s3-pipeline` are worth knowing before you run it:
 
 * **Induction follows the OCR boundary.** The three OCR'd datasets run LLM label induction
   under the budget cap; `multihop_rag` and `wiki2multihop` use the hand-authored label sets
@@ -62,11 +67,6 @@ Three details of `s3-pipeline` are worth knowing before you run it:
   not a number of dollars, so the stage turns the USD cap into one `max_induction_calls` per
   dataset when it generates the YAML. The allocation is proportional to the measured chunk
   counts and scaled down when the estimate would exceed the cap.
-* **`musique` and `hotpotqa` are not processed.** Both stay selectable: `s1-corpus` references
-  their source files in place and `s2-ocr` records them as text-native. `s3-pipeline` generates
-  no pipeline for them and lists them under `not_processed` in its `metrics.json`. The stage
-  used to verify an export of an earlier campaign for the two; that export fed the removed
-  retrieval matrix, nothing reads it now, and the check was removed with it.
 
 Each dataset's corpus and toolkit licence, and its lane, are declared in the stage's source
 (`packages/latence-benchmark/src/latence_benchmark/campaign/corpus_stage.py`) and written to
@@ -101,8 +101,11 @@ export. Three consequences:
 
 * `s3-pipeline/metrics.json` contains `hyperedges` and `chunks_enriched` counts. They describe
   that run, not the current pipeline, which produces neither.
-* The same file lists `musique` and `hotpotqa` inside `datasets`, as reused from an earlier
-  export. The current stage writes no such entry; it lists the two under `not_processed`.
+* `s1-corpus/metrics.json` and `s3-pipeline/metrics.json` list seven datasets, including
+  `musique` and `hotpotqa`, and `s2-ocr/metrics.json` names the two under `skipped_native`.
+  Both have since left the registry. The done-probes of `s1-corpus` and `s3-pipeline` compare
+  the recorded dataset names with the current selection, so the committed records do not
+  satisfy them for any selection the wizard now accepts.
 * The five files under `s3-pipeline/pipelines/` are the configurations that run used. They
   name an `enrich` Stage and config keys the current code rejects, so `latence stack check`
   fails on them. Running `s3-pipeline` again (`--fresh`) regenerates them in the current

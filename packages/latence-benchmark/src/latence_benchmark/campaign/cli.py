@@ -229,7 +229,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     datasets_raw = _ask(
         args.datasets,
         "Corpus datasets (comma-separated)",
-        "the 6+2 S0 selection; trim it to iterate faster, the license gate runs either way",
+        "the full registry; trim it to iterate faster, the license gate runs either way",
         ",".join(KNOWN_DATASETS),
         interactive=interactive,
     )

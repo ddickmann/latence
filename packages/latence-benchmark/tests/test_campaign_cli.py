@@ -10,43 +10,124 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from latence_benchmark.campaign import cli
+from latence_benchmark.campaign import cli, corpus_stage, pipeline_stage
+from latence_benchmark.campaign.corpus_stage import (
+    KIND_HF_SNAPSHOT,
+    KIND_URL,
+    DatasetPlan,
+    FetchResult,
+)
 from latence_benchmark.campaign.state import STATE_FILENAME, CampaignState
+from latence_benchmark.campaign.wizard import KNOWN_DATASETS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
+
+    from latence_benchmark.campaign.corpus_stage import Fetcher
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+#: A quality report in the shape the s3 stage reads: non-empty, with a graph.
+POD_REPORT = {
+    "document_count": 2,
+    "stages": [],
+    "chunk": {"chunks_total": 4, "chunks_flagged": 0},
+    "entities": {"mentions_total": 6},
+    "relations": {"relations_total": 2},
+    "redaction": {"pii_total": 0, "per_type": {}},
+    "graph": {"nodes_total": 5, "edges_total": 2},
+}
 
 
 def make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
-    for incumbent in ("musique-full", "hotpot-full"):
-        d = repo / "benchmark" / "official-data" / incumbent
-        d.mkdir(parents=True)
-        (d / "data.jsonl").write_text('{"q": 1}\n')
     dst = repo / "benchmark" / "corpus" / "manifest.py"
     dst.parent.mkdir(parents=True)
     shutil.copy(REPO_ROOT / "benchmark" / "corpus" / "manifest.py", dst)
     return repo
 
 
-def init_campaign(tmp_path: Path, datasets: str = "musique,hotpotqa") -> Path:
+def init_campaign(
+    tmp_path: Path, datasets: str = "multihop_rag", pod_ssh: str = ""
+) -> Path:
     config = tmp_path / "camp" / "campaign.yaml"
-    rc = cli.main(
-        [
-            "init",
-            "--non-interactive",
-            "--campaign-root",
-            str(tmp_path / "camp"),
-            "--datasets",
-            datasets,
-            "-o",
-            str(config),
-        ]
-    )
+    argv = [
+        "init",
+        "--non-interactive",
+        "--campaign-root",
+        str(tmp_path / "camp"),
+        "--datasets",
+        datasets,
+        "-o",
+        str(config),
+    ]
+    if pod_ssh:
+        argv += ["--pod-ssh", pod_ssh]
+    rc = cli.main(argv)
     assert rc == 0
     return config
+
+
+def _fake_fetch(plan: DatasetPlan, dest: Path) -> FetchResult:
+    """Land the one raw file the multihop_rag prep reads; skip it when already there."""
+    target = dest / "corpus.json"
+    if target.exists():
+        return FetchResult(fetched=0, skipped=1)
+    dest.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            [
+                {"title": "Alpha buys Beta", "body": "Alpha acquired Beta in 2023."},
+                {"title": "Gamma", "body": "Gamma partnered with Delta."},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return FetchResult(fetched=1, skipped=0)
+
+
+class FinishedPod:
+    """A pod whose run already finished: the status probe answers ``done``.
+
+    Built by the stage with the configured ``pod_ssh``, like the real transport, so the CLI
+    flow reaches the stage's pull, floor check and metrics without ssh.
+    """
+
+    def __init__(self, pod_ssh: str) -> None:
+        self.pod_ssh = pod_ssh
+
+    def run(self, cmd: str) -> tuple[int, str]:
+        if "du -sk" in cmd:
+            return 0, "done 9"
+        if cmd.startswith("find "):
+            return 0, "/remote/export/corpus.jsonl\n"
+        return 0, ""
+
+    def push(self, local: Path, remote: str) -> None:
+        raise AssertionError(f"a finished run must not be pushed again: {local} -> {remote}")
+
+    def pull(self, remote: str, local: Path) -> None:
+        if remote.endswith("quality-report.json"):
+            local.write_text(json.dumps(POD_REPORT), encoding="utf-8")
+        elif remote.endswith("quality-report.md"):
+            local.write_text("# Quality Report\n", encoding="utf-8")
+
+
+@pytest.fixture
+def offline_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swap the two network seams the CLI would otherwise build for itself.
+
+    Every dataset in the registry is fetched from the Hub by s1 and run on the pod by s3,
+    so the CLI flow needs both seams faked to stay offline. The stages' own behaviour behind
+    the seams is covered by the stage suites; what runs here is the real CLI, the real stage
+    registry and the real stage functions.
+    """
+
+    def fetchers() -> Mapping[str, Fetcher]:
+        return {KIND_HF_SNAPSHOT: _fake_fetch, KIND_URL: _fake_fetch}
+
+    monkeypatch.setattr(corpus_stage, "default_fetchers", fetchers)
+    monkeypatch.setattr(pipeline_stage, "SubprocessTransport", FinishedPod)
 
 
 class TestInit:
@@ -54,11 +135,11 @@ class TestInit:
         config = init_campaign(tmp_path)
         text = config.read_text()
         assert "campaign:" in text
-        assert "- musique" in text
+        assert "- multihop_rag" in text
 
     def test_byte_determinism_across_runs(self, tmp_path: Path) -> None:
-        a = init_campaign(tmp_path / "a", datasets="musique,uda")
-        b = init_campaign(tmp_path / "b", datasets="musique,uda")
+        a = init_campaign(tmp_path / "a", datasets="multihop_rag,uda")
+        b = init_campaign(tmp_path / "b", datasets="multihop_rag,uda")
         # Different roots differ only in the root line; same answers = same bytes.
         fixed_a = a.read_text().replace(str(tmp_path / "a" / "camp"), "ROOT")
         fixed_b = b.read_text().replace(str(tmp_path / "b" / "camp"), "ROOT")
@@ -75,7 +156,7 @@ class TestInit:
                 "--campaign-root",
                 "/camp",
                 "--datasets",
-                "musique,vidoseek",
+                "multihop_rag,vidoseek",
                 "--pod-ssh",
                 "root@pod",
                 "-o",
@@ -87,7 +168,7 @@ class TestInit:
         # The S3 headline prompts (induction mode, budget cap) and the graph-rescue headline
         # prompts (policy gate, selector) answer with their defaults.
         answers: Iterator[str] = iter(
-            ["/camp", "musique,vidoseek", "root@pod", "per_chunk", "150", "auto", "packed"]
+            ["/camp", "multihop_rag,vidoseek", "root@pod", "per_chunk", "150", "auto", "packed"]
         )
         monkeypatch.setattr("builtins.input", lambda: next(answers))
         by_prompts = tmp_path / "prompts.yaml"
@@ -106,8 +187,10 @@ class TestInit:
         # The "why it matters" lines go to stderr, per the setup wizard contract.
         assert "(the" in capsys.readouterr().err
         text = out.read_text()
-        for name in ("musique", "uda", "ohr_bench"):
+        for name in KNOWN_DATASETS:
             assert f"- {name}" in text
+        assert "musique" not in text
+        assert "hotpotqa" not in text
 
     def test_explicit_zero_overlap_is_honored_not_defaulted(self, tmp_path: Path) -> None:
         # 0 is a VALID overlap; an explicit falsy answer must never fall back to the default.
@@ -126,7 +209,7 @@ class TestInit:
                 "init",
                 "--non-interactive",
                 "--datasets",
-                "musique,frames",
+                "multihop_rag,frames",
                 "-o",
                 str(tmp_path / "c.yaml"),
             ]
@@ -240,10 +323,11 @@ class TestStatusAndFlow:
         assert "unsatisfied" in out
         assert "metrics.json" in out
 
+    @pytest.mark.usefixtures("offline_seams")
     def test_run_approve_resume_flow(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        config = init_campaign(tmp_path)  # musique,hotpotqa — local references only
+        config = init_campaign(tmp_path, pod_ssh="root@pod")  # multihop_rag: text-native
         repo = make_repo(tmp_path)
 
         rc = cli.main(["run", "s1-corpus", "-c", str(config), "--repo-root", str(repo)])
@@ -270,12 +354,16 @@ class TestStatusAndFlow:
         assert rc == 0
         capsys.readouterr()
 
-        # resume advances into s3-pipeline, the last stage; the stage has no pipeline for
-        # musique or hotpotqa, so it records both as not processed without touching any
-        # pod, then awaits sign-off.
+        # resume advances into s3-pipeline, the last stage: it prepares the markdown from
+        # the fetched raw file, finds the pod run finished, pulls its report and records
+        # the dataset, then awaits sign-off.
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
         assert rc == 0
-        assert "s3-pipeline: done" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "s3-pipeline: done" in out
+        assert "1 dataset(s) processed (4 chunks)" in out
+        markdown = repo / "benchmark" / "sota-corpus" / "multihop_rag" / "markdown"
+        assert len(list(markdown.glob("*.md"))) == 2
 
         rc = cli.main(["approve", "s3-pipeline", "-c", str(config)])
         assert rc == 0
@@ -286,6 +374,7 @@ class TestStatusAndFlow:
         assert rc == 0
         assert "the campaign is complete" in capsys.readouterr().out
 
+    @pytest.mark.usefixtures("offline_seams")
     def test_rerun_of_done_stage_is_noop(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -330,6 +419,7 @@ class TestStatusAndFlow:
         assert rc == 1
         assert "BLOCKED" in capsys.readouterr().err
 
+    @pytest.mark.usefixtures("offline_seams")
     def test_resume_awaits_approval_on_a_done_stage(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

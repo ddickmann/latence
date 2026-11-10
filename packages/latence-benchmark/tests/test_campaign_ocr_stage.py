@@ -430,7 +430,7 @@ class TestGating:
 class TestStageRun:
     def test_fresh_run_pushes_launches_polls_pulls_and_records(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path)
-        ctx = make_ctx(tmp_path, ("musique", "vidoseek"), repo)
+        ctx = make_ctx(tmp_path, ("multihop_rag", "vidoseek"), repo)
         pod = vidoseek_pod(states=[None, state_json("done", 6)])
         clock = FakeClock()
         note = run_ocr_stage(ctx, pod, clock=clock, sleep=clock.sleep)
@@ -461,7 +461,7 @@ class TestStageRun:
         )
         assert metrics["stage"] == STAGE_NAME
         assert metrics["fin_cap"] is None
-        assert metrics["skipped_native"] == ["musique"]
+        assert metrics["skipped_native"] == ["multihop_rag"]
         assert metrics["datasets"]["vidoseek"]["markdown_docs_local"] == 2
         assert metrics["datasets"]["vidoseek"]["tables_normalized"] == 4
         assert metrics["pod"]["resumed"] is False
@@ -549,14 +549,15 @@ class TestStageRun:
 
     def test_text_only_selection_completes_as_a_recorded_noop(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path)
-        ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
+        ctx = make_ctx(tmp_path, ("multihop_rag", "wiki2multihop"), repo)
         note = run_ocr_stage(ctx)  # no transport needed: the pod is never touched
         assert "nothing to OCR" in note
         metrics = json.loads(
             (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
         )
         assert metrics["datasets"] == {}
-        assert metrics["skipped_native"] == ["musique", "hotpotqa"]
+        # Recorded in the stage's own fixed order, not the operator's.
+        assert metrics["skipped_native"] == ["wiki2multihop", "multihop_rag"]
         assert ocr_done_probe(ctx) is True
 
     def test_done_probe_tracks_the_selection(self, tmp_path: Path) -> None:

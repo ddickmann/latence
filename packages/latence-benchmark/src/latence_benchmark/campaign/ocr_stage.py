@@ -25,8 +25,8 @@ The stage runs CLIENT-side and treats the pod as a file server plus one long-liv
 Any pod failure — refused launch, ``phase: failed``, a stalled counter — surfaces as
 :class:`~latence_benchmark.campaign.stages.StageBlockedError` with the reason, and the
 stage is resumable: the file manifests (local pdfs, remote pages, pulled markdown) mean a
-rerun redoes only what is missing. Text-native datasets (musique, hotpotqa, wiki2multihop,
-multihop_rag) are recorded as ``skipped_native`` and never leave the machine.
+rerun redoes only what is missing. Text-native datasets (wiki2multihop, multihop_rag) are
+recorded as ``skipped_native`` and never leave the machine.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ OCR_MODEL_REVISION = "main"
 #: Datasets whose corpus is PDFs and therefore passes through the OCR gate.
 OCR_DATASETS: tuple[str, ...] = ("ohr_bench", "vidoseek", "uda")
 #: Text-native datasets — already markdown/text; recorded as skipped, never converted.
-NATIVE_DATASETS: tuple[str, ...] = ("musique", "hotpotqa", "wiki2multihop", "multihop_rag")
+NATIVE_DATASETS: tuple[str, ...] = ("wiki2multihop", "multihop_rag")
 
 #: UDA-financial cap (Dennis, 2026-08-02): top-150 most-questioned docs ≈ 50% of fin QA.
 FIN_CAP = 150

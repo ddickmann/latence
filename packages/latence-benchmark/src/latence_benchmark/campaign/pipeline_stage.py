@@ -24,12 +24,9 @@ pod has ONE GPU, and the framework runs its GPU stages sequentially anyway:
    entities, PII, induction cost actuals) into one consolidated metrics.json —
    the stage's gate artifact.
 
-``musique`` and ``hotpotqa`` are selectable (s1 references their source files in place, s2
-records them as text-native) but this stage has no pipeline for them. It used to verify an
-export of an earlier campaign for the two and record it as reused; that export fed the
-retrieval matrix removed by ADR-0068 and nothing reads it now, so the check is gone. The
-stage records the two under ``not_processed`` in its metrics and names them in its one-line
-note: a dataset it did nothing for is named, never silently dropped.
+Every dataset the wizard offers has a pipeline here (``PROCESS_ORDER`` covers
+``KNOWN_DATASETS``; a test holds the two together), so every selection has at least one
+dataset for this stage to process.
 """
 
 from __future__ import annotations
@@ -65,10 +62,6 @@ STAGE_NAME = "s3-pipeline"
 INDUCED_DATASETS: tuple[str, ...] = ("ohr_bench", "vidoseek", "uda")
 TEXT_DATASETS: tuple[str, ...] = ("multihop_rag", "wiki2multihop")
 PROCESS_ORDER: tuple[str, ...] = INDUCED_DATASETS + TEXT_DATASETS
-
-#: Selectable datasets this stage has no pipeline for, in record order. They are recorded
-#: under ``not_processed`` in the stage metrics (see the module docstring).
-NOT_PROCESSED: tuple[str, ...] = ("musique", "hotpotqa")
 
 #: The pod venv's `latence` CLI (the framework + GPU provider packages live there; see the
 #: operator runbook in the S3 ticket). A missing venv surfaces as a blocked launch.
@@ -280,11 +273,9 @@ def prepare_wiki2multihop(repo_root: Path) -> dict[str, int]:
 # -- pipeline generation ---------------------------------------------------------------------
 
 
-def _active(ctx: CampaignContext) -> tuple[list[str], list[str]]:
-    """``(processed, not_processed)`` for the selection, each in its fixed order."""
-    processed = [d for d in PROCESS_ORDER if d in ctx.answers.datasets]
-    not_processed = [d for d in NOT_PROCESSED if d in ctx.answers.datasets]
-    return processed, not_processed
+def _active(ctx: CampaignContext) -> list[str]:
+    """The selected datasets, in the stage's fixed run order."""
+    return [d for d in PROCESS_ORDER if d in ctx.answers.datasets]
 
 
 def _induced_active(ctx: CampaignContext, processed: Sequence[str]) -> list[str]:
@@ -365,16 +356,14 @@ def s3_done_probe(ctx: CampaignContext) -> bool:
     datasets = recorded.get("datasets")
     if not isinstance(datasets, dict):
         return False
-    processed, not_processed = _active(ctx)
+    processed = _active(ctx)
     if set(datasets) != set(processed):
-        return False
-    if recorded.get("not_processed") != not_processed:
         return False
     return all((_report_dir(ctx, ds) / "quality-report.json").is_file() for ds in processed)
 
 
 def s3_progress_probe(ctx: CampaignContext) -> str:
-    processed, _ = _active(ctx)
+    processed = _active(ctx)
     landed = sum(
         1 for ds in processed if (_report_dir(ctx, ds) / "quality-report.json").is_file()
     )
@@ -494,7 +483,7 @@ def run_s3_stage(
     :param clock: Monotonic-seconds source for the stall budget (seam, tests fake it).
     :param sleep: Poll-interval sleeper (seam, tests fake it).
     """
-    processed, not_processed = _active(ctx)
+    processed = _active(ctx)
     s3 = ctx.answers.s3
     out_dir = stage_dir(ctx.campaign_root, STAGE_NAME)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -515,52 +504,51 @@ def run_s3_stage(
     )
     generate_pipelines(ctx, processed)
 
-    # 3. The transport, built late: a selection with nothing to process never needs ssh.
-    if processed:
-        if transport is None:
-            if not ctx.answers.pod_ssh:
-                msg = (
-                    "s3-pipeline runs on the GPU pod but campaign.pod_ssh is empty — set it "
-                    "in campaign.yaml (the full `ssh root@IP -p PORT -i KEY` line)."
-                )
-                raise StageBlockedError(msg)
-            transport = SubprocessTransport(ctx.answers.pod_ssh)
-
-        # 4. Sequential per-dataset runs (one GPU; the pod runs exactly one job at a time).
-        for dataset in processed:
-            local_report = _report_dir(ctx, dataset) / "quality-report.json"
-            resumed = False
-            if not local_report.is_file():
-                state = _read_run_state(transport, dataset)
-                phase = state[0] if state is not None else "absent"
-                if phase == "absent":
-                    # Fresh launch OR relaunch-after-death: same run_id, so finalized
-                    # checkpoints replay from disk (the framework's resume semantics).
-                    _push_dataset(ctx, transport, dataset)
-                    _launch(transport, dataset)
-                else:
-                    resumed = True  # live or already-done job: re-entered, never doubled
-                if phase != "done":
-                    poll_pipeline_run(transport, dataset, clock=clock, sleep=sleep)
-                report = _pull_dataset_results(ctx, transport, dataset)
-            else:
-                # Pulled on a previous pass: the local bytes are the authority (resume
-                # never redoes finished work, and never needs the pod for it).
-                resumed = True
-                report = json.loads(local_report.read_text(encoding="utf-8"))
-            report_metrics = s3_lib.dataset_metrics_from_report(
-                report, induction_model=s3.induction_model
+    # 3. The transport, built late: the preps and the generated pipelines above need no pod.
+    if transport is None:
+        if not ctx.answers.pod_ssh:
+            msg = (
+                "s3-pipeline runs on the GPU pod but campaign.pod_ssh is empty — set it "
+                "in campaign.yaml (the full `ssh root@IP -p PORT -i KEY` line)."
             )
-            # Sanity floor on BOTH paths (fresh pull and local resume): empty blocks,
-            # and so does a crashed-graph report (zero nodes).
-            _require_nonempty_run(dataset, report_metrics, report)
-            dataset_metrics[dataset] = {
-                **report_metrics,
-                "run_id": run_id_for(dataset),
-                "induction_mode": (s3.induction_mode if dataset in induced else "none"),
-                "pipeline_yaml": f"pipelines/{dataset}.yaml",
-                "resumed": resumed,
-            }
+            raise StageBlockedError(msg)
+        transport = SubprocessTransport(ctx.answers.pod_ssh)
+
+    # 4. Sequential per-dataset runs (one GPU; the pod runs exactly one job at a time).
+    for dataset in processed:
+        local_report = _report_dir(ctx, dataset) / "quality-report.json"
+        resumed = False
+        if not local_report.is_file():
+            state = _read_run_state(transport, dataset)
+            phase = state[0] if state is not None else "absent"
+            if phase == "absent":
+                # Fresh launch OR relaunch-after-death: same run_id, so finalized
+                # checkpoints replay from disk (the framework's resume semantics).
+                _push_dataset(ctx, transport, dataset)
+                _launch(transport, dataset)
+            else:
+                resumed = True  # live or already-done job: re-entered, never doubled
+            if phase != "done":
+                poll_pipeline_run(transport, dataset, clock=clock, sleep=sleep)
+            report = _pull_dataset_results(ctx, transport, dataset)
+        else:
+            # Pulled on a previous pass: the local bytes are the authority (resume
+            # never redoes finished work, and never needs the pod for it).
+            resumed = True
+            report = json.loads(local_report.read_text(encoding="utf-8"))
+        report_metrics = s3_lib.dataset_metrics_from_report(
+            report, induction_model=s3.induction_model
+        )
+        # Sanity floor on BOTH paths (fresh pull and local resume): empty blocks,
+        # and so does a crashed-graph report (zero nodes).
+        _require_nonempty_run(dataset, report_metrics, report)
+        dataset_metrics[dataset] = {
+            **report_metrics,
+            "run_id": run_id_for(dataset),
+            "induction_mode": (s3.induction_mode if dataset in induced else "none"),
+            "pipeline_yaml": f"pipelines/{dataset}.yaml",
+            "resumed": resumed,
+        }
 
     # 5. Consolidated gate metrics — the one artifact Dennis reads before approving.
     usd_actual_total = round(
@@ -601,7 +589,6 @@ def run_s3_stage(
         },
         "preps": preps,
         "datasets": dataset_metrics,
-        "not_processed": not_processed,
         "pod": {"remote_root": REMOTE_ROOT, "remote_latence": REMOTE_LATENCE},
     }
     tmp = _metrics_path(ctx).with_name("metrics.json.tmp")
@@ -611,14 +598,8 @@ def run_s3_stage(
     total_chunks = sum(
         int(m.get("chunks", 0)) for m in dataset_metrics.values() if "chunks" in m
     )
-    skipped = (
-        f"{len(not_processed)} not processed, this stage has no pipeline for them "
-        f"({', '.join(not_processed)})"
-        if not_processed
-        else "0 not processed"
-    )
     return (
-        f"{len(processed)} dataset(s) processed ({total_chunks} chunks), {skipped}; "
+        f"{len(processed)} dataset(s) processed ({total_chunks} chunks); "
         f"induction actuals ${usd_actual_total:.2f} "
         f"(cap ${s3.induction_budget_usd_cap:.2f}); reports under {out_dir / 'reports'}"
     )

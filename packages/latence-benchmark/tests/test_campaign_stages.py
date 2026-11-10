@@ -121,11 +121,11 @@ class TestProbeAuthority:
         assert state.status_of("a") == BLOCKED
 
     def test_failure_blocks_with_reason(self, tmp_path: Path, ctx: CampaignContext) -> None:
-        stage = FakeStage("a", fail_with="the license gate refused musique")
+        stage = FakeStage("a", fail_with="the license gate refused ohr_bench")
         specs, state = make(tmp_path, stage)
         with pytest.raises(StageBlockedError, match="license gate refused"):
             run_stage(specs, "a", ctx, state)
-        assert state.stage("a").reason == "the license gate refused musique"
+        assert state.stage("a").reason == "the license gate refused ohr_bench"
 
     def test_unexpected_exception_blocks_with_typed_reason(
         self, tmp_path: Path, ctx: CampaignContext

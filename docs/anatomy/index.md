@@ -138,7 +138,9 @@ turned it on, and its committed YAML records why:
 
 > Benchmark corpus: PII spans stay recorded in `pii_spans`/`masked_content`, but the exported+embedded text is the RAW content. Measured 2026-08-07: with masking on, 82% of 2Wiki/MultiHop-RAG rows carried `[PERSON]`-style placeholders INCLUDING the article titles the questions target, and the reused M6 musique/hotpot exports are unmasked — so retrieval numbers were neither valid nor cross-comparable.
 
-The reason was a retrieval measurement, and that measurement no longer exists. The generator as
+The reason was a retrieval measurement, and that measurement no longer exists. The two reused
+exports the comment names belonged to `musique` and `hotpotqa`, which were removed from the
+campaign's dataset registry on 2026-11-10. The generator as
 it stands does not set the flag, so a pipeline generated today exports masked text. The flag
 itself is still in the Export: with it on, detection still runs and every finding is still
 written; only the substitution into the exported text is skipped, and the Export logs a warning

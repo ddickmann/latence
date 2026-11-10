@@ -24,11 +24,10 @@ import yaml
 
 _T = TypeVar("_T")
 
-#: The 6+2 corpus datasets S0 recommended (dataset-landscape.md), in campaign order:
-#: the incumbents first, then the multi-hop triad's third leg, then the new acquisition.
+#: The campaign's dataset registry, in campaign order: the two text-native datasets first,
+#: then the three PDF datasets. Every name here has a ``CORPUS_PLAN`` entry (s1-corpus) and a
+#: pipeline in s3-pipeline; a test holds the three lists together.
 KNOWN_DATASETS: tuple[str, ...] = (
-    "musique",
-    "hotpotqa",
     "wiki2multihop",
     "multihop_rag",
     "ohr_bench",

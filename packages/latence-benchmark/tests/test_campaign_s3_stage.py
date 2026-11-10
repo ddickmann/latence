@@ -1,11 +1,11 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""The s3-pipeline stage, fully offline: gating, unprocessed datasets, preps, the pod loop.
+"""The s3-pipeline stage, fully offline: gating, the dataset registry, preps, the pod loop.
 
 Same posture as the s2 suite: no ssh, no GPU, no OpenRouter — the pod is a scripted
 :class:`FakePod` behind the transport seam and the poll loop runs on a fake clock. What is
 proven here is every decision the stage makes AROUND the real run: refusal until s2 is
-approved, a named record for the datasets it has no pipeline for, deterministic prep
+approved, a pipeline for every selectable dataset, deterministic prep
 bytes, launch/re-enter/relaunch semantics, stall + death handling, and the consolidated
 metrics contract.
 """
@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from latence_benchmark.campaign import pipeline_stage
+from latence_benchmark.campaign.corpus_stage import CORPUS_PLAN
 from latence_benchmark.campaign.pipeline_stage import (
     STAGE_NAME,
     launch_cmd,
@@ -39,7 +40,7 @@ from latence_benchmark.campaign.stages import (
     stage_dir,
 )
 from latence_benchmark.campaign.state import STATE_FILENAME, CampaignState
-from latence_benchmark.campaign.wizard import CampaignAnswers
+from latence_benchmark.campaign.wizard import KNOWN_DATASETS, CampaignAnswers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -192,34 +193,27 @@ class TestGating:
             run_stage(specs, STAGE_NAME, ctx, state)
 
 
-# -- datasets the stage has no pipeline for ---------------------------------------------------
+# -- the registry and the stages agree ---------------------------------------------------------
 
 
-class TestNotProcessed:
-    """``musique`` / ``hotpotqa`` are selectable, and this stage does nothing for them.
+class TestEverySelectableDatasetHasAPipeline:
+    def test_every_known_dataset_is_planned_and_processed(self) -> None:
+        # A name the wizard offers must be one s1 can acquire and s3 has a pipeline for.
+        # A selectable dataset no stage processes is a registry entry with nothing behind it.
+        for name in KNOWN_DATASETS:
+            assert name in CORPUS_PLAN, f"{name} is selectable but has no CORPUS_PLAN entry"
+            assert name in pipeline_stage.PROCESS_ORDER, (
+                f"{name} is selectable but s3-pipeline has no pipeline for it"
+            )
 
-    The stage used to demand an export of an earlier campaign for the two (keyed on a
-    hyperedge file no pipeline writes any more) and block without one. Nothing reads such an
-    export now, so the stage neither looks for it nor claims to have reused it; it names the
-    datasets it did not process.
+
+# -- the removed reuse and not-processed paths -------------------------------------------------
+
+
+class TestRemovedPaths:
+    """The stage once verified an earlier campaign's export for two datasets, then listed
+    the two as ``not_processed``. Both datasets left the registry, and both paths with them.
     """
-
-    def test_an_incumbent_needs_no_earlier_export(self, tmp_path: Path) -> None:
-        # No benchmark/official-data/*/export anywhere under the repo root.
-        repo = make_repo(tmp_path, datasets=())
-        assert not (repo / "benchmark" / "official-data").exists()
-        ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
-        note = run_s3_stage(ctx)  # no transport at all: nothing to process
-        assert "0 dataset(s) processed" in note
-        assert "2 not processed" in note
-        assert "musique, hotpotqa" in note
-        metrics = json.loads(
-            (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
-        )
-        assert metrics["datasets"] == {}
-        assert metrics["not_processed"] == ["musique", "hotpotqa"]
-        assert "reused_from_m6" not in json.dumps(metrics)
-        assert s3_done_probe(ctx) is True
 
     def test_the_reuse_check_is_gone_from_the_module(self) -> None:
         assert not hasattr(pipeline_stage, "verify_reused_export")
@@ -227,24 +221,18 @@ class TestNotProcessed:
         source = Path(pipeline_stage.__file__).read_text(encoding="utf-8")
         assert "graph-hyperedges" not in source
 
-    def test_the_guide_no_longer_describes_a_reuse_check(self) -> None:
+    def test_the_not_processed_bookkeeping_is_gone_from_the_module(self) -> None:
+        assert not hasattr(pipeline_stage, "NOT_PROCESSED")
+        source = Path(pipeline_stage.__file__).read_text(encoding="utf-8")
+        assert "not_processed" not in source
+
+    def test_the_guide_describes_neither_path(self) -> None:
         guide = (REPO_ROOT / "docs" / "guides" / "benchmark-campaign.md").read_text(
             encoding="utf-8"
         )
         assert "graph-hyperedges.kv" not in guide
         assert "reused_from_m6" not in guide
-        # What the stage does instead is stated, in the stage's own vocabulary.
-        assert "not_processed" in guide
-
-    def test_adding_an_unprocessed_dataset_reopens_the_stage(self, tmp_path: Path) -> None:
-        # The metrics cover exactly the selection: a selection edit that only adds a
-        # dataset the stage does not process still invalidates the recorded metrics.
-        repo = make_repo(tmp_path, datasets=())
-        ctx = make_ctx(tmp_path, ("musique",), repo)
-        run_s3_stage(ctx)
-        assert s3_done_probe(ctx) is True
-        wider = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
-        assert s3_done_probe(wider) is False
+        assert "not_processed" not in guide
 
 
 # -- local preps -----------------------------------------------------------------------------
@@ -331,13 +319,13 @@ class TestPollLoop:
 
 class TestStageRun:
     def test_fresh_run_pushes_launches_polls_pulls_and_records(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique", "ohr_bench"))
-        ctx = make_ctx(tmp_path, ("musique", "ohr_bench"), repo)
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         pod = FakePod(states={"ohr_bench": [("absent", 0), ("running", 1), ("done", 9)]})
         clock = FakeClock()
         note = run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
-        assert "1 dataset(s) processed" in note
-        assert "1 not processed" in note
+        assert "1 dataset(s) processed (42 chunks)" in note
+        assert "not processed" not in note
 
         # Launched exactly once: nohup + pid file + the same-run-id resume contract.
         launches = [c for c in pod.commands if "nohup" in c]
@@ -364,7 +352,7 @@ class TestStageRun:
             (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
         )
         assert set(metrics["datasets"]) == {"ohr_bench"}
-        assert metrics["not_processed"] == ["musique"]
+        assert "not_processed" not in metrics
         ohr = metrics["datasets"]["ohr_bench"]
         assert (ohr["chunks"], ohr["mentions"], ohr["relations"]) == (42, 120, 30)
         assert (ohr["entities"], ohr["edges"], ohr["pii_total"]) == (80, 25, 5)
@@ -476,15 +464,6 @@ class TestStageRun:
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         with pytest.raises(StageBlockedError, match="pod_ssh"):
             run_s3_stage(ctx)  # no transport injected, no pod_ssh configured
-
-    def test_a_selection_with_nothing_to_process_never_needs_a_pod(
-        self, tmp_path: Path
-    ) -> None:
-        repo = make_repo(tmp_path, datasets=("musique", "hotpotqa"))
-        ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
-        note = run_s3_stage(ctx)  # no transport at all: nothing to process
-        assert "0 dataset(s) processed" in note
-        assert s3_done_probe(ctx) is True
 
     def test_a_zero_document_report_blocks_the_stage(self, tmp_path: Path) -> None:
         # No-fake-green: a run over zero documents still writes quality-report.json and

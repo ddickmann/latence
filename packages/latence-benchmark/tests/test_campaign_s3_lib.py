@@ -148,12 +148,12 @@ class TestBudget:
         assert budgets["uda"] > budgets["ohr_bench"] > budgets["vidoseek"] > 0
 
     def test_unknown_dataset_gets_an_even_share_of_the_remainder(self) -> None:
-        budgets = induction_call_budgets(150.0, DEEPSEEK, ["ohr_bench", "musique"])
+        budgets = induction_call_budgets(150.0, DEEPSEEK, ["ohr_bench", "multihop_rag"])
         per_call = est_usd_per_call(DEEPSEEK)
         known = int(CHUNK_ESTIMATES["ohr_bench"] * CHUNK_HEADROOM)
         assert budgets["ohr_bench"] == known
         remaining = 150.0 - known * per_call
-        assert budgets["musique"] == int(remaining / 1 / per_call)
+        assert budgets["multihop_rag"] == int(remaining / 1 / per_call)
         assert sum(budgets.values()) * per_call <= 150.0
 
     def test_no_induced_datasets_means_no_allocations(self) -> None:
