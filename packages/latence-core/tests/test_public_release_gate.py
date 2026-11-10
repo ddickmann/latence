@@ -261,7 +261,7 @@ def test_release_no_result_is_still_a_placeholder() -> None:
     assert not names, (
         f"{len(names)} result(s) in docs/BENCHMARKS-E2E.md are still placeholders:\n  "
         + "\n  ".join(sorted(set(names)))
-        + "\n\nThese are filled from a real GPU run (issues/e2e-extended/RUNBOOK.md). Do NOT fill "
+        + "\n\nThese are filled from a real GPU run. Do NOT fill "
         "one with a number from a different corpus, commit, or card — each table states its own "
         "method, and a number that does not match its stated method is worse than a missing one, "
         "because it looks checked."

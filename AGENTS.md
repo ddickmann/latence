@@ -187,8 +187,9 @@ did not otherwise change.
 ### 3. The doc-truth gates resolve links through `git ls-files`, not the working tree
 
 `packages/latence-core/tests/test_front_door_truthfulness.py` checks the front-door pages —
-`README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, this file, and every **tracked** page
-under `docs/` — plus `CHANGELOG.md` and every `packages/*/README.md`. It rejects:
+`README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `RELEASE-GATES.md`, this file, and
+every **tracked** page under `docs/` — plus `CHANGELOG.md` and every `packages/*/README.md`. It
+rejects:
 
 - relative markdown links, and backticked `docs/…` / `issues/…` file references, that do not resolve;
 - `#fragment` anchors that do not match a real heading under GitHub's slug rules;

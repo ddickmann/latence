@@ -59,7 +59,19 @@ _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 # commands precisely because that is what makes it useful. So it is held to the same gate — and
 # the gate resolving through the git index rather than the working tree is exactly the failure
 # mode the page itself warns agents about.
-_FRONT_DOOR = ("README.md", "CONTEXT.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")
+#
+# ``RELEASE-GATES.md`` is in the set because the README sends readers to it as the release
+# checklist, and no gate walked it: it linked a GPU runbook under ``issues/e2e-extended/`` that was
+# never in the tree, on ``main`` and here, until a rewrite of the gates happened to delete the
+# sentence.
+_FRONT_DOOR = (
+    "README.md",
+    "CONTEXT.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "RELEASE-GATES.md",
+)
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 # A backticked reference to a concrete file in one of the two trees a published page sends
