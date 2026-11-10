@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 68 records numbered 0001–0069.
+    the sequence simply skipped it), so the log holds 69 records numbered 0001–0070.
 
 ## Re-scope: the semantic-resolution and ontology engine
 
@@ -20,6 +20,7 @@ wayfinder map in `.scratch/semantic-sidecar/map.md`.
 | [0067](0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md) | Latence is re-scoped into a semantic-resolution and ontology engine that runs standalone and as a sidecar to Metis; warehouse metadata is a new input modality; the text path and Graph Completion stay (partly supersedes the scope framing of 0005 and 0017) |
 | [0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) | Query-time retrieval tooling, hyperedges and Context Enrichment are removed; embedders stay only as a resolution signal (supersedes 0039, 0048–0053, 0056–0059; narrows 0045) |
 | [0069](0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md) | The semantic layer is a replay of an append-only ledger of Assertions and Decisions; two levels (Entities may be auto-accepted in the calibrated band, Concepts are proposals a human approves); Bindings are keyed on Unity Catalog ids |
+| [0070](0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md) | Metis consumes the engine through one reviewable proposal file; everything else reaches it through Unity Catalog. No shared code, one route per source for new measures, and no importer plugin or live tool calls in v1 |
 
 ## Foundations & scope
 
