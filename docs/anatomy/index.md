@@ -15,8 +15,9 @@ The campaign itself ran in August 2026, on an earlier form of this pipeline that
 parts: Context Enrichment, hyperedges with graph features, and a BM25 export. They were removed by
 [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md).
 The five pipeline files committed under `benchmark/sota-campaign/stages/s3-pipeline/pipelines/`
-are the record of that run and still name those parts, so the current code rejects them; the
-generator emits the shape described here. Every count on this page that comes from the campaign
+are the record of that run and still name those parts. The current code does not load them:
+their `enrich` Stage names a Capability that no longer exists. The generator emits the shape
+described here. Every count on this page that comes from the campaign
 is marked as a record of that run.
 
 ---
@@ -107,7 +108,7 @@ wait for the graph: the two exports are independent branches.
 | 4 | `chunk` | `chunk` | `chunk.markdown` | `ChunkRecord`s at `max_tokens: 640`, `overlap_tokens: 80`, `min_tokens: 8`, each carrying its half-open character span in the parsed markdown |
 | 5 | `content_screen` | `content_screening` | `screening.content_keyword` | the chunk stream with prompt-injection and harmful-content hits flagged (flag-only by default), plus per-record findings for the Quality Report |
 | 5b | `induce` *(uda, ohr_bench, vidoseek)* | `schema_induction` | `label_inducer.llm` | each chunk stamped with its own induced entity / relation / PII label set — `granularity: chunk`, `max_labels: 40`, `temperature: 0.0`, `max_concurrency: 32` |
-| 6 | `extract` | `fused_entity_relation` | `fused_entity_relation.gliner2` | `EntityMention` **and** `RelationMention` records from one forward pass, `threshold: 0.5`, offsets mapped back to the original document |
+| 6 | `extract` | `fused_entity_relation` | `fused_entity_relation.gliner2` | `EntityMention` **and** `RelationMention` records from one Provider and one model, `threshold: 0.5`, offsets mapped back to the original document |
 | 7 | `redact` | `redaction` | `redaction.gliner2` | each chunk's `masked_content` + `pii_spans`; `guardrails: true` |
 | 8 | `profiling` | `profiling` | `profiling.statistical` | `FeatureRecord`s: per-document density / readability / Zipf / compression, plus corpus-level entity frequency and co-occurrence |
 | 9 | `consolidate_types` | `type_consolidation` | `type_consolidation.exact_surface` | every mention and relation relabelled onto one canonical type vocabulary, with the raw induced label kept for audit |
@@ -157,14 +158,14 @@ can stand in front of it. Every licence below is read from the Provider's own `P
 which records **weights and code separately** with a citation and a verification date — that is
 the framework's licence contract, not a summary someone typed.
 
-| Model | Stage | Weights / code | Why this one |
+| Model | Stage | Weights / code | What the profile and the records say |
 |---|---|---|---|
-| `lightonai/LightOnOCR-2-1B` | Parse, via `parser.lighton_vllm` (served over an OpenAI-compatible vLLM endpoint) | Apache-2.0 / Apache-2.0, verified 2026-07-09 | A 1B VLM reads *pixels*, so scans and complex layouts survive where a text extractor mangles them. Served rather than in-process because vLLM batching is where the throughput is, and because an endpoint keeps a VLM's dependency stack away from the learned models downstream. |
-| `lightonai/LightOnOCR-1B-1025` | Parse, via `parser.lighton` (in-process `transformers`) | Apache-2.0 / Apache-2.0, verified 2026-07-08 | The single-box path: same capability, no server to stand up. Note that these are **two packages pinning two different checkpoints** — `latence-parser-lighton` serves 1B-1025 in-process, `latence-parser-lighton-vllm` serves LightOnOCR-2-1B over HTTP. Both were licence-verified independently. |
-| `fastino/gliner2-multi-v1` | `extract` (`fused_entity_relation.gliner2`) | Apache-2.0 / Apache-2.0, verified 2026-07-10 | Zero-shot, so it extracts *that chunk's* induced labels with no task-specific fine-tuning; and fused, so entities and relations come out of one forward pass instead of two models disagreeing about spans. |
-| `fastino/GLiNER2-Guardrails-PII-Multi` | `redact` (`redaction.gliner2`) | Apache-2.0 / Apache-2.0, verified 2026-07-09 | The same GLiNER2 engine family the extractor already loads, so PII detection adds no second model library to the environment. |
-| `deepseek/deepseek-v4-flash-0731` | `induce` (`label_inducer.llm`, via OpenRouter) | Hosted API — **no weights licence**; the Provider declares `model_id=None` and only its own Apache-2.0 client code | Chosen on measured cost. The campaign's record, from a live 10-example A/B in August 2026: `$0.000118` per call against `$0.00042` for `gpt-4.1-mini` at comparable schema quality, and 247,944 calls across three datasets for about `$29.26` against a `$150` cap. The in-code default is still `gpt-4.1-mini`; any OpenAI-compatible endpoint works. |
-| `ibm-granite/granite-embedding-311m-multilingual-r2` | `export_corpus` (`embedding.sentence_transformers`, nested under the Export) | Apache-2.0 / Apache-2.0, verified 2026-07-14 | Permissive multilingual dense embedder, 768-dim, running in-process. It is the framework's default learned Embedder ([ADR-0045](../adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md)); the 97m sibling is the CPU tier. In this stack it only attaches a vector to each exported row: both resolvers here are exact-surface and use no Embedder. Where an Embedder acts as a resolution signal is described in [Embedders](../embedders.md). |
+| `lightonai/LightOnOCR-2-1B` | Parse, via `parser.lighton_vllm` (served over an OpenAI-compatible vLLM endpoint) | Apache-2.0 / Apache-2.0, verified 2026-07-09 | A vision-language model that reads page images. The Provider is an HTTP client: its profile declares `compute="either"`, 64 MB and `deterministic=False`, and the model runs on the vLLM server. The campaign's OCR stage served this checkpoint. The decision to put heavy models behind an endpoint is [ADR-0030](../adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md). |
+| `lightonai/LightOnOCR-1B-1025` | Parse, via `parser.lighton` (in-process `transformers`) | Apache-2.0 / Apache-2.0, verified 2026-07-08 | The same Capability with the model loaded in the pipeline process. Its profile declares `compute="gpu"` and 3,584 MB (declared, not measured). These are **two packages with two different default checkpoints**: `latence-parser-lighton` loads 1B-1025 in-process, `latence-parser-lighton-vllm` calls a server that serves LightOnOCR-2-1B. Each profile records its own licence verification. |
+| `fastino/gliner2-multi-v1` | `extract` (`fused_entity_relation.gliner2`) | Apache-2.0 / Apache-2.0, verified 2026-07-10 | Zero-shot: the label names are passed at inference, which is what lets each chunk be scored against its own induced labels. One model and one Provider fulfil both the entity and the relation Capability ([ADR-0013](../adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md)). Its profile declares `compute="either"`, 2,048 MB and `deterministic=False`. |
+| `fastino/GLiNER2-Guardrails-PII-Multi` | `redact` (`redaction.gliner2`) | Apache-2.0 / Apache-2.0, verified 2026-07-09 | Runs on the `gliner2` library, the same dependency the extractor's package declares, so PII detection adds no second model library to the environment. Its profile declares `compute="either"`, 2,048 MB and `deterministic=False`. |
+| `deepseek/deepseek-v4-flash-0731` | `induce` (`label_inducer.llm`, via OpenRouter) | Hosted API — **no weights licence**; the Provider declares `model_id=None` and only its own Apache-2.0 client code | The campaign's default induction model. The campaign's record gives cost as the reason, from a live 10-example A/B in August 2026: `$0.000118` per call against `$0.00042` for `gpt-4.1-mini`, which the record calls comparable in schema quality, and 247,944 calls across three datasets for about `$29.26` against a `$150` cap. The Provider's own default is `gpt-4.1-mini`; any OpenAI-compatible endpoint works. |
+| `ibm-granite/granite-embedding-311m-multilingual-r2` | `export_corpus` (`embedding.sentence_transformers`, nested under the Export) | Apache-2.0 / Apache-2.0, verified 2026-07-14 | A multilingual dense embedder, 768-dim, running in-process (`compute="either"`). It is the framework's default learned Embedder ([ADR-0045](../adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md)); the 97m sibling (384-dim) is the CPU tier. In this stack it only attaches a vector to each exported row: both resolvers here are exact-surface and use no Embedder. Where an Embedder acts as a resolution signal is described in [Embedders](../embedders.md). |
 
 Two more models are available and are deliberately **not** in this stack —
 `knowledgator/gliner-linker-large-v1.0` behind `disambiguation.glinker` (Apache-2.0 / Apache-2.0,
@@ -181,9 +182,11 @@ of the DAG.
 
 **The licence discipline, stated once.** Default reference Providers must have permissive
 weights *and* permissive code, verified separately and recorded before they ship
-([ADR-0012](../adr/0012-permissive-only-reference-providers-gemma-opt-in.md)). The one
-restricted-licence family in the ecosystem — Gemma — is explicitly non-default and opt-in,
-because its flow-down obligations bind every downstream recipient. The framework's own
+([ADR-0012](../adr/0012-permissive-only-reference-providers-gemma-opt-in.md)). The licence
+register lists one model family whose weights licence is restricted, Gemma
+(`google/embeddinggemma-300m`). It is not a default, and no Provider in this repository is
+backed by it. The Gemma licence is not OSI open-source and carries a flow-down obligation: every
+downstream recipient must be bound to its use restrictions. The framework's own
 outbound licence is Apache-2.0
 ([ADR-0063](../adr/0063-relicence-to-apache-2-0.md)); `NOTICE` carries the full provenance.
 
@@ -214,15 +217,15 @@ vendor's store, and a downstream consumer needs no framework code to read any of
 These are the corpora of the August 2026 campaign. The document and chunk counts are that run's
 record (`benchmark/sota-campaign/stages/s3-pipeline/metrics.json`).
 
-| corpus | what it actually is | schema | documents | chunks |
+| corpus | what it is | schema | documents | chunks |
 |---|---|---|---:|---:|
-| `vidoseek` | page-image PDFs — long visual pages, the hardest layout | induced | 292 | 2,434 |
-| `ohr_bench` | an OCR benchmark: textbooks, administrative scans, mixed quality | induced | 1,261 | 13,909 |
-| `uda` | long enterprise documents — financial filings and papers, the scale case | induced | 1,917 | 220,129 |
-| `multihop_rag` | born-digital news text | hand-authored | 609 | 3,264 |
-| `wiki2multihop` | born-digital Wikipedia paragraphs, many small documents | hand-authored | 56,687 | 57,812 |
+| `vidoseek` | the source PDFs of the ViDoSeek dataset, read through OCR | induced | 292 | 2,434 |
+| `ohr_bench` | the PDFs of the OHR-Bench dataset, read through OCR; research-only licence | induced | 1,261 | 13,909 |
+| `uda` | the financial and academic-paper documents of UDA (its FinHybrid and PaperTab subsets, the financial part capped at 150 documents), read through OCR; the largest of the five by chunks | induced | 1,917 | 220,129 |
+| `multihop_rag` | the news articles of MultiHop-RAG, as text | hand-authored | 609 | 3,264 |
+| `wiki2multihop` | the Wikipedia-derived context paragraphs of 2WikiMultihopQA's dev split, one document per distinct paragraph | hand-authored | 56,687 | 57,812 |
 
-Three of the five arrive as PDFs or page images; two arrive as text. They nevertheless run
+Three of the five arrive as PDFs; two arrive as text. They nevertheless run
 **the same pipeline**, for two reasons.
 
 First, the format difference is absorbed *by the Parse Capability*, not by the pipeline shape.
