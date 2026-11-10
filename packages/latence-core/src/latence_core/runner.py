@@ -231,6 +231,24 @@ _SENSITIVE_KEY_TOKENS = (
 # here; ``certainty_threshold`` is not.
 _SENSITIVE_KEY_PARTS = frozenset({"cert", "certs", "pem", "pfx", "p12"})
 
+# The ``token`` substring above also matches keys that COUNT model tokens, which redacted the
+# chunk budget (``max_tokens`` / ``min_tokens`` / ``overlap_tokens``) out of every manifest: the
+# file that exists to say what produced an export could not say how the corpus was chunked.
+# These are the budget keys the framework's own Providers read, matched as whole lower-cased
+# key names. The list is closed on purpose, and a listed key is shown only while its value is a
+# plain number (see ``_is_token_budget``). A key that merely resembles a budget
+# (``chunk_max_tokens``, ``token_budget``) is not on it and stays redacted like every other key
+# that contains ``token``: when in doubt the manifest hides a value rather than shows one.
+_TOKEN_BUDGET_KEYS = frozenset(
+    {
+        "max_tokens",
+        "min_tokens",
+        "overlap_tokens",
+        "max_new_tokens",
+        "microbatch_token_budget",
+    }
+)
+
 _KEY_PART_SPLIT = re.compile(r"[^a-z0-9]+")
 
 _REDACTED = "***REDACTED***"
@@ -263,6 +281,19 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in _SENSITIVE_KEY_PARTS for part in _KEY_PART_SPLIT.split(lowered))
 
 
+def _is_token_budget(key: str, value: object) -> bool:
+    """True for a known token-count key holding a plain number — the one ``token`` key shown.
+
+    Both halves are required. The key must be one of :data:`_TOKEN_BUDGET_KEYS` exactly, and the
+    value must be an ``int`` or ``float``: a credential is text, so a string (or a mapping, a
+    list, a boolean, a null) under a budget key is not what the key says it is and is redacted.
+    ``bool`` is excluded explicitly because it is a subclass of ``int``.
+    """
+    if key.lower() not in _TOKEN_BUDGET_KEYS:
+        return False
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def scrub_sensitive(value: object) -> object:
     """Recursively redact sensitive config keys in a JSON-able manifest structure.
 
@@ -273,11 +304,16 @@ def scrub_sensitive(value: object) -> object:
     scrubbed in place-of-copy; scalars pass through. Env-var *references* the operator
     might legitimately keep (e.g. ``"$OPENAI_API_KEY"``) are redacted too — the
     manifest never needs the secret's value, referenced or inlined.
+
+    One narrow exception: a known token-COUNT key with a numeric value (``max_tokens: 256``)
+    is shown, because it is a budget and not a credential (see ``_is_token_budget``).
     """
     if isinstance(value, dict):
         scrubbed: dict[str, object] = {}
         for key, val in value.items():
-            if isinstance(key, str) and _is_sensitive_key(key):
+            if isinstance(key, str) and _is_token_budget(key, val):
+                scrubbed[key] = val
+            elif isinstance(key, str) and _is_sensitive_key(key):
                 scrubbed[key] = _REDACTED
             else:
                 scrubbed[key] = scrub_sensitive(val)

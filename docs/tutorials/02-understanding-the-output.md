@@ -325,13 +325,15 @@ wiki.
 
 One thing to know when you read it: values under keys that look like credentials are written as
 `***REDACTED***`, so a key or a token never lands in the manifest. The match is on the key's
-name, and `token` is one of the patterns, so this stack's chunk budget is redacted too:
+name, and `token` is one of the patterns. The keys that count model tokens (`max_tokens`,
+`min_tokens`, `overlap_tokens`, `max_new_tokens`, `microbatch_token_budget`) are the one exception,
+and only while their value is a number, so this stack's chunk budget is readable:
 
 ```
-{'max_tokens': '***REDACTED***', 'min_tokens': '***REDACTED***', 'overlap_tokens': '***REDACTED***'}
+{'max_tokens': 256, 'min_tokens': 8, 'overlap_tokens': 32}
 ```
 
-The stack file itself is the record of those three values.
+Any other key containing `token` is redacted, including one that only resembles a budget.
 
 ```bash
 head -3 latence-out/_latence/runs/run-0001/wal.log
