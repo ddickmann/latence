@@ -39,12 +39,13 @@ with a measured value. Specifically:
 - [ ] **Pipeline throughput** — wall-clock and peak VRAM per stage, on stated hardware
 - [ ] **Device-honesty check** — the JIT left enabled, FlashInfer not forced, CUDA graphs captured,
       torch.compile active. Without this the throughput numbers were measured under a handicap.
-- [ ] **Retrieval per-signal + fused** — dense, SPLADE, BM25, graph, each alone and fused
-- [ ] **Hop-stratified results** — by hop count *and* shape, never pooled
-- [ ] **The question-set funnel** — enumerated → structural → G3 → G4 → human-audited
-- [ ] **The KG ablation** — with and without the graph leg
-- [ ] **Link prediction** — measured precision on our own held-out sample, and the end-to-end
-      retrieval delta
+- [ ] **Link prediction** — measured precision on our own held-out sample
+
+The protocol's retrieval rows (per-signal and fused results, hop-stratified results, the
+question-set funnel, the KG ablation and the link-prediction retrieval delta) were taken off that
+page when [ADR-0068](docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
+removed the retrieval tooling: they can no longer be run from this repository. They were
+placeholders; no measured value was dropped.
 
 **Do not fill a placeholder with a number from a different corpus, a different commit, or a
 different card.** Each table states its method and its hardware; a number that does not match its

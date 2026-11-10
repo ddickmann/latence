@@ -1,14 +1,8 @@
 # Tutorial 5 — Production
 
-!!! warning "Written before the retrieval tooling was removed"
-    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
-    BM25 / sparse / multi-vector export signals and the Qdrant sink. The `latence-sink-qdrant` steps and the `enrich` checkpoint in the resume example no longer exist.
-    The page is kept until it is rewritten.
-
 **What you will build.** The operational half of the system: a stack you can gate in CI, a run you
 can kill and restart without losing work, a corpus you can update incrementally instead of
-reprocessing, an erasure path that stands up to an auditor, and served GPU models behind an
+reprocessing, an erasure path you can check for yourself, and served GPU models behind an
 endpoint.
 
 **Prerequisites.** [Tutorial 1](01-your-first-pipeline.md) and
@@ -40,7 +34,7 @@ same file passes on a CPU CI box and on a GPU pod. `latence process` runs this c
 and refuses to start on an error.
 
 **`latence stack validate`** is the expensive one: it runs a named stack end-to-end on the bundled
-corpus and asserts the full battery.
+corpus and asserts the full battery. Run it from the clone, where `stacks/` lives.
 
 ```bash
 uv run latence stack validate stacks/default.yaml
@@ -60,7 +54,7 @@ uv run latence stack validate stacks/default.yaml
 | contracts | PASS | completeness 48/48 prov, 48/48 class, offsets_aligned=True, drift=clean |
 | kg | PASS | nodes=6, edges=33, evidence_coverage=1.00, exported=True |
 | rag | PASS | 4 corpus rows across 1 JSONL export(s), no PII leak |
-| report | PASS | schema v20, 13 stage metrics, profile_columns=True, no PII leak |
+| report | PASS | schema v21, 13 stage metrics, profile_columns=True, no PII leak |
 | graceful_failure | PASS | run completed; 3 quarantined + 0 PARSE_ERROR (dangerous fixtures handled, never crashed) |
 | determinism | PASS | 6 export artifact(s) byte-identical across two fresh runs |
 | resume | PASS | 6 export artifact(s) byte-identical after same-run_id resume |
@@ -88,11 +82,11 @@ Run state is files on Storage — no database, no coordinator. Every stage write
 the checkpoint's *presence* is what makes resume skip it. Checkpoints are written atomically, so a
 reader always sees either the previous checkpoint or the complete new one, never a torn write.
 
-Simulate a run that died three-quarters of the way through:
+Simulate a run that died before the graph was built and before either export was written:
 
 ```bash
-cd first-pipeline
-rm latence-out/_latence/runs/run-0001/checkpoints/{graph,enrich,export_kg,export_corpus}.jsonl
+cd /path/to/first-pipeline
+rm latence-out/_latence/runs/run-0001/checkpoints/{graph,export_kg,export_corpus}.jsonl
 uv run latence run latence.stack.yaml --run-id run-0001
 ```
 
@@ -107,7 +101,7 @@ for s in r['stages']:
 "
 ```
 
-✓ **look for** — exactly the four deleted stages re-executed and everything above them restored
+✓ **look for** — exactly the three deleted stages re-executed and every other stage restored
 from disk:
 
 ```
@@ -120,11 +114,10 @@ entities         from_checkpoint=True
 redact           from_checkpoint=True
 relations        from_checkpoint=True
 profiling        from_checkpoint=True
+export_corpus    from_checkpoint=False
 disambiguate     from_checkpoint=True
 graph            from_checkpoint=False
-enrich           from_checkpoint=False
 export_kg        from_checkpoint=False
-export_corpus    from_checkpoint=False
 ```
 
 `from_checkpoint` is the resume witness, per stage, in the report. On a real corpus this is the
@@ -195,26 +188,33 @@ Corpus Version v0 -> v1 (incremental)
   edges:     +1 -0
   records:   0 retracted, 0 purged (retraction)
   affected set: 21/30 corpus-level records recomputed
-  extraction: 5 extracted, 0 reused (unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)
+  extraction: 1 extracted, 4 reused (unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)
   drift: 0.200
 ```
 
-Three lines carry the story:
+Four lines carry the story:
 
 * **`documents: +1 ~0 -0 (=4 unchanged)`** — change detection by content hash. Touch a file without
   editing it and it stays in the unchanged column.
-* **`affected set: 21/30 corpus-level records recomputed`** — this is the performance witness, and
-  the number to watch. The corpus-level phase recomputes the *affected set*, not the corpus. If that
-  ratio is 1.0 on a small change, something in your stack is forcing a global recompute.
-* **`entities: +0 created, 3 merged, 0 split`** — the new document mentioned Carol Nguyen and Acme,
-  and resolution merged those mentions into the existing nodes rather than creating duplicates.
+* **`affected set: 21/30 corpus-level records recomputed`** — in the committed Corpus Version,
+  only the records in the neighbourhoods the change touched were re-resolved; the other nine were
+  carried forward unchanged. A ratio of 1.0 means the whole committed corpus was re-resolved. That
+  is what a reconciliation does, and the first line then reads `(reconciled)` instead of
+  `(incremental)`. On a corpus this small one document touches most of it.
+* **`entities: +0 created, 3 merged, 0 split`** — the new document mentioned Globex, Carol Nguyen
+  and Acme, and resolution merged those mentions into the existing nodes rather than creating
+  duplicates.
   Consistency with the base run comes from the corpus's **canonical type vocabulary**, which a delta
   *extends* rather than recomputes: a new type aliases into an existing canonical entry or appends a
   new one, and existing canonical types never churn.
+* **`extraction: 1 extracted, 4 reused`** — the doc-level stages (parse, chunk, extraction,
+  redaction) ran for `vendor.md` only. The four unchanged documents' records were reused from the
+  committed Corpus Version. On a real corpus this is where the time goes, because it is where the
+  models run.
 
-The `extraction:` line reports doc-level reuse separately. On a five-document corpus of
-one-paragraph files it is not where the saving is, and the counters here read `0 reused` — check it
-on your own corpus rather than assuming a ratio from this one.
+To see what a delta would do before it does anything, add `--dry-run`: it classifies the source
+against the committed Version (unchanged, new or changed, missing), runs no stage and commits
+nothing.
 
 `--reinduce` is the escape hatch: re-induce every chunk and re-canonicalize the type vocabulary from
 scratch. It is O(corpus) and it is the only path that may re-elect canonical type labels. Reach for
@@ -280,31 +280,50 @@ Find a document_id in the export's records.jsonl (the provenance.document_id fie
 the file: printf 'sha256:%s\n' "$(shasum -a 256 FILE | cut -d' ' -f1)".
 ```
 
-**Purge is GDPR erasure, and it is destructive.** Unlike a retraction, nothing is retained: the
-on-disk source file, every derived record across **all** Corpus Versions, and the run artifacts are
-physically erased. It prompts for confirmation; `--yes` skips the prompt.
+**Purge is GDPR erasure, and it is destructive.** Unlike a retraction, the document's records are
+not kept for rollback: the on-disk source file, every derived record across **all** Corpus
+Versions, and the earlier run directories are physically erased. It prompts for confirmation;
+`--yes` skips the prompt. Purge `contract.md`, whose id you can read out of the export the same
+way as above:
 
 ```bash
-uv run latence purge latence.stack.yaml --doc sha256:<id> --yes
+uv run latence purge latence.stack.yaml --yes \
+  --doc sha256:d5baa4ab39d12256093d7bf6a06f04df76c4a727cf236aa32e5920023e559c5f
 ```
 
-The runbook does not end there. Erasure that is not *verifiable* is not erasure, so the sink ships
-the audit step:
+✓ **look for** — records **purged** rather than retracted:
+
+```
+Corpus Version v2 -> v3 (incremental)
+  documents: +0 ~0 -1 (=3 unchanged)
+  entities:  +0 created, 0 merged, 3 split
+  edges:     +0 -0
+  records:   0 retracted, 6 purged (purge)
+  affected set: 22/22 corpus-level records recomputed
+  extraction: 3 extracted, 0 reused (unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)
+  drift: 0.333
+```
+
+Erasure that is not *verifiable* is not erasure, so check it. Search the storage root and the
+source folder for a phrase only that document contained:
 
 ```bash
-uv run latence-sink-qdrant verify-absent 'sha256:<id>#chunk-0' \
-  --collection first-pipeline --url http://localhost:6333
+ls documents
+grep -rl "Master Services Agreement" latence-out documents || echo "no match"
 ```
 
-It exits non-zero listing the offenders if any named record is still in the collection, and exits
-`2` rather than reporting absence if the collection it was pointed at does not exist — a mistyped
-`--collection` must never pass for erasure evidence.
+✓ **look for** — `contract.md` gone from `documents/`, and `no match`.
 
-The other half of that story is `latence-sink-qdrant load`, which is reconciling by default: it
-deletes points absent from the Export, which is precisely what makes a retraction or purge take
-effect downstream. Reconciliation only ever sweeps points in the load's own id namespace, so a
-co-tenant corpus is never touched. Pass `--no-reconcile` when you are loading an *incremental*
-export into a collection that also holds records the increment omits.
+Three things a purge leaves that you should know about:
+
+* **A ledger entry.** The Corpus Version manifests
+  (`latence-out/_latence/corpus/wal/v*/version.json`) still name the document's id and content
+  hash, and the Version that first added it still records its file name. None of the document's
+  text is there, but a file name can itself be sensitive.
+* **No export.** The earlier run directories went with the purge, exports included, and the purge
+  run keeps only its Quality Report. Run `latence delta` to write the current export.
+* **Your downstream copies.** The framework erases what is on its own Storage. A warehouse table
+  or a vector store you loaded from an earlier export is yours to reconcile.
 
 ---
 
@@ -316,7 +335,7 @@ a CUDA build without `sm_120` kernels — all discovered at runtime, on a pod, h
 
 The framework's answer is that **the pins are enforced constraints the build checks**, not a wiki
 page. Each environment under `deploy/env/<name>/` is a spec plus generated `requirements.in` /
-`constraints.txt` / lock, and the CLI verifies they agree:
+`constraints.txt` / lock, and the CLI verifies they agree. Run these from the clone:
 
 ```bash
 uv run latence env verify deploy/env/cpu-text/environment.yaml
@@ -362,8 +381,9 @@ Concretely:
 
 * **The OCR endpoint** — `parser.lighton_vllm` rasterises each page and POSTs the image to a running
   vLLM server serving `lightonai/LightOnOCR-2-1B` (Apache-2.0 weights *and* code). The pipeline
-  reaches it by `base_url`: one config value. Pod-measured, vLLM at concurrency is ~2.7× faster than
-  optimised in-process transformers, which is why production OCR is a warm server.
+  reaches it by `base_url`: one config value. Production OCR is a warm server because, measured
+  on a pod, vLLM at concurrency was about 2.7× faster than optimised in-process transformers
+  ([Serving LightOn-OCR with vLLM](../serving-lighton-vllm.md)).
 * **The schema-induction LLM** — any OpenAI-compatible server: a local vLLM, an on-prem gateway,
   OpenRouter. Also just a `base_url`.
 * **A text-layer corpus needs no GPU at all.** The CPU parsers plus the deterministic spine run the
@@ -376,16 +396,20 @@ The wizard generates this stack directly:
 uv run latence setup --profile enterprise-sota \
   --source ./documents \
   --ocr-base-url http://localhost:8000/v1 \
-  --ocr-model lightonocr
+  --ocr-model lightonocr \
+  --output gpu.stack.yaml
 ```
+
+`--output` matters here: without it the wizard writes `latence.stack.yaml`, which in this
+directory is the stack you wrote by hand in Tutorial 1.
 
 `--profile enterprise-sota` pins `device: cuda` for every learned stage and recommends the parse path
 from your detected file types: a corpus that is entirely born-digital text routes to the CPU
 `parser.plaintext` instead of the OCR VLM, because the OCR path has no text passthrough and forcing
 it on a text corpus makes every document a `PARSE_ERROR`. It also detects structured cross-reference
-headers in the corpus and wires the deterministic `header_refs` and `inline_refs` extractors when it
-finds them — the extractors that recovered the majority of the reference edges in the measured RFC
-run.
+headers in the corpus (the RFC `Obsoletes:` / `Updates:` family today) and wires the deterministic
+`header_refs` and `inline_refs` extractors when it finds them. Those recover reference edges whose
+targets are bare identifiers, which an entity-anchored extractor does not see.
 
 Full serving recipes, the Compose and Helm paths, the air-gapped path and the Blackwell
 `VLLM_USE_FLASHINFER_SAMPLER=0` caveat are in [Deployment](../deployment.md) and
@@ -422,10 +446,12 @@ Every throughput in that report is the median of seeded timed runs on that devic
 extrapolated.
 
 ```bash
-uv run latence run stacks/gpu-sota.yaml --tuned tuned/<device>.yaml
+uv run latence run gpu.stack.yaml --tuned tuned/<device>.yaml
 ```
 
-The overlay applies **only** when the tuned config's `device_fingerprint` matches the host. A
+Pass your own stack here, not one of the files under `stacks/`: those carry `{STORAGE_URI}` and
+`{CORPUS_DIR}` placeholders that only the `stack validate`, `tune` and `bake-off` harnesses fill
+in. The overlay applies **only** when the tuned config's `device_fingerprint` matches the host. A
 mismatch warns and falls back to stack defaults — a tuning measured on one card is never silently
 applied to another.
 
@@ -459,7 +485,7 @@ Assemble the pieces into something you would actually operate.
 **In CI, on every commit:**
 
 ```bash
-uv run latence stack check stacks/*.yaml                       # sub-second, offline
+for f in stacks/*.yaml; do uv run latence stack check "$f"; done  # one file per call, offline
 uv run latence stack validate stacks/default.yaml              # end-to-end, ten checks
 uv run latence env verify deploy/env/<yours>/environment.yaml  # dependency drift
 uv run latence env render deploy/env/<yours>/environment.yaml --check
@@ -483,15 +509,16 @@ uv run latence tune stacks/gpu-sota.yaml                               # measure
 
 * `latence delta` with a fresh run id, and watch the **affected-set ratio**;
 * `latence retract` for reversible removal, `latence purge` for erasure;
-* `latence-sink-qdrant load` to reconcile the store, then `verify-absent` as the audit step.
+* after a purge, search Storage for the document's text as the audit step, write a fresh export
+  with `latence delta`, and reconcile any downstream copy yourself.
 
 ---
 
 ## Where this leaves you
 
 You have now run every part of the system: a pipeline you configured, output you can read and trace,
-a query path over the emitted files, a Provider of your own that passes the enterprise-readiness
-gate, and the operational surface that makes it a production system rather than a script.
+a Provider of your own that passes the enterprise-readiness gate, and the operational surface that
+makes it a production system rather than a script.
 
 The remaining depth is reference rather than sequence:
 [Deployment](../deployment.md) for Compose, Helm and air-gapped installs;

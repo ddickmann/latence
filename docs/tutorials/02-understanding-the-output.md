@@ -1,11 +1,5 @@
 # Tutorial 2 — Understanding the output
 
-!!! warning "Written before the retrieval tooling was removed"
-    This page predates [ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
-    BM25 / sparse / multi-vector export signals and the Qdrant sink. The `context_header` / `kg_node_*` columns, the *signal sidecars* section and the references to a retrieval tutorial describe output that is no longer produced.
-    The page is kept until it is rewritten.
-
 **What you will build.** Nothing new — this tutorial builds *fluency*. By the end you will know
 what every emitted artifact contains, which field to reach for, and how to take a single edge in
 the knowledge graph and produce the exact source sentence that justifies it. That last skill is the
@@ -29,7 +23,7 @@ questions:
 
 | Path | Question it answers |
 | --- | --- |
-| `export/` | *What did I get?* The two deliverables — the RAG corpus and the knowledge graph — plus their optional signal sidecars. This is what you ship. |
+| `export/` | *What did I get?* The two deliverables — the corpus and the knowledge graph. This is what you ship. |
 | `checkpoints/<stage>.jsonl` | *What did each stage produce?* One newline-delimited JSON file per stage, and the durable input the next stage reads. |
 | `screening/` + `quarantine/` | *What was held back, and why?* The two safety checkpoints keep separate ledgers: what they inspected, and what they stopped. |
 | `quality-report.json` / `.md` | *Can I trust it?* The machine- and human-readable verdict on the run. |
@@ -42,9 +36,10 @@ other change.
 
 ---
 
-## 2. `records.parquet` — the RAG corpus
+## 2. `records.parquet` — the corpus
 
-This is the file a retrieval system consumes. Start with its schema:
+This is the corpus as a table: one row per chunk, the form a warehouse or a vector store loads.
+Start with its schema:
 
 ```bash
 uv run python -c "
@@ -53,7 +48,7 @@ print(pq.read_schema('latence-out/_latence/runs/run-0001/export/records.parquet'
 "
 ```
 
-✓ **look for** — twelve columns:
+✓ **look for** — seven columns:
 
 ```
 record_id: string
@@ -63,19 +58,17 @@ classification: string
 content: string
 media_type: string
 embedding: list<element: double>
-context_header: string
-kg_node_ids: list<element: string>
-neighbor_node_ids: list<element: string>
-kg_node_community: list<element: string>
-kg_node_centrality: list<element: double>
+  child 0, element: double
 ```
 
-Four of those columns are **not** in a default export. `embedding` appears because you wired an
-`embedder` block; the last four appear because you set `context_columns: true` on a stack that has
-an `enrich` stage. Every signal column is additive: with none of them wired, the Parquet schema is
-byte-identical to the base one. Nothing is written speculatively.
+One of those columns is **not** in a default export: `embedding` appears because you wired an
+`embedder` block. Without it the Parquet file has the first six columns and nothing else. Nothing
+is written speculatively.
 
-Read one row:
+`records.jsonl` holds the same rows in the same order, and more of each: a JSONL row is the whole
+chunk record, so it also carries `pii_spans`, `masked_content`, `offset_map`, `page_slice`,
+`token_count` and `risk_markers`. The Parquet file is the flat table; the JSONL file is the
+record. Read one row:
 
 ```bash
 uv run python -c "
@@ -87,14 +80,16 @@ print(json.dumps({k: v for k, v in r.items() if k != 'embedding'}, indent=1)[:12
 
 ### The columns, and what each is for
 
-**`record_id`** — `sha256:<document hash>#chunk-<n>`. Stable, content-addressed, and the same key
-the Qdrant sink writes and the query side reads back. This is why a collection loaded by this
-framework needs no mapping configuration.
+**`record_id`** — `sha256:<document hash>#chunk-<n>`. Stable and content-addressed: the same
+document bytes always give the same ids, so a row can be joined to its checkpoints, to the
+mention ids in the graph, and to the same row in a later run.
 
 **`content`** — the chunk text **as exported**, which is the *redacted* text. This is the single
 most important thing to understand about the corpus: redaction is a chunk→chunk transform that sets
-each chunk's `masked_content`, and the Export materialises that. There is no clean copy in the
-deliverable. Look at `contract.md`'s row and you will see `IBAN [IBAN].`, not the digits.
+each chunk's `masked_content`, and the Export materialises that. There is no clean copy in
+`export/`. Look at `contract.md`'s row and you will see `IBAN [IBAN].`, not the digits. (The
+checkpoints of the stages before the export do hold the unmasked text; they are run state, not
+the deliverable.)
 
 **`provenance`** — a JSON object carrying `source_uri`, `file_name`, `file_type`, `file_size`, the
 content-addressed `document_id`, `page_start` / `page_end`, and `char_start` / `char_end` **in the
@@ -108,61 +103,24 @@ between a citation you can check and a citation you can only hope about.
 dimensions from `embedding.hashing`.
 
 !!! warning "`embedding.hashing` is a reference, not a semantic model"
-    The in-core Embedder is a deterministic hashing embedder: it maps terms to buckets. It exists so
-    the seam, the emission and the whole offline test suite can run with zero downloads and
+    The in-core Embedder is a deterministic hashing embedder: a token-hash bag-of-words. It exists
+    so the seam, the emission and the whole offline test suite can run with zero downloads and
     byte-reproducible output — and it does that job perfectly.
 
     What it is **not** is semantic. Two paraphrases with no shared words get near-zero similarity
-    from it, because it has no notion of meaning. If you evaluate "does dense retrieval beat BM25?"
-    against this Embedder, you are evaluating a lexical signal against a lexical signal and the
-    answer is meaningless. Wire a real one — `embedding.sentence_transformers` with a Granite r2
-    checkpoint — before drawing any conclusion about dense retrieval.
-    (The retrieval tutorial that returned to this was removed.)
-
-**`context_header`** — a JSON string holding the knowledge graph's projection onto this chunk. Open
-one:
-
-```bash
-uv run python -c "
-import json
-for line in open('latence-out/_latence/runs/run-0001/export/records.jsonl'):
-    r = json.loads(line)
-    if r['provenance']['file_name'] == 'incident.md':
-        print(json.dumps(r['context_header'], indent=1))
-"
-```
-
-✓ **look for** — the chunk's own entities with their types, confidences, node ids, centralities and
-communities, plus `neighbor_triples`:
-
-```json
-{
- "entities": ["Acme", "Bob Reyes", "Globex"],
- "entity_types": ["ORG", "PERSON", "ORG"],
- "kg_node_ids": ["96987fab1d4dd7e2", "28fcaa908348a40a", "9c7c04ce2d8d545a"],
- "kg_node_centrality": [0.33955224, 0.14925373, 0.21268657],
- "neighbor_node_ids": ["bb0d32639119f88d"],
- "neighbor_triples": ["Bob Reyes —works_for→ Acme", "Bob Reyes —works_for→ Globex"]
-}
-```
-
-That `neighbor_node_ids` entry is Alice Turner, who is **not mentioned in `incident.md` at all**.
-She is there because she is one edge away in the graph from an entity that is. The header is
-prepended to the **embedding input only** — the stored `content` is untouched — so the dense vector
-for this chunk is graph-aware while the text you show a user is not polluted.
-
-**`kg_node_ids` / `neighbor_node_ids` / `kg_node_community` / `kg_node_centrality`** — the same
-projection denormalised into native Parquet list columns, named for exactly the metadata keys the
-query-time expander, multi-hop and packer components read by default. A store that copies Parquet
-columns into candidate metadata makes graph-augmented retrieval work end to end with no glue code.
-This is the hinge between the pipeline and retrieval, and Tutorial 3 uses it directly.
+    from it, because it has no notion of meaning. Do not judge anything that depends on meaning by
+    these vectors. Wire a real Embedder — `embedding.sentence_transformers` with a Granite r2
+    checkpoint — before drawing a conclusion. [Embedders](../embedders.md) lists the Providers and
+    the Stages that use one.
 
 ---
 
 ## 3. The knowledge graph
 
 Three renderings of one graph. `graph-nodes.parquet` and `graph-edges.parquet` are the source of
-truth; `graph.ttl` (RDF/Turtle) and `graph.graphml` are the same content for tools that speak them.
+truth; `graph.ttl` (RDF/Turtle) and `graph.graphml` are the same nodes and edges for tools that
+speak those formats, with the Evidence reduced to a count. The column-by-column reference is
+[the knowledge-graph export](../anatomy/04-knowledge-graph-export.md).
 
 ### Nodes
 
@@ -177,15 +135,14 @@ print(json.dumps({k: v for k, v in n.items() if k != 'evidence'}, indent=1))
 
 ✓ **look for** — the Acme node, and specifically these fields:
 
-* `node_id` — a 16-hex content hash. **Not** a readable label. You cannot seed a graph traversal
-  with the string `"Acme"`; you resolve the label to its `node_id`(s) via `canonical_name` first.
-  This is the single most common first-run mistake with the retrieval side.
+* `node_id` — a 16-hex content hash. **Not** a readable label. Edges refer to nodes by this id, so
+  to follow the edges of "Acme" you first find its `node_id` by filtering on `canonical_name`.
 * `entity_id` — `entity:acme`, the normalised surface the resolver clustered on.
 * `member_mention_ids` — a JSON array of **every mention that collapsed into this node**, each one a
   `…#chunk-N#entity-M` id you can look up in `checkpoints/entities.jsonl`.
 * `source_document_ids` — the documents this node was seen in. Three, for Acme, and its
   `properties` record `mention_count: 7` across them.
-* `properties` — `centrality`, `community`, `document_count`, `mention_count`, `linked`.
+* `properties` — a JSON object: `confidence`, `document_count`, `mention_count`, `linked`.
 
 `member_mention_ids` is the auditable core of entity resolution. The claim "these three surface
 forms are one organisation" is not asserted; it is *listed*, mention by mention, and each mention
@@ -213,6 +170,7 @@ print(json.dumps(json.loads(e['evidence']), indent=1))
   "sha256:93df2e95…#chunk-0#entity-2",
   "sha256:93df2e95…#chunk-0#entity-6"
  ],
+ "schema_version": 22,
  "snippet": "edge 'works_for' bb0d32639119f88d -> 96987fab1d4dd7e2"
 }
 ```
@@ -300,14 +258,15 @@ print(sorted(r.keys()))
 ✓ **look for** — the top-level blocks:
 
 ```
-['chunk', 'completeness', 'conformance', 'context_enrichment', 'contracts_complete',
- 'delta', 'disambiguation', 'document_count', 'drift', 'entities', 'goldset', 'graph',
- 'parse', 'pipeline_name', 'profiling', 'redaction', 'relations', 'run_id',
- 'schema_version', 'screening', 'stages', 'total_duration_seconds', 'type_consolidation']
+['chunk', 'completeness', 'conformance', 'contracts_complete', 'delta', 'disambiguation',
+ 'document_count', 'drift', 'entities', 'goldset', 'graph', 'parse', 'pipeline_name',
+ 'profiling', 'redaction', 'relations', 'run_id', 'schema_version', 'screening', 'stages',
+ 'total_duration_seconds', 'type_consolidation']
 ```
 
-`delta` and `goldset` are `null` for a plain run — the first is filled by
-[`latence delta`](05-production.md), the second by a gold-set evaluation.
+Four of them are `null` for this run. `delta` is filled by [`latence delta`](05-production.md),
+`goldset` by a gold-set evaluation, `conformance` when a conformance roll-up is attached, and
+`type_consolidation` when the stack has a type-consolidation stage, which this one does not.
 
 The blocks worth knowing:
 
@@ -340,40 +299,7 @@ resolved exactly.
 
 ---
 
-## 6. The signal sidecars
-
-**`bm25-stats.json`** — the corpus term statistics a store loads to drive **its own** first-stage
-BM25 search. The framework emits the artifact; it does not run the search
-([ADR-0048](../adr/0048-retrieval-tooling-is-strictly-stateless.md)).
-
-```bash
-uv run python -c "
-import json
-d = json.load(open('latence-out/_latence/runs/run-0001/export/bm25-stats.json'))
-print({k: v for k, v in d.items() if k != 'terms'})
-print('terms:', len(d['terms']), d['terms'][:3])
-"
-```
-
-✓ **look for**
-
-```
-{'artifact': 'latence.bm25.termstats', 'avgdl': 28.0, 'doc_count': 4,
- 'tokenizer': 'tokenizer.regex', 'total_tokens': 112, 'version': 1}
-terms: 76 [{'df': 1, 'idf': 1.2039728, 'term': '07'}, ...]
-```
-
-The `tokenizer` field is the point: BM25's statistics are a pure function of how text is split into
-terms, so the tokenisation is a **Capability seam** and the artifact records which Provider produced
-it. The statistics are computed over the *stored redacted* text, so the lexical index can never
-re-leak the PII the corpus removed.
-
-**`bm25-postings.parquet`** — per-record forward postings: `record_id`, `doc_len`, and parallel
-`terms` / `term_frequencies` arrays, with terms strictly ascending so two runs agree byte for byte.
-
----
-
-## 7. `manifest.json` and `wal.log`
+## 6. `manifest.json` and `wal.log`
 
 ```bash
 uv run python -c "
@@ -392,9 +318,20 @@ print([s['name'] + ':' + s['provider'] for s in m['pipeline']['stages']][:4])
 ```
 
 `manifest.json` holds the pipeline **as executed** — every stage with its capability, provider,
-`depends_on` and the complete config it ran with, defaults filled in. If you ever need to answer
-"what exactly produced this export", this file is the answer, and it sits next to the export rather
-than in a wiki.
+`depends_on` and its config as you wrote it, plus the pipeline-level settings with their defaults
+filled in (`extract_on`, `schema_version` and the rest). If you ever need to answer "what exactly
+produced this export", this file is the answer, and it sits next to the export rather than in a
+wiki.
+
+One thing to know when you read it: values under keys that look like credentials are written as
+`***REDACTED***`, so a key or a token never lands in the manifest. The match is on the key's
+name, and `token` is one of the patterns, so this stack's chunk budget is redacted too:
+
+```
+{'max_tokens': '***REDACTED***', 'min_tokens': '***REDACTED***', 'overlap_tokens': '***REDACTED***'}
+```
+
+The stack file itself is the record of those three values.
 
 ```bash
 head -3 latence-out/_latence/runs/run-0001/wal.log
@@ -418,7 +355,7 @@ new one, never a torn write. [Tutorial 5](05-production.md) uses this.
 ## What you can now do
 
 Point at any number the pipeline produced and name the file it came from. Take an edge and produce
-its sentence. Tell a signal column from a base one. Tell an honest gap (`skipped`, `UNVERIFIED`)
-from a claim.
+its sentence. Tell the opt-in column from the base ones. Tell an honest gap (`skipped`,
+`UNVERIFIED`) from a claim.
 
 **Next:** [Bringing your own Provider](04-bringing-your-own-provider.md).

@@ -1,20 +1,24 @@
-# End-to-end results — GPU pipeline and retrieval
+# End-to-end results — GPU pipeline
 
-!!! warning "Written before the retrieval tooling was removed"
-    This page predates [ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md), which removed the query-time retrieval
-    tooling together with Context Enrichment (`enrich`), graph features, hyperedges, the
-    BM25 / sparse / multi-vector export signals and the Qdrant sink. The retrieval rows of this protocol can no longer be run from this repository.
-    The page is kept until it is rewritten.
-
-> **STATUS: UNFILLED — these are the numbers that gate public release.**
+> **STATUS: UNFILLED — these are the numbers that gate a release.**
 >
-> Every value below is a placeholder. They are filled from a real GPU run, and this repository is
-> **not published publicly until they are**. See
+> Every value below is a placeholder. They are filled from a real GPU run. The source of this
+> repository is public as a pre-1.0 preview; a `v*` release is **not cut until they are**
+> ([ADR-0066](adr/0066-publication-and-release-are-separate-gates.md)). See
 > [`RELEASE-GATES.md`](https://github.com/ddickmann/latence/blob/main/RELEASE-GATES.md).
 >
 > The placeholders are **machine-checked**. `test_public_release_gate.py` inventories every
 > `PENDING:` token on this page; under `LATENCE_RELEASE_CHECK=1` it **fails the build** while any
-> remain. Publishing with an unfilled table by forgetting is not possible.
+> remain. Cutting a release with an unfilled table by forgetting is not possible.
+
+!!! note "What this protocol no longer covers"
+    This protocol used to include a retrieval section: per-signal and fused results,
+    hop-stratified results, the question-set funnel, a knowledge-graph ablation and two external
+    retrieval benchmarks, plus a retrieval-delta row under link prediction. Every one of those
+    values was still a placeholder. They were taken off the page because
+    [ADR-0068](adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
+    (2026-11-08) removed the query-time retrieval tooling they would have measured, so they can
+    no longer be run from this repository. No measured number was deleted.
 
 This page is distinct from [`BENCHMARKS.md`](BENCHMARKS.md), which carries **already-measured**
 per-Stage suite results (Parse, Redaction, Relation extraction). Those are real. Nothing here is,
@@ -31,8 +35,10 @@ claim, and a reader who knows the field will discount it entirely.
 **Hardware:** `PENDING:gpu-hardware` · **Corpus:** `PENDING:corpus-identity` ·
 **Commit:** `PENDING:repro-commit`
 
-**Method:** staged — OCR server up → parse → server down → learned stages. Wall-clock and peak VRAM
-read from the run's own `quality-report.json`, not from a stopwatch.
+**Method:** staged — OCR server up → parse → server down → learned stages. Wall-clock is read
+from the run's own `quality-report.json` (`stages[].duration_seconds`), not from a stopwatch. The
+Quality Report records no VRAM figure, so the peak-VRAM column needs its own reading; state how
+it was taken when the column is filled.
 
 | Stage | Provider | Units | Wall-clock | Peak VRAM | Throughput |
 |---|---|---:|---:|---:|---:|
@@ -62,103 +68,15 @@ is not comparable to anything.
 
 ---
 
-## 2. Retrieval
-
-**Method:** `PENDING:retrieval-method` · **Corpus:** `PENDING:retrieval-corpus` ·
-**k =** `PENDING:retrieval-k`
-
-### 2a. Per-signal, then fused
-
-A fusion result without per-signal baselines is uninterpretable — the reader cannot tell whether
-fusion contributed anything at all.
-
-| Signal | Recall@k | nDCG@k | MRR |
-|---|---:|---:|---:|
-| Dense only | `PENDING:dense-recall` | `PENDING:dense-ndcg` | `PENDING:dense-mrr` |
-| SPLADE (sparse) only | `PENDING:splade-recall` | `PENDING:splade-ndcg` | `PENDING:splade-mrr` |
-| BM25 only | `PENDING:bm25-recall` | `PENDING:bm25-ndcg` | `PENDING:bm25-mrr` |
-| Graph traversal only | `PENDING:graph-recall` | `PENDING:graph-ndcg` | `PENDING:graph-mrr` |
-| **Fused — RRF (k=60)** | `PENDING:rrf-recall` | `PENDING:rrf-ndcg` | `PENDING:rrf-mrr` |
-| **Fused — weighted, normalised** | `PENDING:wsum-recall` | `PENDING:wsum-ndcg` | `PENDING:wsum-mrr` |
-
-Both fusers are reported because RRF's `k=60` is not a principled constant — in the original paper's
-own words it was *"fixed during a pilot investigation and not altered during subsequent
-validation"*, measured once over 30 homogeneous TREC runs. Bruch et al. (TOIS 2023) show a
-normalised convex combination beats it. We report the comparison, not a preferred outcome.
-
-### 2b. Stratified by hop count and shape — never pooled
-
-A 7-wide fan-out and a 3-deep chain are different tasks with different failure modes. Averaging them
-into one "multi-hop accuracy" is exactly the move the shortcut literature exists to puncture.
-
-| Hops | Shape | n | Dense | SPLADE | BM25 | Graph | Fused |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 2 | chain | `PENDING:h2-n` | `PENDING:h2-dense` | `PENDING:h2-splade` | `PENDING:h2-bm25` | `PENDING:h2-graph` | `PENDING:h2-fused` |
-| 3 | chain | `PENDING:h3-n` | `PENDING:h3-dense` | `PENDING:h3-splade` | `PENDING:h3-bm25` | `PENDING:h3-graph` | `PENDING:h3-fused` |
-| 4 | chain | `PENDING:h4-n` | `PENDING:h4-dense` | `PENDING:h4-splade` | `PENDING:h4-bm25` | `PENDING:h4-graph` | `PENDING:h4-fused` |
-| 5–7 | fan-out | `PENDING:h57-n` | `PENDING:h57-dense` | `PENDING:h57-splade` | `PENDING:h57-bm25` | `PENDING:h57-graph` | `PENDING:h57-fused` |
-
-> Depth beyond 4 is reported as **breadth**, not as chains. No published, human-validated benchmark
-> exceeds 4 hops of serial depth — HotpotQA and 2Wiki are 2-hop, MuSiQue is 2–4, HopWeaver is 2.
-> MuSiQue's best model scores 57.9 / 47.9 / **28.1** at 2/3/4 hops, so a 7-deep chain measures
-> near-zero and discriminates nothing.
-
-### 2c. Question-set validity — the funnel
-
-A generator that reports only its output count is hiding its selection rate. MuSiQue's per-edge
-necessity filter passed **26.5%** of candidates; a comparable rate is expected and published here.
-
-| Stage | Surviving |
-|---|---:|
-| Candidates enumerated | `PENDING:funnel-enumerated` |
-| Passed structural filters | `PENDING:funnel-structural` |
-| Passed G3 (per-edge necessity) | `PENDING:funnel-g3` |
-| Passed G4 (DiRe) | `PENDING:funnel-g4` |
-| Human-audited as genuinely multi-hop | `PENDING:funnel-human` |
-
-| Gate | What it proves | Result |
-|---|---|---|
-| G1 closed-book | A no-retrieval LLM scores at chance | `PENDING:g1` |
-| G2 single-hop baseline | BM25+reader and dense+reader below fused, below oracle | `PENDING:g2` |
-| G3 per-edge necessity | Masking a predecessor's answer breaks the sub-question | `PENDING:g3` |
-| G4 DiRe | Disconnected reasoning cannot recover the answer | `PENDING:g4` |
-| G5 bridge leakage | No intermediate entity named in the question | `PENDING:g5` |
-| G7 evidence accessibility | Recall@k **and** Support F1, separately | `PENDING:g7` |
-| G8 human audit | % judged genuinely multi-hop | `PENDING:g8` |
-
-### 2d. Knowledge-graph ablation
-
-The independent literature is markedly more sceptical than the GraphRAG marketing: DIGIMON (VLDB)
-found no graph method consistently beats VanillaRAG; GraphRAG-Bench found graph methods achieve
-higher recall but *lower* relevance. The defensible number is that ~13.6% of MultiHop-RAG queries
-are answerable *only* via graph. **If the graph does not earn its weight here, that is the result we
-publish.**
-
-| Configuration | Recall@k | Δ |
-|---|---:|---:|
-| Without graph leg | `PENDING:ablate-nograph` | — |
-| With graph leg | `PENDING:ablate-graph` | `PENDING:ablate-delta` |
-| With graph + link prediction | `PENDING:ablate-linkpred` | `PENDING:ablate-lp-delta` |
-
-### 2e. External benchmarks
-
-Our own generated question set cannot establish standing on its own. These can.
-
-| Benchmark | Metric | Published reference | Ours |
-|---|---|---:|---:|
-| BEIR / HotpotQA | nDCG@10 | `PENDING:beir-ref` | `PENDING:beir-ours` |
-| StrategyQA | Recall@10 | 0.457 (2022 SOTA) | `PENDING:strategyqa-ours` |
-
----
-
-## 3. Link prediction
+## 2. Link prediction
 
 **The honest ceiling, stated before the number:** on automatically-extracted open-schema KGs, SOTA
 Hits@1 is **0.26–0.31**. Unfiltered top-1 densification means roughly 7 in 10 added edges are wrong —
-and a false edge in a traversal graph does not merely fail to help, it **manufactures a spurious
-path** that pulls unrelated documents into the neighbourhood. Edges are therefore admitted only
-above a measured precision threshold, calibrated on a held-out sample from **our own** graph, never
-on FB15k-237.
+and a false edge does not merely fail to help, it **manufactures a spurious path** between
+entities the corpus never connected. `graph_completion.ultra` therefore emits an inferred edge
+only above a precision-targeted threshold (`target_precision`, default 0.9), calibrated on a
+held-out split of **our own** graph's edges, never on FB15k-237. Inferred edges are marked as
+such and counted separately in the Quality Report.
 
 | Metric | Value |
 |---|---:|
@@ -167,16 +85,21 @@ on FB15k-237.
 | Held-out sample size | `PENDING:lp-sample` |
 | Precision at admission threshold | `PENDING:lp-precision` |
 | Edges admitted (% of predicted) | `PENDING:lp-admitted` |
-| **End-to-end retrieval Δ** | `PENDING:lp-retrieval-delta` |
 
-Link prediction is gated on **end-to-end retrieval**, never on MRR. A densification that improves
-MRR and degrades retrieval is a failure.
+This table used to end with an end-to-end retrieval delta, the measure link prediction was gated
+on in place of MRR. That row went with the retrieval tooling, and this page defines no replacement
+for it yet.
 
 ---
 
-## 4. Reproduction
+## 3. Reproduction
 
-Reproduced by running the enterprise profile end to end on the stated hardware; corpus
-acquisition is `bash benchmark/corpus/fetch_corpus.sh`.
+The stack is the stage table in §1, run end to end on the stated hardware. `latence setup
+--profile enterprise-sota` generates a stack with the same Providers for chunk, extract, redact,
+disambiguate, graph and complete, and with `parser.lighton_vllm` for parse when the corpus holds
+scans or PDFs. It differs in one Provider: it wires `label_inducer.llm` for `induce` where the
+table names `label_inducer.lexicon`. Its other Stages (source, the two screening Stages,
+profiling, type consolidation and the two exports) are not timed by the table. Corpus acquisition
+is `bash benchmark/corpus/fetch_corpus.sh`.
 
 **Corpus:** `PENDING:repro-corpus` · **Date:** `PENDING:repro-date`
