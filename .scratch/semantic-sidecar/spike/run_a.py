@@ -31,6 +31,7 @@ import pandas as pd
 
 from er import (
     ArrayClusterer,
+    Bands,
     NeighbourTable,
     fit_isotonic,
     human_minutes,
@@ -38,6 +39,8 @@ from er import (
     pairwise_and_bcubed,
     wilson_lower,
 )
+from learned import certify, draw_training, fit_score
+from pairfeat import ORG_PATTERN, PERSON_PATTERN, org_features, pattern_strata, person_features
 from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, rescue_curve, rescue_region, stage_two, uncertain_region
 
 LEGAL_CANON = {
@@ -484,6 +487,7 @@ def run(
     relabel: bool = False,
     rescue: int = 0,
     curve: bool = False,
+    learned: bool = False,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes).
@@ -491,7 +495,12 @@ def run(
     ``relabel`` adds a stage with no scorer before that: labels drawn from the undecided pairs,
     tested on the first-stage probability. ``rescue`` adds the best ``rescue`` rejected pairs to
     the scorers' region. ``curve`` records, for a grid of band sizes, how many of the true
-    matches lost below the reject line each size would reach."""
+    matches lost below the reject line each size would reach.
+
+    ``learned`` replaces the first stage's calibration and test: a scorer is fitted on
+    ``n_cal`` reviewer labels over the evidence of every pair (``pairfeat``), the first-stage
+    probability being one piece of it, and its accept and reject lines are certified on
+    ``n_ltt`` fresh labels. The label budget is the same as without it."""
     rescore = list(rescore or [])
     if rescue and not rescore:
         raise ValueError("a rescue band needs a scorer: below the reject line the matcher has already said no")
@@ -532,10 +541,40 @@ def run(
     order = rng.permutation(n_pairs)
     cal_idx, ltt_idx = order[:n_cal], order[n_cal : n_cal + n_ltt]
     del order
-    iso = fit_isotonic(p_raw[cal_idx], y[cal_idx])
-    p = iso.predict(p_raw)
-    p[veto] = 0.0
-    bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=delta, reject_target=reject_target)
+    learned_info: dict[str, Any] | None = None
+    if learned:
+        t = time.time()
+        X, names = (org_features if kind == "org" else person_features)(by_record, left, right, p_raw)
+        strata = pattern_strata(X, names, ORG_PATTERN if kind == "org" else PERSON_PATTERN)
+        cal_idx, weights = draw_training(strata, n_cal, rng)
+        # Where a pair stands among its records' other candidates (``pairfeat.rank_features``)
+        # is not used: between two registers without duplicates it changed nothing, and on an
+        # estate with several records per organisation it cost precision (0.924 against 0.951
+        # above even odds at 10^6 records, 2026-11-11), since a record there has several right partners.
+        p = fit_score(X, y, cal_idx, weights)
+        del X
+        p[veto] = 0.0
+        n_accept = (2 * n_ltt) // 3
+        cert = certify(p, y, cal_idx, n_accept, n_ltt - n_accept, rng, delta=delta, reject_target=reject_target)
+        ltt_idx = np.concatenate([cert.accept_test, cert.reject_test])
+        bands = Bands(cert.accept_at, cert.reject_below, 0.95, delta, int(len(ltt_idx)), cert.trace["accept"], cert.trace["reject"])
+        learned_info = {
+            "features": names,
+            "strata": int(strata.max()) + 1,
+            "floor": cert.floor,
+            "labels_used": {"training": int(len(cal_idx)), "accept_test": int(len(cert.accept_test)), "reject_test": int(len(cert.reject_test))},
+            "training_matches": int(y[cal_idx].sum()),
+            "accept_trace": cert.trace["accept"],
+            "reject_trace": cert.trace["reject"],
+        }
+        del strata
+        timings["learned"] = time.time() - t
+        _stage("learned", t0)
+    else:
+        iso = fit_isotonic(p_raw[cal_idx], y[cal_idx])
+        p = iso.predict(p_raw)
+        p[veto] = 0.0
+        bands = learn_then_test_bands(p[ltt_idx], y[ltt_idx], target=0.95, delta=delta, reject_target=reject_target)
     acc, rej = band_masks(p, bands)
     _stage("bands", t0)
 
@@ -745,6 +784,7 @@ def run(
             "target": bands.target,
             "reject_target": reject_target,
             "delta": bands.delta,
+            "learned": learned_info,
             "relabel_stage": relabel_info,
             "second_stage": stage2_info,
             "rescue_curve": curve_info,
@@ -793,6 +833,7 @@ def main() -> None:
     ap.add_argument("--relabel", action="store_true", help="a stage with no scorer: labels drawn from the undecided pairs")
     ap.add_argument("--rescue", type=int, default=0, help="also score this many of the best rejected pairs (needs --rescore)")
     ap.add_argument("--rescue-curve", action="store_true", help="record how many lost true matches each rescue band size would reach")
+    ap.add_argument("--learned", action="store_true", help="fit the scorer on the reviewer labels over every pair's evidence (same label budget)")
     ap.add_argument("--n-cal2", type=int, default=1000)
     ap.add_argument("--n-ltt2", type=int, default=1500)
     ap.add_argument("--export-review", type=Path, default=None, help="write the review-band items for the workbench")
@@ -806,7 +847,7 @@ def main() -> None:
         rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
         export_review=a.export_review, export_groups=a.export_groups,
         export_graph=a.export_graph, export_graph_entities=a.export_graph_entities, dump=a.dump,
-        relabel=a.relabel, rescue=a.rescue, curve=a.rescue_curve,
+        relabel=a.relabel, rescue=a.rescue, curve=a.rescue_curve, learned=a.learned,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))

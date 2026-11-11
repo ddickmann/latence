@@ -45,3 +45,24 @@ exact name weighs against a differing address; a veto for names one short token 
 series, numbered partnerships); a per-source rule that a register holds no duplicates; and
 score-aware labelling, since 2,000 uniform labels held 26 true links. With these open, the
 model alone lifts the machine from nothing to 36.5% recall at 0.995 precision.
+
+**Answered in the spike the same day** by a scorer fitted on reviewer labels
+(`spike/pairfeat.py`, `spike/learned.py`, `run_a.py --learned`): the labels say what each
+piece of evidence is worth in the estate at hand, so none of the rules above is written by
+hand. Same 5,000 labels, no GPU: 97% recall at 99.7% precision on the registers, more recall
+than the best model arm on both synthetic estates, and the same recall at higher precision on
+the person records. What this hands to the upgrade:
+
+- **The first stage stays, as one piece of evidence and as the blocker.** Its probability is
+  a feature of the fitted scorer; it no longer sets the lines alone.
+- **Training labels are spread over patterns of evidence;** test labels are drawn on each
+  side of even odds. Uniform labels are not used.
+- **Lines are tried at quantiles of the scores,** the first accept step on a fifth of the
+  test labels, and no pair is accepted that the scorer rates below even odds.
+- **Scores are calibrated across folds,** because the cluster check reads them as
+  probabilities.
+- **Not carried over:** rank-among-candidates evidence (it cost precision where an
+  organisation has several records).
+- **Open for this decision:** evidence per kind of record is hand-written (organisations,
+  persons); whether a neural model still earns its place on the small review band that is
+  left; the evidence step runs in one thread.

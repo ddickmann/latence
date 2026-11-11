@@ -167,3 +167,21 @@ decision stands as the owner made it; this is what it did not yet know.
 - **The pass below the reject line** was built and certified nothing with the zero-shot
   model, at 10⁵ and at 10⁶ (68 minutes, inside the 4-hour budget).
 - **A labels-only stage** reproduces the 10⁶ result in 83 s without a model.
+
+## The register result, put right (2026-11-11)
+
+The owner did not accept 36.5%. The cause was the first stage: it learns without labels what a
+field is worth, and on registers where thousands of companies share an address it learned
+that the address makes the match. A scorer fitted on the reviewer's labels over the evidence
+of each pair replaces the first stage's calibration, with the same 5,000 labels and no GPU:
+
+| Estate | Machine alone, before (best arm) | Machine alone, now | Left for review, now |
+|---|---|---|---|
+| Real registers, 302,924 records | P 0.991, R 0.365 | **P 0.998, R 0.972** | 6 pairs |
+| Real registers, 1,222,924 records | nothing certified | **P 0.997, R 0.971** | none |
+| Synthetic 10⁵ | P 0.991, R 0.900 (two models) | **P 0.993, R 0.913** | 2,179 pairs |
+| Synthetic 10⁶ | P 0.997, R 0.710 (56 min, GPU) | **P 0.984, R 0.874** (6 min) | 8,196 pairs |
+| Public person records | P 0.917, R 0.840 | **P 0.949, R 0.841** | 35,239 pairs |
+
+The 60% guard is now met on the real registers too. Details, what failed on the way and the
+limits: [`../spike/REPORT.md`](../spike/REPORT.md#a-scorer-fitted-on-the-reviewers-labels).

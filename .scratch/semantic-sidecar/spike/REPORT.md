@@ -9,9 +9,9 @@ recommendation the decision followed is at the end of the first section.
 
 | Bar | Measured | Met? |
 |---|---|---|
-| Auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05) | Structured: 0.986 to 0.990 at 10⁵ records in every arm, 0.9955 at 10⁶. Text: 0.959 to 0.965 in every model arm. Wilson lower bounds are all above 0.95. | Yes, on synthetic data and one public dataset |
-| Guard: the machine alone finds ≥ 60% of true matches at that precision (synthetic estate) | 0.757 with the statistical matcher alone, 0.894 with the smallest decision model added (10⁵); 0.710 at 10⁶ | Yes |
-| 10⁶ records within an agreed time and cost budget | 92 s for the statistical matcher (48 CPU threads, 5.2 GB); 56 min when one small model re-scores 609,117 pairs on one 24 GB GPU. The owner's budget is 4 hours on one 24 GB GPU (2026-11-11). | Yes |
+| Auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05) | Structured: 0.986 to 0.990 at 10⁵ records in every arm, 0.9955 at 10⁶; with the label-fitted scorer 0.960 to 0.998 on five estates, two of them real. Text: 0.959 to 0.965 in every model arm. Wilson lower bounds are all above 0.95. | Yes, on synthetic data, one public dataset and two real registers |
+| Guard: the machine alone finds ≥ 60% of true matches at that precision (synthetic estate) | 0.757 with the statistical matcher alone, 0.894 with the smallest decision model added (10⁵); 0.710 at 10⁶. With the label-fitted scorer: 0.913 at 10⁵, 0.874 at 10⁶, 0.972 on the real registers | Yes |
+| 10⁶ records within an agreed time and cost budget | 92 s for the statistical matcher (48 CPU threads, 5.2 GB); 6 min with the label-fitted scorer (13.8 GB, no GPU); 56 min when one small model re-scores 609,117 pairs on one 24 GB GPU. The owner's budget is 4 hours on one 24 GB GPU (2026-11-11). | Yes |
 | No expert-capacity bar; review effort is reported | 36.7 expert minutes per 1,000 records with the matcher alone, 14.4 with both neural scorers (10⁵, at 20 s per review group) | Reported |
 
 **Recommendation: go.** The design clears the precision bar and the recall guard with room,
@@ -22,10 +22,13 @@ claim travels; the size of the models' gain is shown on synthetic data only. Wha
 does not show is listed under [Not done](#not-done-and-limits): no real estate, no real text,
 no entity-linking benchmark, no Spark run.
 
-**Added after the decision (2026-11-11):** on two real company registers the precision bar is
-met only with the model, and the machine alone finds 36.5% of the true links, not the 60% the
-guard asks for on the synthetic estate. The first-stage matcher is the weak part there. See
-[After the decision](#after-the-decision-labels-without-a-model-the-pass-below-the-reject-line-real-registers).
+**Added after the decision (2026-11-11):** on two real company registers the first run met the
+precision bar only with the model and found 36.5% of the true links. The owner did not accept
+that. The cause was the first-stage matcher, which learned without labels that a shared
+address makes a match. **With a scorer fitted on the same number of reviewer labels the
+machine alone now finds 97% of the true links at 99.7% precision, and it is better on every
+other estate as well, without a GPU.** See
+[A scorer fitted on the reviewer's labels](#a-scorer-fitted-on-the-reviewers-labels).
 
 ## Setup
 
@@ -250,8 +253,98 @@ number is withheld from the matcher. Sources and terms:
 - **For the engine upgrade (ticket 13):** the weight of an exact name against an address, a
   veto for names that differ in one short token, a "no duplicates within this source" rule
   per source, and labels drawn by score instead of uniformly (2,000 uniform labels held 26
-  true links here). None is built.
+  true links here). **Built the same day as a scorer fitted on the labels, which learns these
+  weights from the reviewer; see the next section.** The rows above are the state before it.
 - **Cost:** 52 minutes for 632,147 pairs with the GPU shared between two jobs.
+
+### A scorer fitted on the reviewer's labels
+
+The owner did not accept the register result (2026-11-11). The cause was found the same day
+and the fix is built: `run_a.py --learned`, in `pairfeat.py` and `learned.py`.
+
+**What was wrong.** Among the candidate pairs of the 302,924-record estate:
+
+- 98,924 pairs between the two registers carry the identical name (case and punctuation
+  aside), and 98,866 of them are true links. That one piece of evidence is 99.9% right and
+  covers 95.9% of all true links.
+- The first stage gave about 23,000 true links a probability near zero. It learns
+  without labels what agreement on a field is worth, and here it learned the wrong thing: so
+  many companies share a registered office that "same address" became its picture of a match.
+- 632,677 candidate pairs lie inside one register. None is a true link, and nothing told the
+  matcher so.
+
+**What was built.**
+
+- **Evidence per pair** (`pairfeat.py`): the same name, the same name without the legal form,
+  how alike the names are, shared and differing words weighted by how rare they are, legal
+  form, postcode, town, industry, numbers in the name, register number, whether the two
+  records come from one source, how common the name and the address are, how many candidates
+  each record has, and the first stage's probability. A missing value is never a difference.
+- **A scorer fitted on reviewer labels** (`learned.py`): boosted trees, fitted five times
+  and calibrated on the fifth of the labels each fit did not see.
+- **Training labels spread over the patterns of evidence,** not drawn uniformly. A uniform
+  sample of 2,000 pairs held 26 true links on the large estate; the spread sample holds 456.
+- **Two tests, each on fresh labels from its own side of even odds:** the accept line is
+  tested among the pairs the scorer rates at 0.5 or more, the reject line among the rest. A
+  pair the scorer itself rates below even odds is never accepted.
+- **The same label budget as before:** 5,000 (2,000 to fit, 2,000 for the accept test,
+  1,000 for the reject test). No GPU.
+
+| Estate | Before, best arm: P / R / F1, left for review | Now: auto-accept precision (lower bound) | Now: P / R / F1, machine only | Now: left for review | Time |
+|---|---|---|---|---|---|
+| Real registers, 302,924 records | 0.991 / 0.365 / 0.533, 594,359 pairs (GPU, 52 min) | 0.998 (0.998) | **0.998 / 0.972 / 0.985** | 6 pairs | 61 s |
+| Real registers, 1,222,924 records | nothing certified | 0.997 (0.997) | **0.997 / 0.971 / 0.984** | none | 158 s |
+| Synthetic 10⁵ | 0.991 / 0.900 / 0.944, 8,962 pairs (both models) | 0.982 (0.981) | **0.993 / 0.913 / 0.951** | 2,179 pairs | 24 s |
+| Synthetic 10⁶ | 0.997 / 0.710 / 0.829, none (GPU, 56 min, 7,500 labels) | 0.960 (0.959) | **0.984 / 0.874 / 0.926** | 8,196 pairs | 6 min |
+| Public person records | 0.917 / 0.840 / 0.877, 58,399 pairs | 0.986 (0.985) | **0.949 / 0.841 / 0.892** | 35,239 pairs | 14 s |
+
+- **The register estate is solved at the bar:** 97% of the true links are accepted by the
+  machine at 99.7 to 99.8% precision, and the review queue is empty. Without the company
+  number it now finds more than the old matcher found with it (0.883).
+- **It is better on every other estate too,** on CPUs alone: more recall than the best arm
+  with both neural models at 10⁵, and 16 points more recall at 10⁶ in 6 minutes instead of 56.
+- **On the person records** the reject line is certified for the first time and the review
+  band shrinks by 40%. The clusters' pairwise precision is 0.949: the accepted pairs are
+  98.6% right, and merging through shared records costs the rest.
+- **What the registers still lose:** 2% of the true links are never candidates (blocking),
+  and about 830 true links are rejected (0.8%). What these have in common has not been
+  looked at.
+
+**What did not work on the way** (each measured the same day, each kept as a test or a note
+in the code):
+
+- **A fixed grid of lines in steps of 0.005.** The fitted scorer puts nearly every non-match
+  below 0.005, so the reject test failed on its first step and 287,000 pairs went to review
+  at 10⁵. Lines are now tried at quantiles of the scores.
+- **A floor that followed the scorer down.** The accept line sank to 0.001 and took in pairs
+  that were right one time in three, because the set as a whole still met 0.95. The floor is
+  even odds.
+- **Starting the accept test on 100 labelled pairs.** Three wrong ones fail that step, and a
+  failed first step ends a fixed sequence: at 10⁶ nothing was certified although the best
+  three quarters of the pairs were 99.8% right. The first step now rests on a fifth of the
+  test labels.
+- **Where a pair ranks among its records' other candidates.** Between two registers it
+  changed nothing; on an estate with several records per organisation it cost precision
+  (0.924 against 0.951 above even odds at 10⁶). Not used.
+- **Trees fitted once, uncalibrated.** They rate what they memorised as certain: recall 0.886
+  against 0.904 at 10⁵, precision 0.983 against 0.999 on the registers (both measured with
+  the rank evidence still in).
+
+**Limits.**
+
+- **The registers are easy once the scorer knows what counts:** 96% of the true links carry
+  the same name. An estate whose sources spell names differently is the synthetic one, where
+  the gain is smaller.
+- **The 10⁶ accept band is at 0.960,** close to the bar. The step after the last one that
+  passed had 85 wrong pairs among 1,992 labelled (4.3%).
+- **The evidence is written by hand** for organisations and for persons. Another kind of
+  record needs its own.
+- **One thread computes the evidence:** about half of the 356 s at 10⁶ records.
+- **The neural models were not run on top of it.** The review bands that are left are small
+  (2,179 pairs at 10⁵, 8,196 at 10⁶).
+- **One seed, simulated labels.**
+
+Method notes with sources: [`../research/24-company-record-linkage-methods.md`](../research/24-company-record-linkage-methods.md).
 
 ### Short names defined in real annual reports
 
@@ -272,8 +365,13 @@ and 815 short names.
 ## What the models are worth
 
 - **Most of this is on synthetic organisations.** On the public person records neither the
-  reranker nor GLiDE changed a decision. On two real company registers GLiDE is what makes
-  automatic merges possible at all, at a recall of 36.5% (see the section above).
+  reranker nor GLiDE changed a decision. On two real company registers GLiDE was what made
+  automatic merges possible at all, at a recall of 36.5%, until the scorer fitted on reviewer
+  labels reached 97% without any model.
+- **On records, the label-fitted scorer now does on CPUs what the models were for.** It
+  leaves 2,179 pairs in review at 10⁵ where both models together left 8,962. Whether a model
+  still earns its place on those remaining pairs has not been measured. On text nothing
+  changes: the models are what links mentions there.
 - **GLiDE 0.4B beats GLiNER2.5-Decide in every comparison.** Zero-shot, Decide gives nearly
   the same answer for matches and non-matches (its weight in the calibrated score is near
   zero on records; on text it adds about one point of auto-linking). GLiDE 0.4B alone removes
@@ -291,6 +389,8 @@ and 815 short names.
 |---|---|---|---|---|
 | Matcher end to end | 98,971 records | 13 s | 7,500 records/s | 1.0 GB |
 | Matcher end to end | 989,658 records, 29.5M candidate pairs | 92 s | 10,800 records/s | 5.2 GB |
+| Matcher and label-fitted scorer | 989,658 records, 29.5M candidate pairs | 356 s | 2,800 records/s | 13.8 GB |
+| Matcher and label-fitted scorer | 1,222,924 real records, 7.8M candidate pairs | 158 s | 7,700 records/s | 6.4 GB |
 | Reranker 0.6B on record pairs | 23,607 pairs | 77 s | 307 pairs/s | – |
 | GLiDE 0.4B on record pairs | 23,607 to 609,117 pairs | 2 to 53 min | 190 to 203 pairs/s | – |
 | Decide on record pairs | 23,607 pairs | 157 s | 150 pairs/s | – |
@@ -313,9 +413,10 @@ price, which is not recorded here.
 
 ## Not done and limits
 
-- **Real data is thin and it is harder.** Beside the public person dataset there is now one
-  real organisation estate (two company registers), where the recall guard is not met, and
-  real filings for definitions only. No real customer estate, no real text linked end to end.
+- **Real data is thin.** Beside the public person dataset there is one real organisation
+  estate (two company registers), where the machine now finds 97% of the links, and real
+  filings for definitions only. That estate is easy in one respect: most true links carry the
+  same name. No real customer estate, no real text linked end to end.
 - **No permissively licensed entity-linking benchmark** has been run. Candidates need a
   licence check first: Mewsli-X (code Apache-2.0, text from Wikinews), KILT's linking sets
   (MIT wrapper, mixed sources), ZESHEL (CC BY-SA, share-alike). None is cleared.
@@ -341,4 +442,7 @@ price, which is not recorded here.
 - `results/pod/a_*_relabel*.json`: the labels-only stage and the rescue band;
   `results/pod/r_real_*.json`: the two real registers; `results/pod/sec_definitions.json`:
   definitions mined from annual reports.
+- `results/pod/*_learned.json`: the label-fitted scorer on all five estates. Each holds the
+  accept and reject tests step by step (`bands.learned.accept_trace`), so how close a line
+  came is on record.
 - Earlier runs on the 4-CPU machine: `results/*.json`, described in [`NEXT.md`](NEXT.md).

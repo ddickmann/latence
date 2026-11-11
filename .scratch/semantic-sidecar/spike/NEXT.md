@@ -8,6 +8,11 @@ first, then
 [`../issues/20-resolution-feasibility-spike.md`](../issues/20-resolution-feasibility-spike.md) and
 [`../design/resolution-at-scale.md`](../design/resolution-at-scale.md).
 
+**Since the report (2026-11-11):** the first run on two real company registers found 36.5% of
+the true links. A scorer fitted on reviewer labels (`run_a.py --learned`) now finds 97% there
+at 99.7% precision and beats the earlier arms on every estate, on CPUs. It is the arm to
+build on; the numbers are in the report's section *A scorer fitted on the reviewer's labels*.
+
 ## Final model set (owner, 2026-11-08)
 
 | Role | Model (Hugging Face id unless noted) | Runtime |
