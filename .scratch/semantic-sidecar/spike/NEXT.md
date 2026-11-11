@@ -13,6 +13,12 @@ the true links. A scorer fitted on reviewer labels (`run_a.py --learned`) now fi
 at 99.7% precision and beats the earlier arms on every estate, on CPUs. It is the arm to
 build on; the numbers are in the report's section *A scorer fitted on the reviewer's labels*.
 
+**New data (2026-11-11):** a scorer does not carry from one estate to another, and the owner
+decided it is fitted per domain. About 600 labels give the automatic merges on clean names,
+about 2,500 on noisy ones. Linking the vehicle estate's dealers to a seeded second source
+needed a no-duplicates rule for the master list, a link-only mode and another candidate pass;
+see the report's section *How it carries to new data*.
+
 ## Final model set (owner, 2026-11-08)
 
 | Role | Model (Hugging Face id unless noted) | Runtime |

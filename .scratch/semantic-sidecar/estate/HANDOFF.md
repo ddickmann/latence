@@ -1,6 +1,6 @@
 # Running the Ontology page on another machine
 
-State on 2026-11-11, after cut A and the first half of cut B (entities and review items). Two repositories, one branch name in both:
+State on 2026-11-11, after cut A and most of cut B (entities, review items, and a seeded second source linked to the dealers). Two repositories, one branch name in both:
 `claude/blissful-maxwell-bpln7a`. The engine side is in this repository (draft pull request 6);
 the page is in the host's repository (draft pull request 5).
 
@@ -11,7 +11,9 @@ the page is in the host's repository (draft pull request 5).
 | Estate mirror as DuckDB from the host's committed fixture | done | same commands |
 | Metric views printed offline | done, 13 views | same command |
 | `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures; 1,240 entities, 6,417 edges, 7 review items | rerun |
-| Engine tests (`estate/tests`, 26) | pass | rerun |
+| Engine tests (`estate/tests`, 34) | pass | rerun |
+| Seeded second source and its link to the dealers | done on the mirror: 938 of 1,274 accounts linked, 916 right, 304 pairs for review, 1,300 labels from the seed | rerun; needs the resolution engine's environment (`../spike/.venv`) |
+| The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
 | Host UI: type check, 146 unit tests, build | pass on Node 24.11.0 | rerun |
 | Host UI: browser tests of the page with accessibility checks, English and German | pass against the host's e2e world | rerun |
 | Host checks `layout`, `register`, `secrets`, `domain-terms` | pass | rerun |
@@ -56,13 +58,44 @@ Approve or reject on the page, press *Download decisions*, and put the file at
 `out/vehicles/decisions.jsonl` (append to it if it exists). Rerun step 2. Approved elements
 show as approved, rejected ones are gone from the page and stay in `assertions.jsonl`.
 
+## The seeded second source
+
+After step 1 (the mirror) and before the build:
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+.venv/bin/python -m estate seed --config estates/vehicles.yaml --duckdb <mirror.duckdb> \
+    --out-duckdb <mirror_with_seed.duckdb> --out out/vehicles
+# then build on the copy, with the resolution engine
+.venv/bin/python -m estate build --config estates/vehicles.yaml --duckdb <mirror_with_seed.duckdb> \
+    --metric-views <views.txt> --verified $METIS/tools/synth/estates/catalog.yaml \
+    --out out/vehicles --resolver ../spike
+```
+
+- The resolution engine runs in its own environment: `../spike/.venv` with
+  `../spike/requirements` installed (Splink, DuckDB, scikit-learn). The build takes about a
+  minute.
+- `out/vehicles/seed_truth.json` says which dealer each account belongs to. It stays outside
+  the catalog and is never exported.
+- `out/vehicles/seeded_accounts.sql` creates the same table in a catalog, with comments that
+  mark it as generated. It has not been run against a catalog.
+- Without `--resolver`, or on the mirror without the seed, the build is as before and the
+  page shows no links.
+
 ## What to say aloud in a demonstration
 
 - The page shows the **ontology** (concepts, relations, measures) and the **entities** read
   from the data: values, master rows, and facts as counts between them.
-- **Nothing is merged by the machine.** Names that may be the same are listed for a person.
-  Certified merging of a second source is the next step; the scorer for it is measured (97%
-  of true links at 99.7% precision on two real company registers) and not yet connected.
+- **The second source is seeded.** The service accounts are generated from the dealers; the
+  page marks them. They are there to show linking, not as a finding about the estate.
+- **What the machine links, it links under a certified line:** 938 accounts, at least 95%
+  right by the test, 97.7% right against the seed. The labels for that test came from the
+  seed's truth in place of a reviewer; with a real second source a reviewer gives them, and
+  reading them from the screen is not built.
+- **On an estate this small the labels are most of the work** (1,300 labels for 1,274
+  accounts). The number does not grow with the estate: 5,000 were enough for 1.2 million
+  real company records.
+- **Manufacturer names that may be the same** are still only listed for a person.
 - **Known blemishes on the page:** the label "Investigation cas"; recall campaigns labelled
   by their key; review reasons in English on the German page.
 - The ontology is built from the **local mirror**, not read live from Unity Catalog.

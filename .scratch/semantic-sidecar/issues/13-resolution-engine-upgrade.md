@@ -66,3 +66,22 @@ the person records. What this hands to the upgrade:
 - **Open for this decision:** evidence per kind of record is hand-written (organisations,
   persons); whether a neural model still earns its place on the small review band that is
   left; the evidence step runs in one thread.
+
+**Decided by the owner (2026-11-11): the scorer is fitted per domain.** A scorer carried from
+one estate to another finds 26% to 52% of the links where the estate's own labels find 87% to
+97% ([report](../spike/REPORT.md#how-it-carries-to-new-data)). Fitting it is deployment work.
+What that asks of the engine:
+
+- **Labels are an input of every deployment.** About 600 give the automatic merges on clean
+  names, about 2,500 on noisy ones; a certified reject line needs 300 more on its side. The
+  number does not grow with the estate.
+- **The labels have to come from the review screen.** Today they are simulated from a known
+  truth. Reading a reviewer's answers back as labels is not built.
+- **A source can be declared free of duplicates** (a master list with a key): its own pairs
+  are ruled out, no cluster holds two of its records, and the scorer sees how clearly a
+  record fits one master record. Needed as soon as two masters carry the same name.
+- **Linking to a master list is its own mode:** only pairs between the sources are compared.
+- **Blocking passes depend on the shape of the names;** a pass over a shared word in the same
+  town was needed for names that reuse a few words. The passes should be chosen per estate
+  from what they propose, not fixed.
+- **An absent field must not stop a run** (the first stage stopped without postcodes).

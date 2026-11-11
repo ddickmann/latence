@@ -342,9 +342,81 @@ in the code):
 - **One thread computes the evidence:** about half of the 356 s at 10⁶ records.
 - **The neural models were not run on top of it.** The review bands that are left are small
   (2,179 pairs at 10⁵, 8,196 at 10⁶).
-- **One seed, simulated labels.**
+- **One seed in the table above, simulated labels.** Three seeds at five label budgets are in
+  the next section.
 
 Method notes with sources: [`../research/24-company-record-linkage-methods.md`](../research/24-company-record-linkage-methods.md).
+
+### How it carries to new data
+
+Measured on 2026-11-11 after the owner asked whether this scales to data it has not seen.
+Three questions, three answers.
+
+**1. How many labels does an estate need?** The same runs at smaller budgets, three seeds
+each (`realdata/label_curve.py`, `results/pod/label_curve.json`). A third of the labels fits
+the scorer, the rest certify.
+
+| Labels | Real registers (303k records): recall | Synthetic 10⁵: recall | Person records: recall | Reject line certified |
+|---|---|---|---|---|
+| 600 | 0.972 | 0.815 (worst seed 0.792) | 0.766 (worst 0.687) | no |
+| 900 | 0.972 | 0.884 (worst 0.841) | 0.816 | no |
+| 1,500 | 0.972 | 0.891 | 0.838 | registers only |
+| 2,500 | 0.972 | 0.913 | 0.848 | registers and synthetic |
+| 5,000 | 0.972 | 0.920 | 0.848 | all but one person run |
+
+- **A few hundred labels buy the automatic merges.** On the registers 600 labels give the
+  full result. Where names are noisier, recall keeps rising to about 2,500.
+- **The reject line costs more than the accept line:** a 0.99 claim needs 299 labelled pairs
+  without one match before it can pass at all. Without it nothing is wrong; the pairs that
+  are not accepted are simply not decided.
+- **The number of labels does not grow with the estate.** 5,000 labels were enough at 1.2
+  million records and at 50,000.
+- **Correction to the table above:** on the person records the clusters' pairwise precision
+  is 0.916 on average over three seeds, not the 0.949 of the one seed first reported. The
+  accepted pairs are 98% right; merging through shared records costs the rest. That is the
+  same level as the matcher alone (0.918) and it is under the bar.
+
+**2. Can a scorer fitted on one estate be used on another?** No
+(`realdata/transfer_eval.py`, `results/pod/scorer_carried_over.json`). Fitted on 2,000 labels
+of one estate, applied to the other, lines certified on 1,000 labels of the target:
+
+| Target | Scorer carried over: recall | The same 1,000 labels spent on the target alone: recall |
+|---|---|---|
+| Synthetic 10⁵ (scorer from the registers) | 0.26, and certified in two of three runs only | 0.866 |
+| Real registers (scorer from the synthetic estate) | 0.52 | 0.971 |
+
+Leaving out the evidence that is specific to an estate (the first stage's score, which
+source a record is from) helps in one direction (0.71 to 0.73 on the registers) and not in
+the other (nothing certified). **The owner's decision (2026-11-11): the scorer is fitted per
+domain; that is deployment work, not a defect.** Reuse across estates is not pursued.
+
+**3. Does it work on a small estate of another shape?** Not at first. The vehicle estate's
+211 dealers were linked to 1,274 seeded accounts of a second system (the estate prototype,
+ticket 25). The first run proposed 69% of the true pairs and certified nothing. What was in
+the way, each fixed with a test that failed first:
+
+- **The first stage stopped** on an estate without a single postcode.
+- **Namesakes:** different dealers carry the same name in different towns. A source can now
+  be named as holding no duplicates (`duplicate_free`): its own pairs are ruled out, no
+  cluster ever holds two of its records, and the scorer sees whether a record fits one
+  master record clearly or two equally.
+- **The wrong question:** three quarters of the true pairs were between two accounts of one
+  dealer, both typed carelessly. With a master list the question is which dealer an account
+  belongs to (`link_only`); two accounts meet through the dealer.
+- **Candidates:** names that reuse a few words are never "rare". A pass over a shared word
+  in the same town raised the share of true pairs proposed from 0.69 to 0.98.
+
+With these: 938 of the 1,274 accounts are linked to a dealer by the machine, 916 of them
+right (97.7%), which is 85% of the accounts that belong to a dealer; 304 pairs wait for a
+person; both lines are certified. It cost 1,300 labels, about as many as there are accounts:
+**on an estate this small the labels are most of the work, and the gain is in the size.**
+
+**What this says about new data.**
+- The method carries; the scorer and its labels are per estate.
+- Each new shape of estate has so far shown something the code assumed (a postcode, rare
+  words, no master list). Expect that again.
+- Not measured: the no-duplicates rule on the registers and the synthetic estates, any estate
+  with more than two sources, any kind of record other than organisations and persons.
 
 ### Short names defined in real annual reports
 
@@ -442,6 +514,8 @@ price, which is not recorded here.
 - `results/pod/a_*_relabel*.json`: the labels-only stage and the rescue band;
   `results/pod/r_real_*.json`: the two real registers; `results/pod/sec_definitions.json`:
   definitions mined from annual reports.
+- `results/pod/label_curve.json` and `results/pod/scorer_carried_over.json`: the label budgets
+  and the scorer carried from one estate to another.
 - `results/pod/*_learned.json`: the label-fitted scorer on all five estates. Each holds the
   accept and reject tests step by step (`bands.learned.accept_trace`), so how close a line
   came is on record.

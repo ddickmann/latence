@@ -29,7 +29,7 @@ induce its schema level, build the instance level, and show both in the host.
 | Cut | Holds | State |
 |---|---|---|
 | A, the ontology | reader, metric views, induction with signals and support, ledger, `graph-export/2`, the host's page | built 2026-11-11 |
-| B, the knowledge graph | table roles, aggregated fact edges, resolution (manufacturers, seeded dealers), document mentions, node view, Turtle download | **partly built** (2026-11-11): entities, counted fact edges, review items and the two host views. Open: the seeded second source with certified merges, document mentions, the Turtle download |
+| B, the knowledge graph | table roles, aggregated fact edges, resolution (manufacturers, seeded dealers), document mentions, node view, Turtle download | **mostly built** (2026-11-11): entities, counted fact edges, review items, the seeded second source linked under a certified line, the host views. Open: labels from the review screen, document mentions, the Turtle download |
 | C, usage signals | joins and terms from recorded questions and queries as evidence and proposals | open |
 | Later | a reader for Unity Catalog run against a live workspace; a service route in the host; the generic workbench as a registry package | open |
 
@@ -102,11 +102,23 @@ key `on` as a boolean.
 - Review reasons are English text and show untranslated in the host's German.
 - A manufacturer value carried only by fact rows shows no links.
 
+**The seeded second source, linked (2026-11-11).**
+- `python -m estate seed` copies the mirror and adds `partner.service_accounts`: 1,274
+  accounts, several per dealer, each typed its own way, and accounts of 80 workshops that are
+  no dealers. The table, its columns, its concept and the summary all say it is generated.
+  Which dealer an account belongs to is kept in a file outside the catalog.
+- `python -m estate build --resolver ../spike` hands the dealers and the accounts to the
+  resolution engine and brings its answer into the export: `same_as` edges with the
+  probability and what each rests on, review items, and `meta.resolution`.
+- **Result:** 938 accounts linked to a dealer by the machine under a certified line, 916 of
+  them right (97.7%), 85% of the accounts that belong to a dealer; 304 pairs for review. It
+  cost 1,300 labels, taken from the seed's truth in place of a reviewer.
+- What the dealers showed about the engine is in the
+  [spike report](../spike/REPORT.md#how-it-carries-to-new-data).
+
 **Open in cut B.**
-- **The seeded second dealer source with certified merges.** The scorer for it now exists:
-  on two real company registers a scorer fitted on reviewer labels finds 97% of the true
-  links at 99.7% precision ([spike report](../spike/REPORT.md#a-scorer-fitted-on-the-reviewers-labels)).
-  It is not yet connected to the estate build.
+- **Labels from the review screen.** The engine's labels come from the seed's truth. A
+  reviewer's answers on the screen are downloaded and recorded, and not yet read as labels.
 - Mentions of organisations in the estate's documents.
 - The Turtle download (OWL 2 QL and SKOS).
 - A minimum count below which a fact count is not exported.
