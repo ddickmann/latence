@@ -44,7 +44,9 @@ def test_the_file_parses_and_carries_classes_properties_and_value_hierarchies(re
     assert len(set(g.subjects(RDF.type, OWL.DatatypeProperty))) == sum(len(c.get("attributes") or []) for c in export["concepts"])
     values = set(g.subjects(RDF.type, SKOS.Concept))
     assert len(values) == sum(n["concept"].startswith("concept:value:") for n in export["nodes"])
-    assert len(list(g.subject_objects(SKOS.broader))) == sum(e["kind"] == "broader" for e in export["edges"]) > 0  # every model under its make
+    # Every model under its make, as a proposal: the step is one, and nobody has approved it.
+    assert len(list(g.subjects(OWL.annotatedProperty, SKOS.broader))) == sum(e["kind"] == "broader" for e in export["edges"]) > 0
+    assert list(g.subject_objects(SKOS.broader)) == []
     assert to_turtle(export, BASE) == text  # the same export gives the same file
 
 
@@ -89,5 +91,5 @@ def test_a_concept_that_links_two_things_is_written_as_a_part_of_neither(reader:
     ]
     g = rdflib.Graph().parse(data=to_turtle(export, BASE), format="turtle")
     labels = {str(o): s for s, o in g.subject_objects(RDFS.label)}
-    restricted = {s for s, o in g.subject_objects(RDFS.subClassOf) if (o, OWL.onProperty, V.partOf) in g}
+    restricted = {g.value(a, OWL.annotatedSource) for a, o in g.subject_objects(OWL.annotatedTarget) if (o, OWL.onProperty, V.partOf) in g}
     assert restricted == {labels["Claim"]}

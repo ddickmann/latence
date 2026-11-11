@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: resolved
 Blocked by: 26
 
 ## Question
@@ -45,3 +45,58 @@ rebuild; the export and the Turtle file differ from the undecided build exactly 
 - The Turtle file parsed back: an approved roll-up is a plain triple, a proposed one appears
   only inside an annotated axiom. Red before.
 - A decision on a subject the model does not hold is reported, as today.
+
+## Answer
+
+Built on 2026-11-11.
+
+- **The ledger.** `assertions_of` writes one assertion per element of all nine kinds.
+  `ledger.Decisions` answers for one element at a time while the layer is built and remembers
+  what it answered, so the build can say at the end which decisions were applied, which are
+  stale, which carry no claim and which name nothing.
+- **Where a claim is needed.** A decision on a concept, relation, measure, roll-up,
+  equivalence, describes or a pair may come without a claim: the id of those says all the claim
+  says. A decision on a placement, a proposed class or a part-of without a claim is not applied
+  and is listed under `meta.decisions.without_claim`.
+- **Structure.** A rejected step is taken out before the steps are reduced to the direct ones,
+  so the step it hid comes back; a rejected equivalence leaves two levels; no `broader` edge is
+  written for a rejected step.
+- **Classes.** A rejected class of the model's is gone and its members sit under its parent. A
+  rejected placement falls to the class the other voice named if that is another one, else the
+  concept is unplaced. **An approval of the class either voice named settles the placement**
+  (not in the ticket, and needed: otherwise a person who agrees with the columns against the
+  model could not say so).
+- **Turtle.** A proposed part-of and a proposed step with all its `skos:broader` are written
+  only as marked axioms; once a person approves the step, they are plain triples.
+
+**On the vehicle estate:** nine decisions, one of each kind, written with their claims. Two
+rebuilds on top of them give byte-identical export and Turtle files; the summary reads 3
+approved, 6 rejected, none stale, none unknown. What changed is what was decided:
+
+| Decision | In the next build |
+|---|---|
+| approve manufacturer → make | the step carries the decision; its 18 `broader` are plain triples, the other 283 stay marked |
+| reject dealer group → market, and reject "market and distance unit are one level" | both gone. A new step appears, dealer group → distance unit: with the two levels apart the data supports it. A rejection can bring a new proposal for a person to decide |
+| reject recall report "is part of" recall campaign | gone |
+| reject the model's class "vehicle" | gone; its four members sit under Product |
+| approve a placement | carries the decision, and is a plain `rdfs:subClassOf` |
+| reject a contested placement (bulletin under the model's class) | the bulletin sits under Event, which the columns said; no longer contested |
+| approve a concept, reject a relation | as before this ticket |
+
+The ledger of that build holds 221 assertions over the nine kinds.
+
+**Tests: 88 pass (8 new, each red first):** a rejected step leaves and the step it hid comes
+back, with its edges; an approved step says so and a rejected equivalence gives two levels; a
+decision is not applied to a proposal that now says something else, and is reported; an
+approval of what the other voice said settles the placement; a decision on a placement needs
+its claim; a rejected placement falls to the other voice and a rejected class hands on its
+members; decisions on structure and classes survive two rebuilds and every element is an
+assertion; the Turtle file states a step plainly only once a person approved it.
+
+**Host page:** each downloaded decision carries the claim; a decision kept in the browser
+whose claim no longer matches is not shown as applied, and the page names those and the ones
+the build reported; the six top classes are said in the page's language. 198 unit and route
+tests, the browser walk in both languages.
+
+**Not done:** a value that breaks a step cannot yet be given its place by a decision; a
+decision on a pair of names does not merge the two values (ticket 30).

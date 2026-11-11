@@ -72,7 +72,7 @@ def test_a_decision_survives_a_rebuild_and_a_rejected_element_leaves_the_layer(p
         assert not any(r["id"] == rejected for r in export["relations"])
         dealers = next(c for c in export["concepts"] if c["id"] == approved)
         assert dealers["decision"] == {"verdict": "approved", "by": "reviewer-1"}
-        assert summary["decisions"] == {"approved": 1, "rejected": 1, "unknown_subjects": []}
+        assert summary["decisions"] == {"approved": 1, "rejected": 1, "unknown_subjects": [], "stale": [], "without_claim": []}
     assert rejected in {json.loads(x)["subject"] for x in (project["out"] / "assertions.jsonl").read_text().splitlines()}
 
 

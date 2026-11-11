@@ -27,6 +27,7 @@ import re
 from typing import Any, Protocol
 
 from .codes import TOP, say, text
+from .ledger import Decisions
 
 PERSONAL_NAME = re.compile(r"^(name|first_?name|last_?name|surname|full_?name|birth|street|address)", re.I)
 ORG_NAME = re.compile(r"(^|_)name$", re.I)
@@ -176,9 +177,15 @@ def _slug(name: str) -> str:
 
 
 def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_objects: tuple[str, ...] = (),
-                    voice: ClassModel | None = None) -> dict[str, Any]:
+                    voice: ClassModel | None = None, decisions: Decisions | None = None) -> dict[str, Any]:
     """The class tree as proposals: the six top classes, classes a model put between them and
-    the concepts, and for each concept the class it is a kind of, with every voice that said so."""
+    the concepts, and for each concept the class it is a kind of, with every voice that said so.
+
+    A person's decision is applied here. A rejected class of the model's is gone and what was
+    under it sits under its parent. A rejected placement falls to the class the other voice
+    named, if that is another one; if not, the concept is left unplaced. Either result is a new
+    proposal: the decision was on what the old one said."""
+    asked = decisions or Decisions()
     pack = describe(model, structure, personal_objects)
     known = {c["id"] for c in pack}
     by_pattern = pattern_voice(pack)
@@ -186,17 +193,32 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
     served = answer.get("served_by") or (voice.name if voice is not None else None)
     origin = f"model:{served}"
 
-    mid, parent_of = [], {}
     names = {_slug(k): f"class:{k}" for k in TOP}
     for c in answer["classes"]:
         names[_slug(c["name"])] = f"class:{_slug(c['name'])}"
+    candidates, parent_of, handed_on = [], {}, {}
     for c in answer["classes"]:
         parent = names.get(_slug(c["parent"]))
         if parent is None or _slug(c["name"]) in TOP:
             continue  # a class that hangs under nothing we know is not taken
-        parent_of[names[_slug(c["name"])]] = parent
-        mid.append({"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": text(c["definition"], origin), "status": "proposed",
-                    "signals": [say("language_model.class", str(served), model=str(served), parent=c["parent"])]})
+        el = {"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": text(c["definition"], origin), "status": "proposed",
+              "signals": [say("language_model.class", str(served), model=str(served), parent=c["parent"])]}
+        if asked.rejected("class", el):
+            handed_on[el["id"]] = parent
+        else:
+            candidates.append(el)
+            parent_of[el["id"]] = parent
+
+    def standing(cid: str | None) -> str | None:
+        """The class itself, or, where a person rejected it, the class above it."""
+        seen: set[str] = set()
+        while cid in handed_on and cid not in seen:
+            seen.add(cid)
+            cid = handed_on[cid]
+        return cid
+
+    parent_of = {k: str(standing(v)) for k, v in parent_of.items()}
+    mid = [asked.marked("class", {**el, "parent": parent_of[el["id"]]}) for el in candidates]
 
     def top_of(cid: str | None) -> str | None:
         seen: set[str] = set()
@@ -209,22 +231,28 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
     subclass_of = []
     for c in pack:
         m, p = said.get(c["id"]), by_pattern.get(c["id"])
-        m_parent = names.get(_slug(m["parent"])) if m else None
-        signals = []
+        m_parent = standing(names.get(_slug(m["parent"]))) if m else None
         declined = bool(m and m_parent is None and _slug(m["parent"]) == "none")
-        if m and m_parent:
-            signals.append(_with_reason(say("language_model.placed", str(served), model=str(served)), m.get("reason"), origin))
-        elif declined and p:
-            signals.append(_with_reason(say("language_model.declined", str(served), model=str(served)), m.get("reason"), origin))
-        if p:
-            signals.append(p[1])
-        parent = m_parent or (f"class:{p[0]}" if p else None)
-        if parent is None:
+        p_parent = f"class:{p[0]}" if p else None
+        sid = f"subclass:{c['id'].removeprefix('concept:')}"
+        m_signal = _with_reason(say("language_model.placed", str(served), model=str(served)), m.get("reason"), origin) if m and m_parent else None
+        # What each voice proposes, the model first. A parent a person rejected is not proposed again.
+        offers = [(parent, signal) for parent, signal in ((m_parent, m_signal), (p_parent, p[1] if p else None))
+                  if parent is not None and not asked.rejected("subclass", {"id": sid, "concept": c["id"], "parent": parent})]
+        if not offers:
             continue
-        contested = bool(p and ((m_parent and top_of(m_parent) != f"class:{p[0]}") or declined))
-        subclass_of.append({"id": f"subclass:{c['id'].removeprefix('concept:')}", "concept": c["id"], "parent": parent, "status": "proposed",
-                            "definition": text((m or {}).get("definition"), origin), "contested": contested,
-                            **({"other_parent": f"class:{p[0]}"} if contested and p and m_parent else {}), "signals": signals})
+        # A parent a person approved is the placement, whichever voice named it.
+        settled = [o for o in offers if (v := asked.verdict("subclass", {"id": sid, "concept": c["id"], "parent": o[0]})) and v["verdict"] == "approved"]
+        parent = (settled or offers)[0][0]
+        both = bool(m_parent and p_parent)
+        contested = bool(p and not settled and len(offers) == (2 if both else 1) and ((m_parent and top_of(m_parent) != p_parent) or declined))
+        signals = [signal for _parent, signal in offers if signal is not None]
+        if declined and p:
+            signals.insert(0, _with_reason(say("language_model.declined", str(served), model=str(served)), m.get("reason"), origin))  # type: ignore[union-attr]
+        subclass_of.append(asked.marked("subclass", {
+            "id": sid, "concept": c["id"], "parent": parent, "status": "proposed",
+            "definition": text((m or {}).get("definition"), origin), "contested": contested,
+            **({"other_parent": p_parent} if contested and p_parent and m_parent else {}), "signals": signals}))
     used = {s["parent"] for s in subclass_of} | {s.get("other_parent") for s in subclass_of} | set(parent_of.values())
     mid = [m for m in mid if sum(s["parent"] == m["id"] for s in subclass_of) + sum(v == m["id"] for v in parent_of.values()) >= 1]
     return {

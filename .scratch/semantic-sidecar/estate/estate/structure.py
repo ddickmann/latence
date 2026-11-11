@@ -28,6 +28,7 @@ import itertools
 from typing import Any
 
 from .codes import say
+from .ledger import Decisions
 from .induce import SUPPORT_FLOOR, _q
 from .reader import CatalogObject, Reader
 
@@ -101,7 +102,12 @@ def entity_names(reader: Reader, model: dict[str, Any], personal_objects: tuple[
     return out
 
 
-def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = ()) -> dict[str, Any]:
+def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = (),
+                    decisions: Decisions | None = None) -> dict[str, Any]:
+    """Everything here is a proposal. A person's decision changes it where it is built: a
+    rejected step is gone before the steps are reduced to the direct ones, so the step it hid
+    comes back; a rejected equivalence leaves two levels; an approved element says so."""
+    asked = decisions or Decisions()
     objects = {o.full_name: o for o in reader.objects()}
     vs = _value_sets(model)
     personal = set(personal_objects)
@@ -130,13 +136,17 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
     for a, b in sorted({tuple(sorted(k)) for k in checked if (k[1], k[0]) in checked}):
         if checked[(a, b)]["values_breaking"] == 0 and checked[(b, a)]["values_breaking"] == 0:
             keep, other = (a, b) if len(vs[a]["objects"]) >= len(vs[b]["objects"]) else (b, a)
-            equivalent.append({"id": f"equivalent:{keep}={other}", "concepts": [vs[keep]["id"], vs[other]["id"]], "status": "proposed",
-                               "signals": [say("same_grouping", objects=len(checked[(a, b)]["objects"]), a=keep, b=other)]})
+            el = {"id": f"equivalent:{keep}={other}", "concepts": [vs[keep]["id"], vs[other]["id"]], "status": "proposed",
+                  "signals": [say("same_grouping", objects=len(checked[(a, b)]["objects"]), a=keep, b=other)]}
+            if not asked.rejected("equivalent", el):
+                equivalent.append(asked.marked("equivalent", el))
     lesser = {e["concepts"][1].removeprefix("concept:value:") for e in equivalent}
     same = {frozenset(c.removeprefix("concept:value:") for c in e["concepts"]) for e in equivalent}
 
     steps = {(a, b): s for (a, b), s in checked.items()
              if frozenset((a, b)) not in same and a not in lesser and b not in lesser and vs[a]["values"] > vs[b]["values"]}
+    steps = {(a, b): s for (a, b), s in steps.items()
+             if not asked.rejected("roll_up", {"id": f"roll_up:value:{a}->value:{b}", "from": vs[a]["id"], "to": vs[b]["id"], "kind": "roll_up"})}
     for a, c in sorted(steps):  # what follows from two steps says nothing new
         if any((a, b) in steps and (b, c) in steps for b in vs if b not in (a, c)):
             steps.pop((a, c))
@@ -146,10 +156,11 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         clean = s["values_breaking"] == 0
         signal = (say("functional_dependency.all", objects=len(s["objects"]), a=a, b=b) if clean else
                   say("functional_dependency.most", objects=len(s["objects"]), holding=s["values_checked"] - s["values_breaking"], checked=s["values_checked"], a=a, b=b))
-        roll_ups.append({"id": f"roll_up:value:{a}->value:{b}", "from": vs[a]["id"], "to": vs[b]["id"], "kind": "roll_up", "status": "proposed",
-                         "label": f"{vs[a]['label']} → {vs[b]['label']}", "support": s,
-                         **({} if clean else {"breaking": _breaking(reader, [objects[n] for n in s["objects"]], a, b)}),
-                         "signals": [signal]})
+        roll_ups.append(asked.marked("roll_up", {
+            "id": f"roll_up:value:{a}->value:{b}", "from": vs[a]["id"], "to": vs[b]["id"], "kind": "roll_up", "status": "proposed",
+            "label": f"{vs[a]['label']} → {vs[b]['label']}", "support": s,
+            **({} if clean else {"breaking": _breaking(reader, [objects[n] for n in s["objects"]], a, b)}),
+            "signals": [signal]}))
     # Master data below the value set it refers to: the last level of a hierarchy.
     refers = [r for r in model["relations"] if r["to"].startswith("concept:value:") and not r["from"].startswith("concept:value:")]
     below: dict[str, list[str]] = {}
@@ -170,9 +181,10 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
                 support = {"rows": int(rows), "rows_with_the_level": int(filled), "share": round(filled / rows, 4) if rows else None}
                 if filled < rows:  # a level only some rows carry: the others are in no tree
                     signal = say("refers_to_a_level.some", filled=int(filled), rows=int(rows), concept=c["label"], level=a)
-            roll_ups.append({"id": f"roll_up:{c['object_name']}->value:{a}", "from": cid, "to": vs[a]["id"], "kind": "belongs_to", "status": "proposed",
-                             "label": f"{c['label']} → {vs[a]['label']}", "support": support,
-                             "signals": [signal]})
+            el = {"id": f"roll_up:{c['object_name']}->value:{a}", "from": cid, "to": vs[a]["id"], "kind": "belongs_to", "status": "proposed",
+                  "label": f"{c['label']} → {vs[a]['label']}", "support": support, "signals": [signal]}
+            if not asked.rejected("roll_up", el):
+                roll_ups.append(asked.marked("roll_up", el))
 
     # ---- part-of, from keys ------------------------------------------------------------------
     part_of = []
@@ -187,9 +199,11 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
                   and (r.get("partial_key") or set(concepts[r["to"]].get("key") or []) == set(r.get("to_columns") or r["columns"]))]
         for r in sorted(wholes, key=lambda r: r["to"]):
             code = "key_contains_part_of_key" if r.get("partial_key") else "key_contains_key"
-            part_of.append({"id": f"part_of:{c['id'].removeprefix('concept:')}->{r['to'].removeprefix('concept:')}", "from": c["id"], "to": r["to"],
-                            "kind": "part_of" if len(wholes) == 1 else "links", "status": "proposed", "relation": r["id"],
-                            "signals": [say(code, concept=c["label"], key=list(c["key"]), whole=concepts[r["to"]]["label"], columns=list(r["columns"]))]})
+            el = {"id": f"part_of:{c['id'].removeprefix('concept:')}->{r['to'].removeprefix('concept:')}", "from": c["id"], "to": r["to"],
+                  "kind": "part_of" if len(wholes) == 1 else "links", "status": "proposed", "relation": r["id"],
+                  "signals": [say(code, concept=c["label"], key=list(c["key"]), whole=concepts[r["to"]]["label"], columns=list(r["columns"]))]}
+            if not asked.rejected("part_of", el):
+                part_of.append(asked.marked("part_of", el))
 
     # ---- the same thing at another layer -----------------------------------------------------
     by_key: dict[tuple[str, ...], list[dict[str, Any]]] = {}
@@ -202,9 +216,10 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         if len(base) != 1:
             continue
         for d in sorted((c for c in group if c["kind"] == "derived"), key=lambda c: c["id"]):
-            describes.append({"id": f"describes:{d['id'].removeprefix('concept:')}->{base[0]['id'].removeprefix('concept:')}", "from": d["id"], "to": base[0]["id"],
-                              "kind": "describes", "status": "proposed",
-                              "signals": [say("same_key", base=base[0]["label"], key=list(key))]})
+            el = {"id": f"describes:{d['id'].removeprefix('concept:')}->{base[0]['id'].removeprefix('concept:')}", "from": d["id"], "to": base[0]["id"],
+                  "kind": "describes", "status": "proposed", "signals": [say("same_key", base=base[0]["label"], key=list(key))]}
+            if not asked.rejected("describes", el):
+                describes.append(asked.marked("describes", el))
 
     return {"roll_ups": roll_ups, "equivalent": equivalent, "part_of": part_of, "describes": describes, "not_proposed": not_proposed,
             "_steps": {f"{a}->{b}": s["objects"] for (a, b), s in steps.items()}}

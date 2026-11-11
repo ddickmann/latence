@@ -22,7 +22,7 @@ from .classes import TOP, HostedClassModel, RecordedClassModel, describe, prompt
 from .export import build_export
 from .induce import induce
 from .instances import build_instances
-from .ledger import append, assertions_of, read_decisions, replay
+from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .reader_duckdb import DuckDBReader
 from .resolution import merge, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
@@ -64,18 +64,19 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     if link and not all(spec["object"] in names for spec in link["records"]):
         link = None  # the second source is not in this estate (the mirror without the seed)
     out.mkdir(parents=True, exist_ok=True)
-    new = append(out / "assertions.jsonl", assertions_of(model))
-    layer = replay(model, read_decisions(out / "decisions.jsonl"))
+    decisions = Decisions(read_decisions(out / "decisions.jsonl"))
+    layer = replay(model, decisions)
     instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown,
                                 also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None,
                                 label_columns=cfg.get("label_columns"))
-    structure = build_structure(reader, layer, tuple(cfg.get("personal_objects", ())))
+    structure = build_structure(reader, layer, tuple(cfg.get("personal_objects", ())), decisions)
     if hosted_model and not cfg.get("classes", {}).get("hosted_model"):
         raise SystemExit("this estate does not allow its names to be sent to a hosted model (classes.hosted_model in the estate file)")
     personal = tuple(cfg.get("personal_objects", ()))
     (out / "classes_prompt.json").write_text(json.dumps(prompt_of(describe(layer, structure, personal), TOP), indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     voice = HostedClassModel() if hosted_model else RecordedClassModel(json.loads(class_answer.read_text(encoding="utf-8"))) if class_answer else None
-    classes = propose_classes(layer, structure, personal, voice)
+    classes = propose_classes(layer, structure, personal, voice, decisions)
+    new = append(out / "assertions.jsonl", assertions_of(model, structure, classes))
     up = broader_edges(reader, structure, {n["id"] for n in instances["nodes"]})
     edges = sorted(instances["edges"] + up, key=lambda e: (e["kind"], e["from"], e["to"], str(e.get("via")), str(e.get("relation"))))
     instances = {**instances, "edges": edges, "review": explain_review(instances["review"], edges, instances["nodes"], layer["concepts"]),
@@ -92,6 +93,8 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
         instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]))
         resolution_note = "linked"
+    instances = {**instances, "review": [decisions.marked("possibly_same", item) for item in instances["review"]]}
+    layer = {**layer, "meta": {**layer["meta"], "decisions": decisions.summary()}}
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
                           language=cfg.get("language", "en"))
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")

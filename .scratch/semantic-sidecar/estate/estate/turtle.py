@@ -129,11 +129,19 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
     for p in structure.get("part_of", []):
         if p["kind"] != "part_of":
             continue  # a concept that links two things is a part of neither
-        w.lines.append(f"{w.iri(p['from'])} rdfs:subClassOf [ a owl:Restriction ; owl:onProperty v:partOf ; owl:someValuesFrom {w.iri(p['to'])} ] .\n")
+        restriction = f"[ a owl:Restriction ; owl:onProperty v:partOf ; owl:someValuesFrom {w.iri(p['to'])} ]"
+        if _status(p) == "proposed":
+            w.axiom(w.iri(p["from"]), "rdfs:subClassOf", restriction, "proposed")
+        else:
+            w.lines.append(f"{w.iri(p['from'])} rdfs:subClassOf {restriction} .\n")
         w.add(w.iri(p["id"]), [("a", "owl:NamedIndividual"), ("rdfs:label", _lit(f"{p['from']} is part of {p['to']}")), ("v:reviewStatus", _lit(_status(p)))])
+    step_status = {r["id"]: _status(r) for r in structure.get("roll_ups", [])}
     for r in structure.get("roll_ups", []):
         if r["from"] in schemes and r["to"] in schemes:
-            w.add(w.iri(r["from"]), [("v:rollsUpTo", w.iri(r["to"]))])
+            if step_status[r["id"]] == "proposed":
+                w.axiom(w.iri(r["from"]), "v:rollsUpTo", w.iri(r["to"]), "proposed")
+            else:
+                w.add(w.iri(r["from"]), [("v:rollsUpTo", w.iri(r["to"]))])
             w.add(w.iri(r["id"]), [("a", "owl:NamedIndividual"), ("rdfs:label", _lit(r["label"])), ("v:reviewStatus", _lit(_status(r)))])
 
     of_scheme = {n["id"]: n for n in export.get("nodes", []) if n["concept"] in schemes}
@@ -141,5 +149,10 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
         w.add(w.iri(n["id"]), [("a", "skos:Concept"), ("skos:inScheme", w.iri(n["concept"])), ("skos:prefLabel", _lit(n["label"]))])
     for e in export.get("edges", []):
         if e["kind"] == "broader" and e["from"] in of_scheme and e["to"] in of_scheme:
-            w.add(w.iri(e["from"]), [("skos:broader", w.iri(e["to"]))])
+            # A value sits under another because of a step; until a person approves the step,
+            # that is a proposal like the step itself.
+            if step_status.get(str(e.get("relation")), "proposed") == "proposed":
+                w.axiom(w.iri(e["from"]), "skos:broader", w.iri(e["to"]), "proposed")
+            else:
+                w.add(w.iri(e["from"]), [("skos:broader", w.iri(e["to"]))])
     return "\n".join(w.lines)
