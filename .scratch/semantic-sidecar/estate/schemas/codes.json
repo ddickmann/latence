@@ -369,6 +369,13 @@
    ],
    "en": "({columns}): unique in the data, over {rows} rows"
   },
+  "used_in_answers": {
+   "params": [
+    "answers",
+    "sources"
+   ],
+   "en": "used in {answers} answered questions ({sources})"
+  },
   "verified_join": {
    "params": [],
    "en": "verified by the host's layer job"

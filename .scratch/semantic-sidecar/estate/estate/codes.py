@@ -71,6 +71,8 @@ CODES: dict[str, tuple[tuple[str, ...], str]] = {
     "attribute_pattern.event": (("column", "targets"), "it is dated ({column}) and points at {targets}"),
     "attribute_pattern.document": (("columns",), "it carries text columns ({columns}) and nothing refers to it"),
     "attribute_pattern.product": (("sources",), "other concepts refer to it ({sources}) and its key names a thing"),
+    # --- what people ask --------------------------------------------------------------------
+    "used_in_answers": (("answers", "sources"), "used in {answers} answered questions ({sources})"),
     # --- two names that may be the same ----------------------------------------------------
     "same_start": (("word",), "both names begin with “{word}”"),
     "shared_rare_word": (("word",), "both names contain “{word}”"),

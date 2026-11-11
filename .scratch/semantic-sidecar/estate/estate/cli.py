@@ -29,6 +29,7 @@ from .resolution import merge, pair_answers, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
 from .turtle import to_turtle
+from .usage import attach, read_usage
 
 UI_FILES = ("ontology.json", "ontology.ttl")
 
@@ -47,7 +48,7 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 
 def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | None, out: Path,
           resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
-          client: object | None = None) -> dict[str, object]:
+          client: object | None = None, usage: tuple[Path, ...] = ()) -> dict[str, object]:
     """``hosted_model`` lets a hosted language model propose classes, if the estate allows it.
     The call is made only when what would be sent has changed, and only if its worst case
     stays under ``max_usd``. ``client`` stands in for the provider's client in tests."""
@@ -61,6 +62,10 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     joins = read_verified(verified, names) if verified else []
     shown = tuple(cfg.get("without_personal_columns", ()))
     model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())), shown, labels=cfg.get("labels"))
+    usage_meta = None
+    if usage:  # what people asked, counted on the elements they used; it changes no status
+        model, usage_meta = attach(model, read_usage(list(usage)))
+        model = {**model, "meta": {**model["meta"], "usage": usage_meta}}
     seeded = set(cfg.get("seeded_objects", ()))
     for c in model["concepts"]:
         if c.get("object_name") in seeded:
@@ -179,6 +184,7 @@ def main() -> None:
     b.add_argument("--resolver", type=Path, help="folder of the resolution engine (its link_records.py and environment)")
     b.add_argument("--hosted-model", action="store_true", help="let a hosted language model propose classes and definitions from names (the estate file must allow it)")
     b.add_argument("--class-answer", type=Path, help="a recorded answer to classes_prompt.json, in place of a call to a hosted model")
+    b.add_argument("--usage", type=Path, action="append", default=[], help="a log of answered questions (usage/1); repeat for more")
     b.add_argument("--max-usd", type=float, default=0.25, help="the most one call to the hosted model may cost in the worst case; a call that could cost more is not made")
     sd = sub.add_parser("seed")
     sd.add_argument("--config", type=Path, required=True)
@@ -200,7 +206,7 @@ def main() -> None:
         (a.out / "score.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
-        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd), indent=1))
+        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage)), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:

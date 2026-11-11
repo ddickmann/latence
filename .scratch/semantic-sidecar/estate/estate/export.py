@@ -65,6 +65,7 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
                 "proposed": sum(e["status"] == "proposed" for e in concepts + relations),
                 "dropped_below_floor": len(layer["meta"]["dropped_below_floor"]),
             },
+            "usage": layer["meta"].get("usage"),
             "decisions": layer["meta"].get("decisions", {"approved": 0, "rejected": 0, "unknown_subjects": []}),
             "host_verified_joins": compared,
             "instances": "not_in_this_cut" if instances is None else "available",
