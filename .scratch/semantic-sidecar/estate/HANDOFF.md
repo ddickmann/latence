@@ -11,10 +11,10 @@ the page is in the host's repository (draft pull request 5).
 | Estate mirror as DuckDB from the host's committed fixture | done | same commands |
 | Metric views printed offline | done, 13 views | same command |
 | `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures; 1,240 entities, 6,417 edges, 7 review items | rerun |
-| Engine tests (`estate/tests`, 46) | pass | rerun |
+| Engine tests (`estate/tests`, 51) | pass | rerun |
 | Seeded second source and its link to the dealers | done on the mirror: 938 of 1,274 accounts linked, 916 right, 304 pairs for review, 1,300 labels from the seed | rerun; needs the resolution engine's environment (`../spike/.venv`) |
 | The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
-| Host UI: type check, 146 unit tests, build | pass on Node 24.11.0 | rerun |
+| Host UI: type check, 190 unit tests, build | pass on Node 24.11.0 | rerun |
 | Host UI: browser tests of the page with accessibility checks, English and German | pass against the host's e2e world | rerun |
 | Host checks `layout`, `register`, `secrets`, `domain-terms` | pass | rerun |
 | Host checks `names`, `client-terms`, `assistant` | **not run: they need the guard key** | run |
@@ -110,6 +110,14 @@ one of:
   accounts). The number does not grow with the estate: 5,000 were enough for 1.2 million
   real company records.
 - **Manufacturer names that may be the same** are still only listed for a person.
+- **The class tree and the hierarchies are proposals.** Roll-ups are checked on the data and
+  say what breaks them; what kind of thing a concept is was proposed by column patterns and
+  by a language model that saw names only. Nothing of it is approved, and decisions on these
+  two are downloaded but not yet read back by the engine.
+- **Only 95 of 211 dealers carry a dealer group;** the page says so. The other 116 are in no
+  tree.
+- **The Turtle file** (OWL and SKOS) holds classes, properties and value hierarchies, with
+  proposals marked. Master rows, record links and measures are not in it.
 - **Known blemishes on the page:** the label "Investigation cas"; recall campaigns labelled
   by their key; review reasons in English on the German page.
 - The ontology is built from the **local mirror**, not read live from Unity Catalog.

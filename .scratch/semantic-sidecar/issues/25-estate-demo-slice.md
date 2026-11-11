@@ -163,7 +163,16 @@ The owner's objection: linking records is entity disambiguation; the model above
      stand-in client only; it has never reached the service.
 3. **The entity level hangs off that tree** (resolved dealers, parts and manufacturers as
    instances of classes, with the hierarchy edges between them).
-4. **Export in the standard forms** (OWL 2 QL, SKOS, SHACL). Not built.
+4. **Export in the standard forms** (`estate/turtle.py`, built 2026-11-11): one Turtle file,
+   OWL 2 QL and SKOS, parsed back in the tests. Classes and concepts with subclass axioms,
+   relations and attributes with domain and range, part-of as a restriction, value sets as
+   schemes with `broader`. A proposal is marked, on the element or on the axiom. On the
+   mirror: 3,857 triples, 41 classes, 83 object properties, 468 values. **Not in it:** master
+   rows, record links, measures, and no SHACL shapes yet.
+
+**The host page** shows all four: a class tree with definitions and the disputed placements,
+the hierarchies as levels and as trees of entities (market → dealer group → dealer → linked
+accounts), the way up from any concept or entity, and the Turtle download.
 
 **Limits of step 1.**
 - A roll-up needs two objects that carry both columns; one seen in a single object is not
