@@ -1,0 +1,167 @@
+{
+  "dataset": "estate",
+  "path": "data/real_gleif_ch_small_number.parquet",
+  "records": 302924,
+  "gold_clusters": 200015,
+  "seed": 7,
+  "blocking": {
+    "name_core": {
+      "pairs": 100389,
+      "pair_completeness": 0.9720847645106829,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.21
+    },
+    "first_tok+city": {
+      "pairs": 803622,
+      "pair_completeness": 0.7918728532339757,
+      "keys_skipped_over_cap": 3,
+      "secs": 0.27
+    },
+    "first_meta+pc_out": {
+      "pairs": 368781,
+      "pair_completeness": 0.810880829015544,
+      "keys_skipped_over_cap": 2,
+      "secs": 0.23
+    },
+    "reg_id": {
+      "pairs": 104699,
+      "pair_completeness": 1.0,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.15
+    },
+    "acronym": {
+      "pairs": 183506,
+      "pair_completeness": 0.000543362247967243,
+      "keys_skipped_over_cap": 140,
+      "secs": 0.19
+    },
+    "rare_token": {
+      "pairs": 1047346,
+      "pair_completeness": 0.7182957831208399,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.28
+    },
+    "_union": {
+      "pairs": 1954006,
+      "pair_completeness": 1.0,
+      "reduction_ratio": 0.9999574117341417,
+      "gold_pairs": 103062
+    }
+  },
+  "labels_used": {
+    "calibration": 2000,
+    "ltt": 3000
+  },
+  "bands": {
+    "accept_at": 0.005,
+    "reject_below": 0.005,
+    "target": 0.95,
+    "reject_target": 0.99,
+    "delta": 0.025,
+    "relabel_stage": {
+      "scorers": [],
+      "uncertain_pairs": 0,
+      "labels_used": {
+        "calibration": 0,
+        "ltt": 0
+      },
+      "features": {
+        "splink_logit": 1.0
+      },
+      "accept_at": null,
+      "reject_below": null,
+      "delta_per_stage": 0.025,
+      "moved": {
+        "accept": 0,
+        "review": 0,
+        "reject": 0
+      },
+      "accept_precision_realised": NaN,
+      "reject_true_match_rate": NaN,
+      "scorer_secs": {},
+      "pairs_per_s": {}
+    },
+    "second_stage": null,
+    "rescue_curve": [
+      {
+        "k": 973,
+        "true_matches": 57,
+        "share_of_rejected_true_matches": 0.76,
+        "match_rate_in_band": 0.05858170606372045,
+        "lowest_p": 0.0
+      }
+    ],
+    "share": {
+      "accept": 0.05306943786252447,
+      "review": 0.0,
+      "reject": 0.9469305621374755
+    },
+    "counts": {
+      "accept": 103698,
+      "review": 0,
+      "reject": 1850308
+    },
+    "auto_accept_precision_realised": 0.9931435514667593,
+    "auto_accept_precision_wilson_lower": 0.9926227027177237,
+    "auto_reject_true_match_rate": 4.053379221189121e-05,
+    "auto_resolved_share": 1.0,
+    "vetoed_pairs": 1849335
+  },
+  "review_effort": {
+    "review_pairs": 0,
+    "review_groups": 0,
+    "expert_minutes_at_20s_per_group": 0.0
+  },
+  "clustering": {
+    "machine_only": {
+      "pairwise_precision": 0.9999340869393271,
+      "pairwise_recall": 0.8831868195843279,
+      "pairwise_f1": 0.9379414810578544,
+      "bcubed_precision": 0.9999889961398459,
+      "bcubed_recall": 0.9604092115514122,
+      "bcubed_f1": 0.9797995525345943,
+      "predicted_clusters": 211985,
+      "gold_clusters": 200015,
+      "merges": 90939,
+      "blocked_merges": 0,
+      "blocked_by_linkage": 12669
+    },
+    "machine_plus_expert": {
+      "pairwise_precision": 0.9999340869393271,
+      "pairwise_recall": 0.8831868195843279,
+      "pairwise_f1": 0.9379414810578544,
+      "bcubed_precision": 0.9999889961398459,
+      "bcubed_recall": 0.9604092115514122,
+      "bcubed_f1": 0.9797995525345943,
+      "predicted_clusters": 211985,
+      "gold_clusters": 200015,
+      "merges": 90939,
+      "blocked_merges": 0,
+      "blocked_by_linkage": 12669
+    },
+    "plain_closure_splink_p95": {
+      "pairwise_precision": 0.7823571945047,
+      "pairwise_recall": 0.8923754633133454,
+      "pairwise_f1": 0.8337526119927294,
+      "bcubed_precision": 0.9860106633332112,
+      "bcubed_recall": 0.963490292394572,
+      "bcubed_f1": 0.9746204017267849,
+      "predicted_clusters": 208536,
+      "gold_clusters": 200015
+    },
+    "latence_cascade_baseline": "skipped: 302924 records > baseline_max 0"
+  },
+  "timings_s": {
+    "normalise": 6.35,
+    "block": 2.04,
+    "score_splink": 33.3,
+    "relabel": 0.01,
+    "cluster": 3.43,
+    "total": 48.2
+  },
+  "peak_rss_mb": 4689.0,
+  "hardware": {
+    "cpus": 48,
+    "gpu": "NVIDIA RTX PRO 4000 Blackwell"
+  }
+}
