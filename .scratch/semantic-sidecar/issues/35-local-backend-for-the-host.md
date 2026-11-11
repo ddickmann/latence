@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: resolved
 Blocked by: 34
 
 ## Question
@@ -29,3 +29,22 @@ Postgres and pgvector pass against this cluster. Recorded here: the versions and
 
 None of our own. The host's existing tests are the proof; they are run and their counts
 recorded.
+
+## Answer
+
+Done on 2026-11-11.
+
+- **pgvector.** The host's document search needs sparse vectors and the iterative index scan,
+  so pgvector 0.8 or newer; the distribution ships 0.6.0. Built 0.8.7 for Postgres 16.15 from
+  the source release on the distribution's own archive (checksum equal to the one its package
+  description states), with `postgresql-server-dev-16`. The release on the code host could not
+  be fetched from this machine.
+- **The cluster** runs as the `postgres` user on a Unix socket only, trust on that socket,
+  port 5433, user `metis`: `initdb -U metis -A trust -E UTF-8 --locale=C`, then `pg_ctl` with
+  `listen_addresses=''`. The host's variable:
+  `METIS_ESTATE_POSTGRES=postgresql://metis@:5433/postgres?host=/var/run/postgresql`.
+- **Proof.** The host's setup of its TalkToData world succeeded against it; the host's 115
+  tests of its pgvector plug-in pass against it (`METIS_TEST_POSTGRES_URL`).
+- **Toolchain:** Node 24.11.0 and `uv`, as before.
+- On the owner's machines Postgres 17 and pgvector come from the package manager, which ships
+  a current pgvector; nothing of the above is needed there.

@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: resolved
 Blocked by: 35
 
 ## Question
@@ -36,3 +36,28 @@ opens.
 ## Not built
 
 One server for several worlds. The demonstration moves between addresses.
+
+## Answer
+
+Built on 2026-11-11, in the host's repository (commit `6eba75d7`).
+
+- **The command is `metis-dev demo up|down|status`**, not `ui demo`: the `ui` command takes
+  one action word, and a second one would have made every `ui` call accept a stray argument.
+- It starts the claims world (the scripted one), TalkToData and Dashboards, each as `ui up` in
+  a process group of its own on ports 8400, 8410 and 8420, waits until each answers and prints
+  the addresses and the people to sign in as. `down` stops them; `status` says which answer
+  and whether the Ontology page has an export.
+- Model options reach the two worlds that call a model; the Databricks binding reaches the
+  worlds `ui up` binds there, by one rule both commands now share; Postgres goes to TalkToData
+  alone. Without Postgres and without the Databricks binding it stops before starting
+  anything.
+- **It does not build the ontology export.** That is the sidecar's, and the host must not
+  depend on it. `up` and `status` say whether the export is in the built user interface, and
+  the runbook says where to put it.
+- The runbook is a section of the host's handbook page on the reference UI.
+- **Tests, 5:** the three worlds' ports overlap neither each other nor the model servers'; each
+  world gets its options and no other; a world is started, waited for and stopped without a
+  process left; one that stops while starting is reported at once; nothing is started without
+  Postgres.
+- **Done check:** `demo up --scripted-models` brought up all three worlds on this machine, and
+  the browser walks of ticket 37 ran against them.
