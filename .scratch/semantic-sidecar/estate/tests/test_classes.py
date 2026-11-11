@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from estate.classes import TOP, HostedClassModel, RecordedClassModel, describe, pattern_voice, prompt_of, propose_classes
+from estate.classes import TOP, CachedClassModel, OpenAIClassModel, RecordedClassModel, describe, pattern_voice, prompt_of, propose_classes, worst_case_usd
 
 
 def _concept(cid: str, label: str, kind: str, cols: list[tuple[str, str, bool]], key: list[str] | None = None, obj: str | None = None) -> dict[str, Any]:
@@ -95,33 +96,121 @@ def test_a_model_adds_definitions_and_classes_of_its_own_and_a_disagreement_is_k
     assert top == TOP and "rows" not in str(pack) and all("values" not in c for c in pack)
 
 
-def test_the_hosted_voice_sends_names_only_and_reads_the_answer_as_data() -> None:
-    class Block:
-        type, text = "text", '{"classes": [], "concepts": [{"id": "concept:s.dealers", "parent": "organisation", "definition": "d", "reason": "r"}]}'
+class Obj:
+    def __init__(self, **kw: Any) -> None:
+        self.__dict__.update(kw)
 
-    class Response:
-        stop_reason, content, model = "end_turn", [Block()], "served-model"
 
-    class Messages:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
+def _strict(schema: dict[str, Any], path: str = "answer") -> None:
+    """What the provider refuses in a strict schema: an object that allows other fields, or
+    one that does not require every field it names."""
+    if schema.get("type") == "object":
+        if schema.get("additionalProperties") is not False:
+            raise ValueError(f"{path}: additionalProperties must be false")
+        if sorted(schema.get("required", [])) != sorted(schema["properties"]):
+            raise ValueError(f"{path}: every field must be required")
+        for name, sub in schema["properties"].items():
+            _strict(sub, f"{path}.{name}")
+    if schema.get("type") == "array":
+        _strict(schema["items"], f"{path}[]")
 
-        def create(self, **kw: Any) -> Response:
-            self.calls.append(kw)
-            return Response()
 
-    class Client:
-        def __init__(self) -> None:
-            self.beta = type("Beta", (), {"messages": Messages()})()
+class StandIn:
+    """The provider's client, as far as the voice uses it. It refuses what the provider
+    refuses, counts its calls, and answers in the form the SDK returns."""
 
-    client = Client()
-    out = HostedClassModel(client=client).propose(describe(MODEL, STRUCTURE), TOP)
-    call = client.beta.messages.calls[0]
-    assert out["served_by"] == "served-model" and out["concepts"][0]["parent"] == "organisation"
-    assert call["model"] == "claude-opus-5-5" and call["output_config"]["format"]["type"] == "json_schema" and call["fallbacks"] == "default"
-    sent = call["messages"][0]["content"]
-    assert "contact_email" in sent and "Top classes" in sent  # names are sent
-    assert "no rows and no values" in call["system"]
+    def __init__(self, answer: dict[str, Any] | None = None, status: str = "completed", refusal: str | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.answer = answer or {"classes": [], "concepts": [{"id": "concept:s.dealers", "parent": "organisation", "definition": "A workshop.",
+                                                                "definition_de": "Eine Werkstatt.", "reason": "a name with a town"}]}
+        self.status, self.refusal = status, refusal
+        self.responses = self
+
+    def stream(self, **kw: Any) -> "StandIn":
+        """The SDK's streaming helper: a context manager that hands out the final response."""
+        self._final = self._answer_to(**kw)
+        return self
+
+    def __enter__(self) -> "StandIn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def get_final_response(self) -> Obj:
+        return self._final
+
+    def _answer_to(self, **kw: Any) -> Obj:
+        allowed = {"model", "instructions", "input", "reasoning", "max_output_tokens", "store", "text"}
+        if set(kw) - allowed:
+            raise TypeError(f"unexpected arguments: {sorted(set(kw) - allowed)}")
+        form = kw["text"]["format"]
+        if form["type"] != "json_schema" or form["strict"] is not True or not form["name"]:
+            raise ValueError("a strict json_schema format with a name is required")
+        _strict(form["schema"])
+        if kw["reasoning"]["effort"] not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError("unknown reasoning effort")
+        self.calls.append(kw)
+        content = [Obj(type="refusal", refusal=self.refusal)] if self.refusal else [Obj(type="output_text", text=json.dumps(self.answer))]
+        return Obj(status=self.status, incomplete_details=Obj(reason="max_output_tokens") if self.status == "incomplete" else None,
+                   output=[Obj(type="reasoning"), Obj(type="message", content=content)], output_text="" if self.refusal else json.dumps(self.answer),
+                   model="gpt-6-luna-2026-10-05",
+                   usage=Obj(input_tokens=4200, input_tokens_details=Obj(cached_tokens=0), output_tokens=1800, output_tokens_details=Obj(reasoning_tokens=600)))
+
+
+PRICES = {"input_per_1m": 0.10, "output_per_1m": 0.50, "read_on": "2026-11-11", "source": "a test"}
+
+
+def test_the_hosted_voice_sends_names_only_in_a_strict_form_and_reads_the_answer_as_data() -> None:
+    client = StandIn()
+    voice = OpenAIClassModel(client=client)
+    out = voice.propose(describe(MODEL, STRUCTURE), TOP)
+    call = client.calls[0]
+    assert out["served_by"] == "gpt-6-luna-2026-10-05" and out["concepts"][0]["parent"] == "organisation"
+    assert call["model"] == "gpt-6-luna" and call["store"] is False and call["reasoning"] == {"effort": "low"}
+    assert "contact_email" in call["input"] and "Top classes" in call["input"]  # names are sent
+    assert "no rows and no values" in call["instructions"] and "English and German" in call["instructions"]
+    assert voice.usage == {"input_tokens": 4200, "cached_input_tokens": 0, "output_tokens": 1800, "reasoning_tokens": 600}
+    placed = propose_classes(MODEL, STRUCTURE, voice=OpenAIClassModel(client=StandIn()))
+    dealer = next(s for s in placed["subclass_of"] if s["concept"] == "concept:s.dealers")
+    assert [(t["lang"], t["text"], t["origin"]) for t in dealer["definition"]] == [("en", "A workshop.", "model:gpt-6-luna-2026-10-05"), ("de", "Eine Werkstatt.", "model:gpt-6-luna-2026-10-05")]
+
+
+def test_an_answer_that_was_cut_off_or_refused_proposes_nothing() -> None:
+    import pytest
+
+    with pytest.raises(RuntimeError, match="incomplete .max_output_tokens."):
+        OpenAIClassModel(client=StandIn(status="incomplete")).propose(describe(MODEL, STRUCTURE), TOP)
+    with pytest.raises(RuntimeError, match="refused: not this"):
+        OpenAIClassModel(client=StandIn(refusal="not this")).propose(describe(MODEL, STRUCTURE), TOP)
+
+
+def test_the_model_is_asked_once_for_the_same_request_and_every_call_is_logged_with_its_cost(tmp_path: Any) -> None:
+    client = StandIn()
+    pack = describe(MODEL, STRUCTURE)
+    first = CachedClassModel(OpenAIClassModel(client=client), tmp_path / "answers", PRICES, 0.25, tmp_path / "calls.jsonl")
+    answer = first.propose(pack, TOP)
+    assert len(client.calls) == 1 and first.cost["call"] == "made" and first.cost["usd"] == 0.00132  # 4,200 in at 0.10 and 1,800 out at 0.50 per million
+    again = CachedClassModel(OpenAIClassModel(client=client), tmp_path / "answers", PRICES, 0.25, tmp_path / "calls.jsonl")
+    assert again.propose(pack, TOP) == answer and len(client.calls) == 1  # the same request: no second call
+    assert again.cost["usd"] == 0.00132 and again.cost["call"].startswith("none")
+    changed = [{**pack[0], "label": "Workshop"}, *pack[1:]]
+    again.propose(changed, TOP)
+    assert len(client.calls) == 2  # something else would be sent: asked again
+    log = [json.loads(x) for x in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [e["usd"] for e in log] == [0.00132, 0.00132] and log[0]["output_tokens"] == 1800 and log[0]["prices"]["read_on"] == "2026-11-11"
+
+
+def test_a_call_that_could_cost_more_than_allowed_is_not_made(tmp_path: Any) -> None:
+    import pytest
+
+    client = StandIn()
+    voice = OpenAIClassModel(client=client)
+    bound = worst_case_usd(voice.request(describe(MODEL, STRUCTURE), TOP), PRICES)
+    assert 0.006 < bound < 0.01  # the whole output allowance of 12,000 tokens, and every character sent as a token
+    with pytest.raises(RuntimeError, match="more than the USD 0.001 allowed"):
+        CachedClassModel(voice, tmp_path / "answers", PRICES, 0.001, tmp_path / "calls.jsonl").propose(describe(MODEL, STRUCTURE), TOP)
+    assert client.calls == [] and not (tmp_path / "calls.jsonl").exists()
 
 
 def test_a_recorded_answer_stands_in_for_the_call_and_the_prompt_file_holds_all_that_leaves() -> None:
@@ -139,3 +228,42 @@ def test_a_recorded_answer_stands_in_for_the_call_and_the_prompt_file_holds_all_
     with pytest.raises(ValueError, match="answered_by"):
         RecordedClassModel({"classes": [], "concepts": []})
 
+
+
+def test_a_build_asks_the_hosted_model_once_and_only_where_the_estate_allows_it(tmp_path: Any, toy_path: Any) -> None:
+    import pytest
+    import yaml
+
+    from estate.cli import build
+
+    from .conftest import OPTIONS, SENSITIVE, VIEWS
+
+    def project(classes: dict[str, Any] | None) -> dict[str, Any]:
+        cfg = tmp_path / f"toy{len(list(tmp_path.glob('*.yaml')))}.yaml"
+        cfg.write_text(yaml.safe_dump({"name": "toy", "title": "Toy estate", "schema_prefix": "acme_", "schemas": ["shop", "marts"],
+                                       "personal_objects": ["shop.owners", "shop.vehicles"], "sensitive": SENSITIVE,
+                                       "ignore_columns": list(OPTIONS["ignore_columns"]), "derived_schemas": list(OPTIONS["derived_schemas"]),
+                                       **({"classes": classes} if classes is not None else {})}))
+        views = tmp_path / "views.txt"
+        views.write_text(VIEWS)
+        return {"config": cfg, "duckdb_path": toy_path, "views": views, "verified": None, "out": tmp_path / "out"}
+
+    client = StandIn({"classes": [], "concepts": [{"id": "concept:shop.dealers", "parent": "organisation", "definition": "A workshop.",
+                                                   "definition_de": "Eine Werkstatt.", "reason": "a name"}]})
+    with pytest.raises(SystemExit, match="does not allow"):
+        build(**project(None), hosted_model=True, client=client)
+    with pytest.raises(SystemExit, match="states no prices"):
+        build(**project({"hosted_model": True}), hosted_model=True, client=client)
+    assert client.calls == []
+    allowed = project({"hosted_model": True, "prices": PRICES})
+    first = build(**allowed, hosted_model=True, client=client)
+    assert len(client.calls) == 1 and first["classes"]["hosted_call"] == "made"
+    written = json.loads((allowed["out"] / "classes_prompt.json").read_text())
+    assert written == {k: client.calls[0][k] for k in written} and set(written) == set(client.calls[0])  # the file a person can read is what was sent
+    assert "D1" not in client.calls[0]["input"] and "Dealer 1" not in client.calls[0]["input"] and "@example.org" not in client.calls[0]["input"]  # no value leaves
+    export = (allowed["out"] / "ontology.json").read_bytes()
+    assert json.loads(export)["classes"]["voices"]["cost"]["usd"] == 0.00132
+    second = build(**allowed, hosted_model=True, client=client)
+    assert len(client.calls) == 1 and second["classes"]["hosted_call"].startswith("none")  # nothing new to send: no call
+    assert (allowed["out"] / "ontology.json").read_bytes() == export  # and the same file
+    assert len((allowed["out"] / "model_calls.jsonl").read_text().splitlines()) == 1

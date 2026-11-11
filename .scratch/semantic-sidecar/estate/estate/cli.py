@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .classes import TOP, HostedClassModel, RecordedClassModel, describe, prompt_of, propose_classes
+from .classes import TOP, CachedClassModel, OpenAIClassModel, RecordedClassModel, describe, prompt_of, propose_classes
 from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
@@ -46,7 +46,11 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 
 
 def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | None, out: Path,
-          resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None) -> dict[str, object]:
+          resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
+          client: object | None = None) -> dict[str, object]:
+    """``hosted_model`` lets a hosted language model propose classes, if the estate allows it.
+    The call is made only when what would be sent has changed, and only if its worst case
+    stays under ``max_usd``. ``client`` stands in for the provider's client in tests."""
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
     reader = DuckDBReader(
         duckdb_path, schemas=cfg["schemas"], sensitive=cfg.get("sensitive", []),
@@ -74,9 +78,27 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     if hosted_model and not cfg.get("classes", {}).get("hosted_model"):
         raise SystemExit("this estate does not allow its names to be sent to a hosted model (classes.hosted_model in the estate file)")
     personal = tuple(cfg.get("personal_objects", ()))
-    (out / "classes_prompt.json").write_text(json.dumps(prompt_of(describe(layer, structure, personal), TOP), indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    voice = HostedClassModel() if hosted_model else RecordedClassModel(json.loads(class_answer.read_text(encoding="utf-8"))) if class_answer else None
+    voice: CachedClassModel | RecordedClassModel | None = None
+    if hosted_model:
+        spec = cfg["classes"]
+        if "prices" not in spec:
+            raise SystemExit("the estate file states no prices for the hosted model (classes.prices): the call cannot be held under a limit")
+        hosted = OpenAIClassModel(client=client, model=spec.get("model", "gpt-6-luna"), effort=spec.get("effort", "low"),
+                                  languages=tuple(spec.get("languages", ("en", "de"))))
+        voice = CachedClassModel(hosted, out / "class_answers", spec["prices"], max_usd, out / "model_calls.jsonl")
+        leaves: dict[str, object] = hosted.request(describe(layer, structure, personal), TOP)  # exactly what the call sends
+    elif class_answer:
+        voice = RecordedClassModel(json.loads(class_answer.read_text(encoding="utf-8")))
+    if not hosted_model:
+        leaves = prompt_of(describe(layer, structure, personal), TOP)  # what a model session would be given
+    (out / "classes_prompt.json").write_text(json.dumps(leaves, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     classes = propose_classes(layer, structure, personal, voice, decisions)
+    if isinstance(voice, CachedClassModel) and voice.cost is not None:
+        # What the answer in this export cost when it was asked for; a rebuild that asks nothing says the same.
+        classes = {**classes, "voices": {**classes["voices"], "cost": {k: v for k, v in voice.cost.items() if k != "call"}}}
+        call_note = voice.cost["call"]
+    else:
+        call_note = "no hosted model"
     new = append(out / "assertions.jsonl", assertions_of(model, structure, classes))
     up = broader_edges(reader, structure, {n["id"] for n in instances["nodes"]})
     edges = sorted(instances["edges"] + up, key=lambda e: (e["kind"], e["from"], e["to"], str(e.get("via")), str(e.get("relation"))))
@@ -114,7 +136,7 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
             "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"],
             "structure": {k: len(v) for k, v in export["structure"].items()},
             "classes": {"voices": classes["voices"], "placed": len(classes["subclass_of"]), "contested": sum(s["contested"] for s in classes["subclass_of"]),
-                        "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"])},
+                        "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"]), "hosted_call": call_note},
             "resolution": instances["meta"].get("resolution") or resolution_note}
 
 
@@ -157,6 +179,7 @@ def main() -> None:
     b.add_argument("--resolver", type=Path, help="folder of the resolution engine (its link_records.py and environment)")
     b.add_argument("--hosted-model", action="store_true", help="let a hosted language model propose classes and definitions from names (the estate file must allow it)")
     b.add_argument("--class-answer", type=Path, help="a recorded answer to classes_prompt.json, in place of a call to a hosted model")
+    b.add_argument("--max-usd", type=float, default=0.25, help="the most one call to the hosted model may cost in the worst case; a call that could cost more is not made")
     sd = sub.add_parser("seed")
     sd.add_argument("--config", type=Path, required=True)
     sd.add_argument("--duckdb", type=Path, required=True)
@@ -177,7 +200,7 @@ def main() -> None:
         (a.out / "score.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
-        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer), indent=1))
+        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:

@@ -88,13 +88,18 @@ The build always adds the structure the data proves (roll-ups, part-of, which va
 under which) and the class proposals of the pattern voice. For the language-model voice add
 one of:
 
-- `--class-answer estates/vehicles.classes_answer.json`: the recorded answer of a model
-  session to `out/vehicles/classes_prompt.json`. Sends nothing anywhere. This is what the
-  numbers in ticket 25 were built with.
-- `--hosted-model`: a direct call (model `claude-opus-5-5`), with `ANTHROPIC_API_KEY` set in
-  the shell and `pip install anthropic` in the estate's environment. **Never run against the
-  service so far**; the estate file must allow it (`classes.hosted_model: true`). Read
-  `classes_prompt.json` first: it is exactly what would be sent.
+- `--class-answer estates/vehicles.classes_answer.gpt-6-luna.json`: the answer the small
+  hosted model gave on 2026-11-11, kept as a file. Sends nothing anywhere and gives the same
+  class tree every time. (`estates/vehicles.classes_answer.json` is an earlier answer from a
+  model session without an API; the numbers in ticket 25 were built with it.)
+- `--hosted-model [--max-usd 0.05]`: one call to the model the estate file names
+  (`classes.model`), on the provider's official SDK (`pip install openai==3.49.0` in the
+  estate's environment, `OPENAI_API_KEY` set in the shell). The estate file must allow it
+  (`classes.hosted_model: true`) and state the prices. The call is made only when what would
+  be sent has changed; the answer is kept in `<out>/class_answers/`, each call is logged in
+  `<out>/model_calls.jsonl` with its cost, and a call whose worst case is above `--max-usd`
+  is not made. Read `<out>/classes_prompt.json` first: it is exactly what is sent. Run once
+  on 2026-11-11 on this estate (ticket 31).
 
 ## What to say aloud in a demonstration
 

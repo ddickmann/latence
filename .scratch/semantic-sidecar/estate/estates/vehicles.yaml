@@ -59,6 +59,14 @@ link:
 # This estate is synthetic and public, so it is allowed; for a client's estate it is a decision.
 classes:
   hosted_model: true
+  # The model the builder asks, how hard it is told to think, and the languages of its definitions.
+  model: gpt-6-luna
+  effort: low
+  languages: [en, de]
+  # List prices in USD per million tokens, for the limit on a call and for what a call is said
+  # to have cost. Read on 2026-11-11 from third-party price listings; the provider's own price
+  # page could not be opened from where this was written. Reasoning tokens are output tokens.
+  prices: {input_per_1m: 0.10, output_per_1m: 0.50, read_on: "2026-11-11", source: third-party listings}
 # The address under which the Turtle export names its elements. Identifiers below it are opaque.
 export:
   base_iri: "https://example.invalid/estate/vehicles/"

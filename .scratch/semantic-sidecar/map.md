@@ -118,7 +118,7 @@ which the owner updates the main machine and switches to Databricks.
 | [28](issues/28-decisions-on-structure-and-classes.md) | a decision on a hierarchy step or a class changes the layer | AFK | **done** |
 | [29](issues/29-hand-checked-list-and-score.md) | classes and hierarchies scored against a list the owner checked | HITL | built; **waits for the owner to correct the list** |
 | [30](issues/30-label-loop.md) | the matcher asks for labels and takes them from a reviewer | AFK | **done** |
-| [31](issues/31-live-class-voice.md) | the model's voice on classes runs live on a small hosted model | HITL | 26 |
+| [31](issues/31-live-class-voice.md) | the model's voice on classes runs live on a small hosted model | HITL | **done** |
 | [32](issues/32-usage-signals.md) | what people ask is a signal on the elements they use | AFK | 26 |
 | [33](issues/33-unity-catalog-reader.md) | a reader for Unity Catalog, proven against a stand-in | HITL | 26 |
 | [34](issues/34-ontology-v1-acceptance.md) | **is the capability at v1 quality?** | HITL | 26–33 |

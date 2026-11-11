@@ -3,4 +3,4 @@ PyYAML==6.0.3
 jsonschema==4.25.1
 pytest==8.4.2
 rdflib==7.6.0  # tests only: the Turtle export is parsed back
-# anthropic==2.8.0  # only for `build --hosted-model`
+# openai==3.49.0  # only for `build --hosted-model`; tests use a stand-in client

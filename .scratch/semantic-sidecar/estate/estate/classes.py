@@ -22,8 +22,10 @@ in the estate file). Without it only the pattern voice speaks.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Protocol
 
 from .codes import TOP, say, text
@@ -92,17 +94,25 @@ class ClassModel(Protocol):
     def propose(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]: ...
 
 
-ANSWER = {
-    "type": "object", "additionalProperties": False, "required": ["classes", "concepts"],
-    "properties": {
-        "classes": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["name", "parent", "definition"],
-            "properties": {"name": {"type": "string"}, "parent": {"type": "string"}, "definition": {"type": "string"}}}},
-        "concepts": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["id", "parent", "definition", "reason"],
-            "properties": {"id": {"type": "string"}, "parent": {"type": "string"}, "definition": {"type": "string"}, "reason": {"type": "string"}}}},
-    },
-}
+def _answer_schema(languages: tuple[str, ...]) -> dict[str, Any]:
+    """The form of a voice's answer. One definition per language asked for; every field is
+    required and nothing else is allowed, which is what a strict structured output needs."""
+    definitions = {("definition" if lang == "en" else f"definition_{lang}"): {"type": "string"} for lang in languages}
+    return {
+        "type": "object", "additionalProperties": False, "required": ["classes", "concepts"],
+        "properties": {
+            "classes": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False, "required": ["name", "parent", *definitions],
+                "properties": {"name": {"type": "string"}, "parent": {"type": "string"}, **definitions}}},
+            "concepts": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False, "required": ["id", "parent", *definitions, "reason"],
+                "properties": {"id": {"type": "string"}, "parent": {"type": "string"}, **definitions, "reason": {"type": "string"}}}},
+        },
+    }
+
+
+ANSWER = _answer_schema(("en",))
+LANGUAGES = {"en": "English", "de": "German"}
 SYSTEM = """You are helping to draft the class tree of an ontology over a data estate. You are shown the concepts that \
 were read from the estate's catalog: for each one its label, the object it comes from, its key, its columns with types and \
 comments, and how the concepts refer to one another. You are shown no rows and no values.
@@ -118,31 +128,97 @@ of someone who works with this data. State only what the names, comments and rel
 each parent that names the evidence you used. A person will review every line; nothing you write is applied automatically."""
 
 
-class HostedClassModel:
-    """The language-model voice over the Anthropic Messages API. Credentials come from the
-    environment; where a network proxy injects the key, any placeholder value will do."""
+class OpenAIClassModel:
+    """The language-model voice over OpenAI's Responses API, on the official SDK.
 
-    def __init__(self, client: Any | None = None, model: str = "claude-opus-5-5") -> None:
+    One call per build: the instruction, the top classes and the concepts go in, an answer in
+    a strict JSON form comes back. The key is read by the SDK from the environment
+    (``OPENAI_API_KEY``); where a network proxy injects it, any placeholder will do. What the
+    call used is kept on ``usage`` for the build to record what it cost."""
+
+    def __init__(self, client: Any | None = None, model: str = "gpt-6-luna", effort: str = "low",
+                 max_output_tokens: int = 12_000, languages: tuple[str, ...] = ("en", "de")) -> None:
         if client is None:
-            import anthropic  # imported here so that tests and builds without this voice need no SDK
+            import openai  # imported here so that tests and builds without this voice need no SDK
 
-            client = anthropic.Anthropic()
-        self.client, self.name = client, model
+            # No silent second attempt: a call that fails is reported, not repeated and billed again.
+            client = openai.OpenAI(max_retries=0)
+        self.client, self.name, self.effort, self.max_output_tokens, self.languages = client, model, effort, max_output_tokens, languages
+        self.usage: dict[str, int] | None = None
 
-    def propose(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
+    def request(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
+        """Everything the call sends, so that it can be read, digested and priced before it is made."""
+        asked = " and ".join(LANGUAGES[lang] for lang in self.languages)
         prompt = ("Top classes:\n" + "\n".join(f"- {k}: {v}" for k, v in top.items())
                   + "\n\nConcepts (JSON):\n" + json.dumps(pack, ensure_ascii=False, indent=1))
-        # A refusal on this model is re-run by the service on its default fallback model.
-        response = self.client.beta.messages.create(
-            model=self.name, max_tokens=16000, system=SYSTEM,
-            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": ANSWER}},
-            messages=[{"role": "user", "content": prompt}],
-        )
-        if response.stop_reason in ("refusal", "max_tokens"):
-            raise RuntimeError(f"the model stopped with {response.stop_reason}; no classes proposed")
-        text = next(b.text for b in response.content if b.type == "text")
-        return {**json.loads(text), "served_by": response.model}
+        return {
+            "model": self.name, "instructions": f"{SYSTEM}\n\nWrite every definition in {asked}, each in its own field.", "input": prompt,
+            "reasoning": {"effort": self.effort}, "max_output_tokens": self.max_output_tokens, "store": False,
+            "text": {"format": {"type": "json_schema", "name": "class_tree", "schema": _answer_schema(self.languages), "strict": True}},
+        }
+
+    def propose(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
+        # Read as a stream: an answer of this length takes longer than a gateway waits in silence.
+        with self.client.responses.stream(**self.request(pack, top)) as stream:
+            response = stream.get_final_response()
+        if response.status != "completed":
+            why = getattr(response.incomplete_details, "reason", None)
+            raise RuntimeError(f"the model's answer is {response.status}{f' ({why})' if why else ''}; no classes proposed")
+        refused = [c.refusal for o in response.output if o.type == "message" for c in o.content if c.type == "refusal"]
+        if refused:
+            raise RuntimeError(f"the model refused: {refused[0]}")
+        u = response.usage
+        self.usage = {"input_tokens": int(u.input_tokens), "cached_input_tokens": int(u.input_tokens_details.cached_tokens),
+                      "output_tokens": int(u.output_tokens), "reasoning_tokens": int(u.output_tokens_details.reasoning_tokens)}
+        return {**json.loads(response.output_text), "served_by": response.model}
+
+
+def worst_case_usd(request: dict[str, Any], prices: dict[str, Any]) -> float:
+    """An upper bound on what one call can cost: every character of what is sent counted as a
+    token (a token is never shorter than a character), and the whole output allowance used."""
+    sent = len(json.dumps(request, ensure_ascii=False))
+    return round((sent * float(prices["input_per_1m"]) + int(request["max_output_tokens"]) * float(prices["output_per_1m"])) / 1e6, 4)
+
+
+def cost_usd(usage: dict[str, int], prices: dict[str, Any]) -> float:
+    """What a call cost at the estate's listed prices. Reasoning tokens are output tokens."""
+    return round((usage["input_tokens"] * float(prices["input_per_1m"]) + usage["output_tokens"] * float(prices["output_per_1m"])) / 1e6, 6)
+
+
+class CachedClassModel:
+    """A hosted voice that is asked only when what it would be sent has changed.
+
+    The answer is kept under a digest of the request in ``folder``. A build that would send
+    the same request reads the answer back and makes no call. Before a call that has to be
+    made, its worst case is held against ``max_usd``; a call that could cost more is not
+    made. Every call that is made is appended to ``log`` with what it used and cost."""
+
+    def __init__(self, voice: OpenAIClassModel, folder: Path, prices: dict[str, Any], max_usd: float, log: Path) -> None:
+        self.voice, self.folder, self.prices, self.max_usd, self.log = voice, folder, prices, max_usd, log
+        self.name = voice.name
+        self.cost: dict[str, Any] | None = None
+
+    def propose(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
+        request = self.voice.request(pack, top)
+        digest = hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
+        kept = self.folder / f"{digest}.json"
+        if kept.exists():
+            entry = json.loads(kept.read_text(encoding="utf-8"))
+            self.cost = {**entry["cost"], "call": "none: the answer to this request was kept"}
+            return dict(entry["answer"])
+        bound = worst_case_usd(request, self.prices)
+        if bound > self.max_usd:
+            raise RuntimeError(f"the call could cost up to USD {bound}, more than the USD {self.max_usd} allowed; not made")
+        answer = self.voice.propose(pack, top)
+        usage = self.voice.usage or {}
+        cost = {"model": answer.get("served_by", self.name), "usd": cost_usd(usage, self.prices), **usage,
+                "prices": {k: self.prices[k] for k in sorted(self.prices)}}
+        self.folder.mkdir(parents=True, exist_ok=True)
+        kept.write_text(json.dumps({"request_digest": digest, "answer": answer, "cost": cost}, indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        with open(self.log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"request_digest": digest, **cost}, sort_keys=True) + "\n")
+        self.cost = {**cost, "call": "made"}
+        return answer
 
 
 def prompt_of(pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
@@ -164,6 +240,11 @@ class RecordedClassModel:
 
     def propose(self, pack: list[dict[str, Any]], top: dict[str, str]) -> dict[str, Any]:
         return {"classes": self.answer["classes"], "concepts": self.answer["concepts"]}
+
+
+def _definitions(said: dict[str, Any], origin: str) -> list[dict[str, str]]:
+    """A model's definitions, one text per language it wrote one in."""
+    return [t for lang in LANGUAGES for t in text(said.get("definition" if lang == "en" else f"definition_{lang}"), origin, lang)]
 
 
 def _with_reason(signal: dict[str, Any], reason: str | None, origin: str) -> dict[str, Any]:
@@ -201,7 +282,7 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
         parent = names.get(_slug(c["parent"]))
         if parent is None or _slug(c["name"]) in TOP:
             continue  # a class that hangs under nothing we know is not taken
-        el = {"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": text(c["definition"], origin), "status": "proposed",
+        el = {"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": _definitions(c, origin), "status": "proposed",
               "signals": [say("language_model.class", str(served), model=str(served), parent=c["parent"])]}
         if asked.rejected("class", el):
             handed_on[el["id"]] = parent
@@ -251,7 +332,7 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
             signals.insert(0, _with_reason(say("language_model.declined", str(served), model=str(served)), m.get("reason"), origin))  # type: ignore[union-attr]
         subclass_of.append(asked.marked("subclass", {
             "id": sid, "concept": c["id"], "parent": parent, "status": "proposed",
-            "definition": text((m or {}).get("definition"), origin), "contested": contested,
+            "definition": _definitions(m or {}, origin), "contested": contested,
             **({"other_parent": p_parent} if contested and p_parent and m_parent else {}), "signals": signals}))
     used = {s["parent"] for s in subclass_of} | {s.get("other_parent") for s in subclass_of} | set(parent_of.values())
     mid = [m for m in mid if sum(s["parent"] == m["id"] for s in subclass_of) + sum(v == m["id"] for v in parent_of.values()) >= 1]
