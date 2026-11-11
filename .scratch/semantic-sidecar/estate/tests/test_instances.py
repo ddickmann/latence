@@ -9,9 +9,26 @@ from .conftest import OPTIONS
 PERSONAL = ("shop.owners", "shop.vehicles")
 
 
+SHOWN = ("shop.dealers",)  # an organisation that also carries a contact person's columns
+
+
 def _build(reader: DuckDBReader) -> tuple[dict, dict]:
+    model = induce(reader, **OPTIONS, without_personal_columns=SHOWN)
+    return model, build_instances(reader, model, personal_objects=PERSONAL, resolve=("make",), without_personal_columns=SHOWN)
+
+
+def test_an_object_with_a_personal_column_gives_no_nodes_unless_the_estate_says_so(reader: DuckDBReader) -> None:
     model = induce(reader, **OPTIONS)
-    return model, build_instances(reader, model, personal_objects=PERSONAL, resolve=("make",))
+    inst = build_instances(reader, model, personal_objects=PERSONAL, resolve=("make",))
+    assert not any(n["id"].startswith("shop.dealers:") for n in inst["nodes"])
+    assert not any(e["from"].startswith("shop.dealers:") or e["to"].startswith("shop.dealers:") for e in inst["edges"])
+    assert next(c for c in model["concepts"] if c["id"] == "concept:shop.dealers")["instances"] == "withheld_personal"
+    assert any(n["id"].startswith("shop.parts:") for n in inst["nodes"])  # an object without personal columns is unaffected
+
+    model, inst = _build(reader)
+    assert sum(n["id"].startswith("shop.dealers:") for n in inst["nodes"]) == 40
+    assert next(c for c in model["concepts"] if c["id"] == "concept:shop.dealers")["instances"] == "without_personal_columns"
+    assert "@example.org" not in repr(inst)
 
 
 def test_values_and_master_rows_become_nodes_and_fact_rows_never_do(reader: DuckDBReader) -> None:
@@ -28,7 +45,7 @@ def test_personal_objects_give_no_nodes_and_no_personal_value_is_read(reader: Du
     asked: list[str] = []
     real = reader.query
     reader.query = lambda sql: (asked.append(sql), real(sql))[1]  # type: ignore[method-assign]
-    inst = build_instances(reader, model, personal_objects=PERSONAL, resolve=("make",))
+    inst = build_instances(reader, model, personal_objects=PERSONAL, resolve=("make",), without_personal_columns=SHOWN)
     assert not any(n["id"].startswith(("shop.owners:", "shop.vehicles:")) for n in inst["nodes"])
     assert asked and not any("contact_email" in sql or '"vin"' in sql or '"owners"' in sql or '"vehicles"' in sql for sql in asked)
     text = repr(inst)

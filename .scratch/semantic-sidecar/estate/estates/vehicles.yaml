@@ -8,8 +8,8 @@ schemas: [clean, internal, marts]
 derived_schemas: [marts]
 # Load and lineage columns: they carry no meaning and are never keys or references.
 ignore_columns: [source_line, source_file, layout_version, added_date]
-# Columns the catalog classes as personal. They are never queried, and no instance of an
-# object that has one is exported.
+# Columns the catalog classes as personal. They are never queried, and no row of an object
+# that has one is exported, unless the object is named under without_personal_columns.
 sensitive:
   - internal.owners.name
   - internal.owners.street
@@ -24,5 +24,8 @@ sensitive:
   - clean.complaints.vin
 # Objects whose rows are about a person. They give no instance, whatever their columns.
 personal_objects: [internal.owners, internal.vehicles, internal.warranty_contracts, internal.claims]
+# Objects about an organisation that also carry a contact person's columns. Their rows are
+# exported without those columns. This is a decision per estate; the default is to withhold.
+without_personal_columns: [internal.dealers]
 # Value sets whose values are names of organisations: spellings that may be the same are listed for review.
 resolve: [manufacturer]

@@ -48,11 +48,12 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     )
     names = {o.full_name for o in reader.objects()}
     joins = read_verified(verified, names) if verified else []
-    model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())))
+    shown = tuple(cfg.get("without_personal_columns", ()))
+    model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())), shown)
     out.mkdir(parents=True, exist_ok=True)
     new = append(out / "assertions.jsonl", assertions_of(model))
     layer = replay(model, read_decisions(out / "decisions.jsonl"))
-    instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())))
+    instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown)
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances)
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],

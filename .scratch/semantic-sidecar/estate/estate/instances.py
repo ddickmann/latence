@@ -4,7 +4,8 @@ What becomes a node:
 
 - every value of a value set (a make, a market), with how many rows carry it;
 - every row of an entity object that has a single-column key, is not personal and is small
-  enough to be master data.
+  enough to be master data. An object with a sensitive column gives no nodes unless the estate
+  names it as shown without those columns (an organisation that carries a contact person).
 
 What never becomes a node: a row of a fact object (a claim, a claim line) and anything from an
 object the estate marks as personal. A fact is shown as a count on an edge: "this dealer has
@@ -85,9 +86,14 @@ def possibly_same(values: list[tuple[str, int]]) -> list[dict[str, Any]]:
 
 
 def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = (),
-                    resolve: tuple[str, ...] = ()) -> dict[str, Any]:
+                    resolve: tuple[str, ...] = (), without_personal_columns: tuple[str, ...] = ()) -> dict[str, Any]:
     """Nodes, edges and review items for an induced model. ``personal_objects`` never give
-    nodes. ``resolve`` names the value sets whose values are names to compare."""
+    nodes. Neither does any object with a sensitive column, unless it is named in
+    ``without_personal_columns``: then its rows are nodes and the sensitive columns stay
+    unread. ``resolve`` names the value sets whose values are names to compare."""
+    both = set(personal_objects) & set(without_personal_columns)
+    if both:
+        raise ValueError(f"listed as personal and as shown without personal columns: {sorted(both)}")
     objects = {o.full_name: o for o in reader.objects()}
     concepts = {c["id"]: c for c in model["concepts"]}
     personal = set(personal_objects)
@@ -124,6 +130,8 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
         if c["kind"] not in ("entity",) or name is None or name in personal or name not in objects:
             continue
         obj, key = objects[name], c.get("key") or []
+        if any(col.sensitive for col in obj.columns) and name not in without_personal_columns:
+            continue
         if len(key) != 1 or not obj.rows or obj.rows > MAX_ENTITY_ROWS or c["id"] not in referred_to:
             continue  # master data is what other objects refer to; a table nothing points at is a list of events
         label_col = _label_column(obj, key[0])

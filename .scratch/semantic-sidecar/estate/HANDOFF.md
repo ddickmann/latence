@@ -66,7 +66,10 @@ show as approved, rejected ones are gone from the page and stay in `assertions.j
 - Which tables are derived, and which columns are load columns, was **told** to the engine for
   this estate.
 - The file is served **without sign-in**; it holds synthetic and public data, and no value of
-  a personal column.
+  a personal column. An object with a personal column gives no rows at all, unless the estate
+  file names it under `without_personal_columns` (here: the dealers, an organisation with a
+  contact person); then its rows are exported without those columns. Counts of claims per
+  dealer and part are exported; no claim row is.
 
 ## Credentials
 

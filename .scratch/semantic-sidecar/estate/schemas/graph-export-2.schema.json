@@ -173,7 +173,8 @@
         "instances": {
           "enum": [
             "available",
-            "withheld_personal"
+            "withheld_personal",
+            "without_personal_columns"
           ]
         },
         "signals": {

@@ -158,11 +158,21 @@ def _key_of(obj: CatalogObject, prof: Profiler, join_targets: set[str], objects:
     return (), ""
 
 
+def _instances_of(o: CatalogObject, personal_key: bool, shown: tuple[str, ...]) -> str:
+    """Whether rows of an object may be shown. One with a personal column gives none, unless
+    the estate names it as an object about something else (an organisation with a contact
+    person): then its rows are shown without those columns. A personal key always withholds."""
+    if not any(c.sensitive for c in o.columns):
+        return "available"
+    return "without_personal_columns" if o.full_name in shown and not personal_key else "withheld_personal"
+
+
 def induce(
     reader: Reader,
     verified_joins: list[tuple[str, str]] | None = None,
     ignore_columns: tuple[str, ...] = (),
     derived_schemas: tuple[str, ...] = (),
+    without_personal_columns: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """The induced schema level as plain data: ``concepts``, ``relations``, ``measures`` and
     ``meta``. ``verified_joins`` are (child object, parent object) pairs a host has verified.
@@ -212,7 +222,7 @@ def induce(
             status="declared" if view_of.get(o.full_name) else "proposed", signals=sig,
             body={"object": o.id, "object_name": o.full_name, "rows": o.rows, "definition": comment,
                   "key": list(keys.get(o.full_name, ())), "kind": "derived" if o.schema in derived else "entity",
-                  "instances": "withheld_personal" if personal_key or any(c.sensitive for c in o.columns) else "available"},
+                  "instances": _instances_of(o, personal_key, without_personal_columns)},
         )
 
     # ---- relations: declared by metric-view joins, then mined by name and inclusion ---------
