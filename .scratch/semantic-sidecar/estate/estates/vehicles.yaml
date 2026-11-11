@@ -53,3 +53,6 @@ link:
 # This estate is synthetic and public, so it is allowed; for a client's estate it is a decision.
 classes:
   hosted_model: true
+# The address under which the Turtle export names its elements. Identifiers below it are opaque.
+export:
+  base_iri: "https://example.invalid/estate/vehicles/"

@@ -27,8 +27,9 @@ from .reader_duckdb import DuckDBReader
 from .resolution import merge, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
+from .turtle import to_turtle
 
-UI_FILES = ("ontology.json",)
+UI_FILES = ("ontology.json", "ontology.ttl")
 
 
 def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
@@ -92,6 +93,7 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
         resolution_note = "linked"
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes)
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
             "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"],
             "structure": {k: len(v) for k, v in export["structure"].items()},
