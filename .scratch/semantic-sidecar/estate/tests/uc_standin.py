@@ -83,7 +83,8 @@ class StandIn:
     # ---- statements ---------------------------------------------------------------------------
     def _submit(self, body: dict[str, Any]) -> dict[str, Any]:
         wanted = {"warehouse_id": self.warehouse, "disposition": "INLINE", "format": "JSON_ARRAY", "on_wait_timeout": "CONTINUE"}
-        if any(body.get(k) != v for k, v in wanted.items()) or not re.fullmatch(r"\d+s", str(body.get("wait_timeout"))):
+        wait = str(body.get("wait_timeout"))  # "<seconds>s", read without a pattern: the value comes from the request
+        if any(body.get(k) != v for k, v in wanted.items()) or not (wait.endswith("s") and wait[:-1].isascii() and wait[:-1].isdigit()):
             return {"statement_id": "s0", "status": {"state": "FAILED", "error": {"message": "the request is not one this warehouse takes"}}}
         sql = body["statement"]
         sid = f"s{len(self.statements) + 1}"
