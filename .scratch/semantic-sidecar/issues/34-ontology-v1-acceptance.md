@@ -27,13 +27,25 @@ is checked, the evidence is written beside it, and the owner sees the page and d
 the hand-checked list; one is met as far as it can be here and waits for the owner's run
 against the real catalog.
 
-**Tests at this point:** estate 114, matcher 155, host page 202 unit and route tests, host
+**Tests at this point:** estate 114, matcher 155, host page 209 unit and route tests, host
 exporter 4, and the browser walk of the page in English and German with accessibility checks
 on every screen.
+
+**After the owner's first look (2026-11-11):** "the graph visualization is missing in the
+screen. Other than that they look fine." The page had a map of the concepts and a tree of the
+hierarchies and no graph of the entities. Added the same evening: the entity view draws the
+graph around one entity (what points at it, what it points at, by kind of link), and choosing
+a box walks on from there. The owner also said the demonstration setup may start.
+
+**The owner's run** is `estate/HANDOFF.md`, seven blocks to paste in order. Blocks 2 and 4 were
+run from nothing on the machine that built this and gave the kept export and Turtle file byte
+for byte; the matcher's environment is pinned in `spike/requirements-link.txt` and was checked
+in a clean install.
 
 **For the owner to look at** (the build of the vehicle estate that the page shows):
 
 - the class tree with the live model's definitions in both languages;
+- the entities: the graph around a dealer, and a walk from it to a part or a linked account;
 - the hierarchies with the value that breaks manufacturer → make named, and "Subject" listed
   as no level;
 - "Possibly the same": the summary of whose labels the line rests on, the pairs to label, and

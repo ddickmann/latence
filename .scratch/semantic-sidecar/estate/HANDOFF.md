@@ -1,139 +1,207 @@
 # Running the Ontology page on another machine
 
-State on 2026-11-11, after cut A and most of cut B (entities, review items, and a seeded second source linked to the dealers). Two repositories, one branch name in both:
-`claude/blissful-maxwell-bpln7a`. The engine side is in this repository (draft pull request 6);
-the page is in the host's repository (draft pull request 5).
+State on 2026-11-11, after tickets 26 to 33 (the ontology stream of the map). Two repositories,
+one branch name in both: `claude/blissful-maxwell-bpln7a`. The engine side is in this
+repository (draft pull request 6); the page is in the host's repository (draft pull request 5).
+
+## The owner's run, in order
+
+Every block can be pasted as it is after the two paths in block 1 are set. Blocks 1 to 5 need
+no credentials and make no model call. Needed on the machine: `git`, `python3.12`, `uv`
+0.12.21 or newer, Node 24.11.0.
+
+**1. Both checkouts on the branch**
+
+```bash
+export LATENCE=$HOME/latence        # change to where the two checkouts are
+export METIS=$HOME/metis
+cd $LATENCE && git fetch origin && git checkout claude/blissful-maxwell-bpln7a && git pull --ff-only
+cd $METIS   && git fetch origin && git checkout claude/blissful-maxwell-bpln7a && git pull --ff-only
+```
+
+**2. The inputs, written with the host's own tools**
+
+```bash
+cd $METIS && uv sync
+uv run metis-synth estates load --data tools/synth/estates/nhtsa --duckdb /tmp/vehicles.duckdb
+uv run metis-synth estates internal --duckdb /tmp/vehicles.duckdb
+uv run metis-dev metric-views --estate vehicles plan --catalog demo > /tmp/metric_views.txt
+uv run metis-dev usage export \
+    --golden blueprints/talk-to-data/suites/estate/golden-en.jsonl \
+    --golden blueprints/talk-to-data/suites/estate/golden-de.jsonl \
+    --library libraries/estate-semantics/library.yaml --out /tmp/usage.jsonl
+```
+
+**3. The two environments and their tests**
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
+python3.12 -m venv ../spike/.venv && ../spike/.venv/bin/pip install -q -r ../spike/requirements-link.txt
+PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 114 pass
+```
+
+**4. The seeded second source, the build, the export**
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+.venv/bin/python -m estate seed --config estates/vehicles.yaml --duckdb /tmp/vehicles.duckdb \
+    --out-duckdb /tmp/vehicles_seeded.duckdb --out out/vehicles
+PYTHONHASHSEED=0 .venv/bin/python -m estate build --config estates/vehicles.yaml \
+    --duckdb /tmp/vehicles_seeded.duckdb --metric-views /tmp/metric_views.txt \
+    --verified $METIS/tools/synth/estates/catalog.yaml --resolver ../spike \
+    --class-answer estates/vehicles.classes_answer.gpt-6-luna.json \
+    --usage /tmp/usage.jsonl --out out/vehicles
+.venv/bin/python -m estate export --out out/vehicles --ui-dir $METIS/reference-ui/public/data/ontology
+```
+
+The build takes about a minute, most of it the record linker. Expected on the vehicle estate:
+39 concepts, 87 relations, 38 measures; 2,514 entities; 938 of 1,274 accounts linked.
+
+**5. The page**
+
+```bash
+cd $METIS/reference-ui && npm ci && npm run build
+cd $METIS && uv run metis-dev ui up --static reference-ui/dist --world dashboards --estate vehicles
+```
+
+Then open `/ontology` (the entry is right under Dashboards). The last command is the usual
+way to start the Dashboards world; add `--databricks` as usual. The page needs no backend: it
+reads the exported file. The export has to be written **before** `npm run build`, because the
+build copies it.
+
+**6. The hand-checked list** (ticket 29; until this is done no score counts)
+
+Open `estates/vehicles.gold.yaml`, correct what is wrong, decide the three entries under
+`unsure` or leave them there, and put a name and a date under `checked_by`. Then:
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+.venv/bin/python -m estate score --out out/vehicles --gold estates/vehicles.gold.yaml
+git add estates/vehicles.gold.yaml && git commit -m "estate: the hand-checked list for the vehicle estate, corrected"
+git pull --rebase origin claude/blissful-maxwell-bpln7a && git push origin claude/blissful-maxwell-bpln7a
+```
+
+**7. One build against the real catalog** (ticket 33; the reader has only met a stand-in)
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+export DATABRICKS_HOST=https://<workspace>        # in the shell, never in a file
+export DATABRICKS_WAREHOUSE_ID=<id>
+export DATABRICKS_TOKEN=<token>                    # or DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET
+.venv/bin/python -m estate build --config estates/vehicles.yaml --catalog <catalog> \
+    --verified $METIS/tools/synth/estates/catalog.yaml \
+    --class-answer estates/vehicles.classes_answer.gpt-6-luna.json --out out/vehicles-uc
+.venv/bin/python -m estate compare --a out/vehicles --b out/vehicles-uc
+```
+
+Report back the output of `compare`, or the first error with the statement id it names. The
+seeded second source is not in the catalog unless `out/vehicles/seeded_accounts.sql` was
+loaded, so the catalog's build links no records; that difference is expected.
 
 ## What was verified, and where
 
 | Step | On the machine that built it (Linux, no container, no Databricks) | Still to do on the owner's machine |
 |---|---|---|
-| Estate mirror as DuckDB from the host's committed fixture | done | same commands |
-| Metric views printed offline | done, 13 views | same command |
-| `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures; 1,240 entities, 6,417 edges, 7 review items | rerun |
-| Engine tests (`estate/tests`, 51) | pass | rerun |
-| Seeded second source and its link to the dealers | done on the mirror: 938 of 1,274 accounts linked, 916 right, 304 pairs for review, 1,300 labels from the seed | rerun; needs the resolution engine's environment (`../spike/.venv`) |
-| The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
-| Host UI: type check, 190 unit tests, build | pass on Node 24.11.0 | rerun |
-| Host UI: browser tests of the page with accessibility checks, English and German | pass against the host's e2e world | rerun |
-| Host checks `layout`, `register`, `secrets`, `domain-terms` | pass | rerun |
+| Estate mirror, metric views, usage log from the host's fixtures | done | blocks 2 |
+| Engine tests (`estate/tests`, 114) and matcher tests (`spike`, 155) | pass | block 3 (the engine's) |
+| The matcher in a clean environment from `spike/requirements-link.txt` | the same resolution file byte for byte | block 3 |
+| `estate build` on the mirror with the seeded source, the kept model answer and the usage log | done, twice, byte-identical | block 4 |
+| One live call of the class voice on the small hosted model | done once (ticket 31), USD 0.0035 | not needed; the answer is kept as a file |
+| Decisions of every kind applied by the next build; reviewer labels changing the link | done (tickets 28, 30) | by hand on the page, if wanted |
+| Host UI: type check, 209 unit and route tests, build | pass on Node 24.11.0 | rerun |
+| Host UI: browser walk of the page with accessibility checks, English and German | pass against the host's e2e world | rerun |
+| Host checks `layout`, `secrets`, `domain-terms` | pass | rerun |
 | Host checks `names`, `client-terms`, `assistant` | **not run: they need the guard key** | run |
 | The host's landing tier and full gate | **not run** | run |
 | The page next to TalkToData and TalkToDashboards on the Databricks world | **not run** | run |
-| Reading the estate from Unity Catalog | **not possible yet: that reader is not written** | waits for the next cut |
-
-## Commands, in order
-
-Paths: `$LATENCE` and `$METIS` are the two checkouts. The host needs `uv` 0.12.21 or newer
-and Node 24.11.0.
-
-```bash
-# 1. the estate mirror, with the host's own tools
-cd $METIS
-uv run metis-synth estates load --data tools/synth/estates/nhtsa --duckdb /tmp/vehicles.duckdb
-uv run metis-synth estates internal --duckdb /tmp/vehicles.duckdb
-uv run metis-dev metric-views --estate vehicles plan --catalog demo > /tmp/metric_views.txt
-
-# 2. the ontology
-cd $LATENCE/.scratch/semantic-sidecar/estate
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
-PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests
-.venv/bin/python -m estate build --config estates/vehicles.yaml --duckdb /tmp/vehicles.duckdb \
-    --metric-views /tmp/metric_views.txt --verified $METIS/tools/synth/estates/catalog.yaml --out out/vehicles
-.venv/bin/python -m estate export --out out/vehicles --ui-dir $METIS/reference-ui/public/data/ontology
-
-# 3. the host's UI with the page
-cd $METIS/reference-ui && npm ci && npm run build
-cd $METIS && uv run metis-dev ui up --static reference-ui/dist --world dashboards --estate vehicles
-# then open /ontology (the entry is right under Dashboards)
-```
-
-Step 3's last command is the owner's usual way to start the Dashboards world; add
-`--databricks` as usual. The page itself needs no backend: it reads the exported file. The
-file has to be exported **before** `npm run build`, because the build copies it.
+| Reading the estate from Unity Catalog | **against a stand-in server only** | block 7 |
+| The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
+| The score against a list a person checked | **draft list only; its numbers do not count** | block 6 |
 
 ## Decisions made on the page
 
-Approve or reject on the page, press *Download decisions*, and put the file at
-`out/vehicles/decisions.jsonl` (append to it if it exists). Rerun step 2. Approved elements
-show as approved, rejected ones are gone from the page and stay in `assertions.jsonl`.
+Approve or reject on the page (concepts, relations, hierarchy steps, part-of, classes and
+placements, pairs of names), press *Download decisions*, and put the file at
+`out/vehicles/decisions.jsonl` (append to it if it exists). Rerun block 4.
 
-## The seeded second source
+- An approved element shows as approved; a rejected one is gone from the page and the Turtle
+  file and stays in `assertions.jsonl`.
+- A rejected hierarchy step is taken out before the steps are reduced, so a step it hid
+  returns. A rejected placement falls to the other voice's class, or to none.
+- Each decision carries what the element stated when it was made. If the next build states
+  something else under the same id, the decision is not applied and is listed as stale.
 
-After step 1 (the mirror) and before the build:
+## The seeded second source and the labels
 
-```bash
-cd $LATENCE/.scratch/semantic-sidecar/estate
-.venv/bin/python -m estate seed --config estates/vehicles.yaml --duckdb <mirror.duckdb> \
-    --out-duckdb <mirror_with_seed.duckdb> --out out/vehicles
-# then build on the copy, with the resolution engine
-.venv/bin/python -m estate build --config estates/vehicles.yaml --duckdb <mirror_with_seed.duckdb> \
-    --metric-views <views.txt> --verified $METIS/tools/synth/estates/catalog.yaml \
-    --out out/vehicles --resolver ../spike
-```
-
-- The resolution engine runs in its own environment: `../spike/.venv` with
-  `../spike/requirements` installed (Splink, DuckDB, scikit-learn). The build takes about a
-  minute.
-- `out/vehicles/seed_truth.json` says which dealer each account belongs to. It stays outside
-  the catalog and is never exported.
-- `out/vehicles/seeded_accounts.sql` creates the same table in a catalog, with comments that
-  mark it as generated. It has not been run against a catalog.
+- `estate seed` writes the partner's service accounts from the dealers, and
+  `out/vehicles/seed_truth.json`, which says which dealer each account belongs to. That file
+  stays outside the catalog and is never exported.
+- The matcher asks for labels in two rounds: first the pairs it learns from, then two test
+  samples drawn from its own scores. On the page they are under *Possibly the same*, *Pairs to
+  label*; a test pair is shown without the machine's score.
+- A reviewer's label wins. Where the estate file allows it (`link.labels.truth_stands_in`, on unless set to false), the seed's
+  truth fills the rest, and the page says per sample how many labels came from a person and
+  how many were simulated. With open labels and no truth nothing is linked.
 - Without `--resolver`, or on the mirror without the seed, the build is as before and the
   page shows no links.
 
-## Hierarchies and classes
+## Classes, and the hosted model
 
-The build always adds the structure the data proves (roll-ups, part-of, which value sits
-under which) and the class proposals of the pattern voice. For the language-model voice add
-one of:
+The build always adds the structure the data proves and the class proposals of the pattern
+voice. For the language-model voice add one of:
 
 - `--class-answer estates/vehicles.classes_answer.gpt-6-luna.json`: the answer the small
   hosted model gave on 2026-11-11, kept as a file. Sends nothing anywhere and gives the same
-  class tree every time. (`estates/vehicles.classes_answer.json` is an earlier answer from a
-  model session without an API; the numbers in ticket 25 were built with it.)
+  class tree every time. This is what block 4 uses.
 - `--hosted-model [--max-usd 0.05]`: one call to the model the estate file names
   (`classes.model`), on the provider's official SDK (`pip install openai==3.49.0` in the
   estate's environment, `OPENAI_API_KEY` set in the shell). The estate file must allow it
   (`classes.hosted_model: true`) and state the prices. The call is made only when what would
   be sent has changed; the answer is kept in `<out>/class_answers/`, each call is logged in
   `<out>/model_calls.jsonl` with its cost, and a call whose worst case is above `--max-usd`
-  is not made. Read `<out>/classes_prompt.json` first: it is exactly what is sent. Run once
-  on 2026-11-11 on this estate (ticket 31).
+  is not made. Read `<out>/classes_prompt.json` first: it is exactly what is sent. The model
+  sees names, types and comments, never a row or a value.
 
 ## Reading Unity Catalog instead of the mirror
 
 `--catalog <name>` in place of `--duckdb` reads the estate from Unity Catalog and runs the
 counting statements on a SQL warehouse (`estate/reader_databricks.py`). Host, warehouse and
-credentials come from the environment; the commands and what to report back are in ticket 33.
-**Proven against a stand-in server only; not yet run against a workspace.** `estate compare`
-lists what a build from the catalog and one from the mirror hold differently.
+credentials come from the environment (block 7). **Proven against a stand-in server only; not
+yet run against a workspace.** The stand-in proves the protocol (pages, pending statements,
+results in parts, a refused token, a failed statement); it does not prove the warehouse's SQL.
+Lineage, row filters and column masks are not read.
 
 ## What to say aloud in a demonstration
 
-- The page shows the **ontology** (concepts, relations, measures) and the **entities** read
-  from the data: values, master rows, and facts as counts between them.
+- The page shows the **ontology** (concepts, relations, measures, a class tree, hierarchies)
+  and the **entities** read from the data: values, master rows, and facts as counts between
+  them. The entity view draws the graph around one entity; choosing a box walks on from there.
 - **The second source is seeded.** The service accounts are generated from the dealers; the
   page marks them. They are there to show linking, not as a finding about the estate.
 - **What the machine links, it links under a certified line:** 938 accounts, at least 95%
-  right by the test, 97.7% right against the seed. The labels for that test came from the
-  seed's truth in place of a reviewer; with a real second source a reviewer gives them, and
-  reading them from the screen is not built.
+  right by the test, 916 right against the seed. In this build every label came from the
+  seed's truth in place of a reviewer, and the page says so. A reviewer's labels are read
+  when they exist; this was run once with 64 answers.
 - **On an estate this small the labels are most of the work** (1,300 labels for 1,274
   accounts). The number does not grow with the estate: 5,000 were enough for 1.2 million
   real company records.
-- **Manufacturer names that may be the same** are still only listed for a person.
-- **The class tree and the hierarchies are proposals.** Roll-ups are checked on the data and
-  say what breaks them; what kind of thing a concept is was proposed by column patterns and
-  by a language model that saw names only. Nothing of it is approved, and decisions on these
-  two are downloaded but not yet read back by the engine.
+- **The class tree and the hierarchies are proposals** until a person approves them. Roll-ups
+  are checked on the data and name the values that break them; what kind of thing a concept
+  is was proposed by column patterns and by a language model that saw names only. A model's
+  definition is marked as a model's until the placement is approved.
+- **How right the proposals are is not measured yet.** The list they are scored against is a
+  draft nobody has checked.
 - **Only 95 of 211 dealers carry a dealer group;** the page says so. The other 116 are in no
   tree.
-- **The Turtle file** (OWL and SKOS) holds classes, properties and value hierarchies, with
-  proposals marked. Master rows, record links and measures are not in it.
-- **Known blemishes on the page:** the label "Investigation cas"; recall campaigns labelled
-  by their key; review reasons in English on the German page.
-- The ontology is built from the **local mirror**, not read live from Unity Catalog.
+- **What people ask** is shown as a signal: 408 golden questions, 358 answered. They are
+  synthetic and written from the same metric views the model is induced from, so the counts
+  say what the host's test suite covers, not what people want. Use changes no status.
+- **The Turtle file** (OWL 2 QL and SKOS) holds classes, properties and value hierarchies;
+  what nobody approved is written as a marked proposal, not as a plain statement. Master
+  rows, record links and measures are not in it.
+- The ontology is built from the **local mirror**, not read live from Unity Catalog, until
+  block 7 has run.
 - **Stated** means a metric view or a verified join says so. **Proposed** means mined from the
   data and not yet reviewed by anyone. Nothing is approved automatically.
 - Which tables are derived, and which columns are load columns, was **told** to the engine for
@@ -146,6 +214,6 @@ lists what a build from the catalog and one from the mirror hold differently.
 
 ## Credentials
 
-None are needed for cut A. The Unity Catalog reader of the next cut will read its host,
-warehouse id, catalog and client credentials from environment variables set in the shell.
-Never put them in a file or a chat.
+Blocks 1 to 6 need none. Block 7 reads the workspace's host, the warehouse id and a token (or
+a service principal's id and secret) from the shell's environment. `--hosted-model` reads
+`OPENAI_API_KEY` from the shell. None of them belongs in a file.
