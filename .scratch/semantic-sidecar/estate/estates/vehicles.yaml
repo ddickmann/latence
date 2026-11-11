@@ -48,3 +48,8 @@ link:
   records:
     - {object: internal.dealers, id: dealer_id, name: name, city: city, country: market, country_map: {UK: GB}, source: dealer master}
     - {object: partner.service_accounts, id: account_id, name: account_name, city: city, country: country, source: partner portal (seeded)}
+# What kind of thing each concept is (estate/classes.py). A hosted language model may be shown
+# the names, types and comments of this estate's objects and columns, never a row or a value.
+# This estate is synthetic and public, so it is allowed; for a client's estate it is a decision.
+classes:
+  hosted_model: true

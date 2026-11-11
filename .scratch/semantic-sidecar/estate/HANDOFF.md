@@ -11,7 +11,7 @@ the page is in the host's repository (draft pull request 5).
 | Estate mirror as DuckDB from the host's committed fixture | done | same commands |
 | Metric views printed offline | done, 13 views | same command |
 | `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures; 1,240 entities, 6,417 edges, 7 review items | rerun |
-| Engine tests (`estate/tests`, 34) | pass | rerun |
+| Engine tests (`estate/tests`, 46) | pass | rerun |
 | Seeded second source and its link to the dealers | done on the mirror: 938 of 1,274 accounts linked, 916 right, 304 pairs for review, 1,300 labels from the seed | rerun; needs the resolution engine's environment (`../spike/.venv`) |
 | The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
 | Host UI: type check, 146 unit tests, build | pass on Node 24.11.0 | rerun |
@@ -81,6 +81,20 @@ cd $LATENCE/.scratch/semantic-sidecar/estate
   mark it as generated. It has not been run against a catalog.
 - Without `--resolver`, or on the mirror without the seed, the build is as before and the
   page shows no links.
+
+## Hierarchies and classes
+
+The build always adds the structure the data proves (roll-ups, part-of, which value sits
+under which) and the class proposals of the pattern voice. For the language-model voice add
+one of:
+
+- `--class-answer estates/vehicles.classes_answer.json`: the recorded answer of a model
+  session to `out/vehicles/classes_prompt.json`. Sends nothing anywhere. This is what the
+  numbers in ticket 25 were built with.
+- `--hosted-model`: a direct call (model `claude-opus-5-5`), with `ANTHROPIC_API_KEY` set in
+  the shell and `pip install anthropic` in the estate's environment. **Never run against the
+  service so far**; the estate file must allow it (`classes.hosted_model: true`). Read
+  `classes_prompt.json` first: it is exactly what would be sent.
 
 ## What to say aloud in a demonstration
 

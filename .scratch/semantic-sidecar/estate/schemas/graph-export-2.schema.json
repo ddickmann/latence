@@ -327,6 +327,97 @@
           }
         }
       }
+    },
+    "classes": {
+      "type": "object",
+      "required": [
+        "top",
+        "classes",
+        "subclass_of",
+        "voices",
+        "unplaced"
+      ],
+      "properties": {
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              }
+            }
+          }
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              }
+            }
+          }
+        },
+        "subclass_of": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "concept",
+              "parent",
+              "status",
+              "contested",
+              "signals"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed"
+                ]
+              },
+              "contested": {
+                "type": "boolean"
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/signal"
+                }
+              }
+            }
+          }
+        },
+        "voices": {
+          "type": "object",
+          "required": [
+            "attribute_pattern",
+            "language_model"
+          ]
+        },
+        "unplaced": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     }
   },
   "$defs": {

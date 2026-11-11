@@ -18,6 +18,7 @@ from pathlib import Path
 
 import yaml
 
+from .classes import TOP, HostedClassModel, RecordedClassModel, describe, prompt_of, propose_classes
 from .export import build_export
 from .induce import induce
 from .instances import build_instances
@@ -43,7 +44,7 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 
 
 def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | None, out: Path,
-          resolver: Path | None = None) -> dict[str, object]:
+          resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None) -> dict[str, object]:
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
     reader = DuckDBReader(
         duckdb_path, schemas=cfg["schemas"], sensitive=cfg.get("sensitive", []),
@@ -67,6 +68,12 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown,
                                 also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None)
     structure = build_structure(reader, layer, tuple(cfg.get("personal_objects", ())))
+    if hosted_model and not cfg.get("classes", {}).get("hosted_model"):
+        raise SystemExit("this estate does not allow its names to be sent to a hosted model (classes.hosted_model in the estate file)")
+    personal = tuple(cfg.get("personal_objects", ()))
+    (out / "classes_prompt.json").write_text(json.dumps(prompt_of(describe(layer, structure, personal), TOP), indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    voice = HostedClassModel() if hosted_model else RecordedClassModel(json.loads(class_answer.read_text(encoding="utf-8"))) if class_answer else None
+    classes = propose_classes(layer, structure, personal, voice)
     up = broader_edges(reader, structure, {n["id"] for n in instances["nodes"]})
     edges = sorted(instances["edges"] + up, key=lambda e: (e["kind"], e["from"], e["to"], str(e.get("via")), str(e.get("relation"))))
     instances = {**instances, "edges": edges, "review": explain_review(instances["review"], edges, instances["nodes"], layer["concepts"]),
@@ -83,11 +90,13 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
         instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]))
         resolution_note = "linked"
-    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure)
+    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes)
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
             "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"],
             "structure": {k: len(v) for k, v in export["structure"].items()},
+            "classes": {"voices": classes["voices"], "placed": len(classes["subclass_of"]), "contested": sum(s["contested"] for s in classes["subclass_of"]),
+                        "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"])},
             "resolution": instances["meta"].get("resolution") or resolution_note}
 
 
@@ -128,6 +137,8 @@ def main() -> None:
     b.add_argument("--verified", type=Path)
     b.add_argument("--out", type=Path, required=True)
     b.add_argument("--resolver", type=Path, help="folder of the resolution engine (its link_records.py and environment)")
+    b.add_argument("--hosted-model", action="store_true", help="let a hosted language model propose classes and definitions from names (the estate file must allow it)")
+    b.add_argument("--class-answer", type=Path, help="a recorded answer to classes_prompt.json, in place of a call to a hosted model")
     sd = sub.add_parser("seed")
     sd.add_argument("--config", type=Path, required=True)
     sd.add_argument("--duckdb", type=Path, required=True)
@@ -141,7 +152,7 @@ def main() -> None:
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
     elif a.cmd == "build":
-        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver), indent=1))
+        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:

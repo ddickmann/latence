@@ -141,12 +141,26 @@ The owner's objection: linking records is entity disambiguation; the model above
    - **On the real mirror:** 10 roll-up steps (market ← dealer group ← dealer; make ← model;
      make ← manufacturer ← recall campaign; system ← component; part → make and system), one
      equivalence (market and distance unit), 3 part-of, 3 describes, 390 `broader` edges.
-2. **A class tree above the tables** (not built). A language model proposes parent classes and
-   definitions from names, comments and attribute patterns; the data checks what can be
-   checked; a person approves. **Decided (owner, 2026-11-11): no external vocabulary at
-   first; a small set of our own top classes** (Organisation, Person, Product, Event, Place,
-   Document). A hosted model may see the names of this synthetic estate; for a client's
-   estate that is an egress decision per deployment.
+2. **A class tree above the tables** (`estate/classes.py`, built 2026-11-11). **Decided (owner,
+   2026-11-11): no external vocabulary at first; a small set of our own top classes**
+   (Organisation, Person, Product, Event, Place, Document). Two voices propose, a person
+   decides; nothing is accepted by the machine:
+   - **attribute patterns**, always on: the columns a concept carries and how others use it;
+   - **a language model**, shown names, types, comments, keys and relations, never a row or a
+     value. It may put classes of its own between a concept and a top class and writes one
+     sentence of definition per concept. The estate file has to allow it
+     (`classes.hosted_model`); the build writes everything that would leave to
+     `classes_prompt.json`.
+   - Where the voices disagree, both are kept and the proposal is marked contested.
+   - **On the real mirror:** 28 of 39 concepts placed under 12 classes, six of them the
+     model's own (vehicle and vehicle component under product; campaign, defect investigation
+     and warranty claim under event; manufacturer communication under document); 6 contested;
+     11 left unplaced on purpose (aggregates, a unit of measure, a rule table).
+   - **How the model spoke here:** not through the API. The environment this was built in
+     accepts no key for that host, so the prompt file was answered by a separate model
+     session and the answer is kept as `estates/vehicles.classes_answer.json`
+     (`--class-answer`). The direct call (`--hosted-model`) is written and tested against a
+     stand-in client only; it has never reached the service.
 3. **The entity level hangs off that tree** (resolved dealers, parts and manufacturers as
    instances of classes, with the hierarchy edges between them).
 4. **Export in the standard forms** (OWL 2 QL, SKOS, SHACL). Not built.
@@ -158,5 +172,9 @@ The owner's objection: linking records is entity disambiguation; the model above
   person should reject it.
 - One part-of reads oddly: campaign completion is called a part of the dealer, because the
   campaign's own key has two columns and is not matched.
-- The host page does not show hierarchies as trees yet.
+- The pattern voice alone is crude: it calls a complaint an organisation and a bulletin an
+  event. It is one voice and the check on the other, not a classifier.
+- Decisions on hierarchy steps and classes are downloaded from the page but are not yet read
+  back by the ledger; only concepts, relations and measures are.
+- The top classes are fixed in code. An estate cannot add one yet.
 

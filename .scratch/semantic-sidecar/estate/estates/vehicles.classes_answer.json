@@ -1,0 +1,271 @@
+{
+ "answered_by": "a language-model session on 2026-11-11, given classes_prompt.json and nothing else",
+ "classes": [
+  {
+   "name": "vehicle",
+   "parent": "product",
+   "definition": "A vehicle in the field or a kind of vehicles: a brand, a model, or a model in a model year."
+  },
+  {
+   "name": "vehicle component",
+   "parent": "product",
+   "definition": "A part fitted to a vehicle or a named grouping of such parts."
+  },
+  {
+   "name": "campaign",
+   "parent": "event",
+   "definition": "A recall or service action started on a date for a set of affected vehicles."
+  },
+  {
+   "name": "defect investigation",
+   "parent": "event",
+   "definition": "An NHTSA investigation into a suspected defect, opened and closed on dates."
+  },
+  {
+   "name": "warranty claim",
+   "parent": "event",
+   "definition": "A settled claim a dealer made for a repair, or a line of such a claim."
+  },
+  {
+   "name": "manufacturer communication",
+   "parent": "document",
+   "definition": "A communication a manufacturer issued about its vehicles, such as a technical service bulletin, or a row that breaks one down."
+  }
+ ],
+ "concepts": [
+  {
+   "id": "concept:clean.bulletin_components",
+   "parent": "manufacturer communication",
+   "definition": "One row per bulletin, vehicle and NHTSA component the bulletin is filed under.",
+   "reason": "Carries only nhtsa_id and bulletin and refers to Component (NHTSA), Component system (NHTSA), Make and Vehicle, so it is a breakdown of a bulletin; it has no comment, so the reading rests on the names."
+  },
+  {
+   "id": "concept:clean.bulletins",
+   "parent": "manufacturer communication",
+   "definition": "One row per manufacturer communication (technical service bulletin) and vehicle it applies to.",
+   "reason": "The table comment says manufacturer communication (technical service bulletin); columns issued, summary and replaces describe a filed text."
+  },
+  {
+   "id": "concept:clean.complaints",
+   "parent": "event",
+   "definition": "One complaint an owner reported to NHTSA about a failure of a vehicle in the US.",
+   "reason": "Columns failure_date, received_date, crash, fire and injured describe something that happened at a time and involved a vehicle; the narrative column means it could also be read as a document."
+  },
+  {
+   "id": "concept:clean.investigation_cases",
+   "parent": "defect investigation",
+   "definition": "One NHTSA investigation case, identified by its action number, with when it was opened and closed.",
+   "reason": "Key action_number with columns action_kind, opened and closed; Investigation refers to it."
+  },
+  {
+   "id": "concept:clean.investigations",
+   "parent": "defect investigation",
+   "definition": "One row per NHTSA defect investigation and affected make, model and model year.",
+   "reason": "The table comment says NHTSA defect investigation; columns opened and closed; refers to Investigation cas and Vehicle."
+  },
+  {
+   "id": "concept:clean.mfr_communications",
+   "parent": "manufacturer communication",
+   "definition": "One manufacturer communication document for a model in a model year, with its summary.",
+   "reason": "Key is document and model_year, the only column is summary, and the object name says manufacturer communications."
+  },
+  {
+   "id": "concept:clean.recall_campaigns",
+   "parent": "campaign",
+   "definition": "One NHTSA recall campaign, with its defect, consequence, remedy and the number of products potentially affected.",
+   "reason": "The table comment says one row per NHTSA recall campaign; columns report_received and owners_notified date it; a recall is given as an example of an event."
+  },
+  {
+   "id": "concept:clean.recall_reports",
+   "parent": "document",
+   "definition": "One completion report submitted for a recall campaign for a period, with the counts involved, remedied, unreachable and removed.",
+   "reason": "Key is campaign and period, with columns report and submitted; it is part of Recall campaign, and a report is given as an example of a document."
+  },
+  {
+   "id": "concept:clean.recalls",
+   "parent": "campaign",
+   "definition": "One row per NHTSA recall campaign and affected make, model and model year.",
+   "reason": "The table comment says so; it refers to Recall campaign and Vehicle and carries the same dated columns (report_received, owners_notified)."
+  },
+  {
+   "id": "concept:clean.vehicles",
+   "parent": "vehicle",
+   "definition": "One vehicle model in one model year, with counts of the complaint, recall, investigation and bulletin rows that name it.",
+   "reason": "Key is model and model_year; it refers to Make and Model, and complaints, recalls, investigations and bulletins refer to it."
+  },
+  {
+   "id": "concept:internal.campaign_completion",
+   "parent": "none",
+   "definition": "The state of completion of one campaign at one dealer as of a date: vehicles affected, completed and settled, and the rate.",
+   "reason": "An aggregate per campaign and dealer: every column is a count, a rate or the as_of date (vehicles_affected, completion_rate), so it is not itself an event or a thing."
+  },
+  {
+   "id": "concept:internal.campaigns",
+   "parent": "campaign",
+   "definition": "One of the company's own recall or service campaigns for one model, with the production range covered and the start date.",
+   "reason": "The table comment says recall and service campaigns per model; issued_date is the campaign start; it refers to Recall campaign."
+  },
+  {
+   "id": "concept:internal.claim_lines",
+   "parent": "warranty claim",
+   "definition": "One line of a settled claim: a labour operation with its time units, or a part with its quantity and value.",
+   "reason": "The table comment says lines of the settled claims; key is claim_ref and line_no; it is part of Claim."
+  },
+  {
+   "id": "concept:internal.claims",
+   "parent": "warranty claim",
+   "definition": "One settled warranty claim from a dealer for a repair on a vehicle, with the amounts claimed and paid and the outcome.",
+   "reason": "The table comment says settled warranty claims; columns repair_date, submitted_date and decided_date date it; a claim is given as an example of an event."
+  },
+  {
+   "id": "concept:internal.dealers",
+   "parent": "organisation",
+   "definition": "One franchised dealer, with its company name, city, region and labour rate.",
+   "reason": "The table comment says franchised dealers and the name column is commented as company name; it rolls up to Dealer group."
+  },
+  {
+   "id": "concept:internal.labour_times",
+   "parent": "none",
+   "definition": "The standard labour time for one operation on one model, in time units of six minutes and in hours.",
+   "reason": "A table of standard times per model and operation_code (time_units, standard_hours): a norm used to check claims, not a thing, an event or a filed text."
+  },
+  {
+   "id": "concept:internal.owners",
+   "parent": "person",
+   "definition": "One keeper of a vehicle, with name and address.",
+   "reason": "The table comment says vehicle keepers; the concept is marked as about persons and name, street, postcode and city are all personal columns."
+  },
+  {
+   "id": "concept:internal.parts",
+   "parent": "vehicle component",
+   "definition": "One part in the parts catalogue, with its names, component group, revision and list prices.",
+   "reason": "The table comment says parts catalogue with list prices; key part_id; it rolls up to Component system (NHTSA)."
+  },
+  {
+   "id": "concept:internal.vehicles",
+   "parent": "vehicle",
+   "definition": "One vehicle in the field, identified by its VIN, with model year, production month and first registration.",
+   "reason": "The table comment says vehicles in the field; the vin column is the full VIN; it refers to Model, Make, Owner and Dealer."
+  },
+  {
+   "id": "concept:internal.warranty_contracts",
+   "parent": "document",
+   "definition": "One warranty contract for a vehicle, with the length and distance limit of the manufacturer warranty and of any extended warranty.",
+   "reason": "The table comment says warranty contracts per vehicle; key contract_id; a contract is a written agreement that is filed, though the catalog shows only its terms."
+  },
+  {
+   "id": "concept:internal.warranty_terms",
+   "parent": "none",
+   "definition": "The limits of one kind of warranty cover for a make in a market: months, distance and the manufacturer's goodwill share.",
+   "reason": "A table of rules per make and market (coverage, months, distance, manufacturer_share) with no key: conditions that apply, not a thing, an event or a filed text."
+  },
+  {
+   "id": "concept:marts.bulletins_by_vehicle_system",
+   "parent": "none",
+   "definition": "The number of bulletins for one model, model year and component system.",
+   "reason": "A derived aggregate table: key is model, model_year and system and the only measure is the count bulletins."
+  },
+  {
+   "id": "concept:marts.calendar",
+   "parent": "none",
+   "definition": "One calendar day, with its year, quarter and month and whether it is a holiday or a business day.",
+   "reason": "A derived date table keyed by day with no relations: a classification of time, not something that happened."
+  },
+  {
+   "id": "concept:marts.complaints_by_vehicle_system",
+   "parent": "none",
+   "definition": "The complaints for one model, model year and component system, counted with their crashes, fires, injuries and deaths.",
+   "reason": "A derived aggregate table: key is model, model_year and system and the columns are counts and summaries (complaints, crashes, median_mileage)."
+  },
+  {
+   "id": "concept:marts.investigations_by_system",
+   "parent": "none",
+   "definition": "The number of investigations for one component system and kind of action, with how many are open and how many led to a recall.",
+   "reason": "A derived aggregate table: key is system and action_kind and the columns are counts and first and last dates (investigations, open, with_recall)."
+  },
+  {
+   "id": "concept:marts.recall_completion",
+   "parent": "none",
+   "definition": "One NHTSA recall campaign with the figures of its latest completion report and the completion rate.",
+   "reason": "A derived table that the comment describes as one row per campaign with its latest completion report: a summary of Recall campaign and Recall report, not a new thing."
+  },
+  {
+   "id": "concept:marts.recalls_by_vehicle",
+   "parent": "none",
+   "definition": "The number of recalls for one model and model year, with the first and last recall and the systems concerned.",
+   "reason": "A derived aggregate table: key is model and model_year and the columns are counts and summaries (recalls, do_not_drive_recalls, systems)."
+  },
+  {
+   "id": "concept:marts.vehicle_profile",
+   "parent": "none",
+   "definition": "The numbers of complaints, recalls, investigations and bulletins for one model and model year.",
+   "reason": "A derived aggregate table: key is model and model_year and all measures are counts; the vehicle itself is the concept from clean.vehicles."
+  },
+  {
+   "id": "concept:partner.service_accounts",
+   "parent": "organisation",
+   "definition": "One account of a workshop on a partner portal, with the workshop's name, town, country and the day the account was opened.",
+   "reason": "The account_name comment says it is the name of the workshop; the row is an account, so organisation is the nearest class; the comment also says it is seeded for demonstration and not part of the estate."
+  },
+  {
+   "id": "concept:value:component",
+   "parent": "vehicle component",
+   "definition": "A component as NHTSA labels it in full, the system with its part.",
+   "reason": "The comment says NHTSA's full component label (system:part); it rolls up to Component system (NHTSA)."
+  },
+  {
+   "id": "concept:value:dealer_group",
+   "parent": "organisation",
+   "definition": "A group that dealers belong to within a market.",
+   "reason": "Dealer rolls up to it and it rolls up to Market; there is no comment, so the reading rests on the name and these relations."
+  },
+  {
+   "id": "concept:value:distance_unit",
+   "parent": "none",
+   "definition": "The unit in which a distance or odometer reading is given.",
+   "reason": "A unit of measure, referred to by Claim, Warranty contract and Warranty term, which carry distance columns: a pure classification."
+  },
+  {
+   "id": "concept:value:kind",
+   "parent": "none",
+   "definition": "The kind a campaign is of.",
+   "reason": "A reference value with no comment and no columns that Campaign, Claim line and Recall report refer to: a pure classification."
+  },
+  {
+   "id": "concept:value:make",
+   "parent": "vehicle",
+   "definition": "A vehicle brand as stored on the vehicle's own records.",
+   "reason": "The comment says it is the brand and that the company is manufacturer, so it names a kind of vehicles, not an organisation; Model rolls up to it."
+  },
+  {
+   "id": "concept:value:manufacturer",
+   "parent": "organisation",
+   "definition": "The company named on an NHTSA recall or in an NHTSA investigation, by its legal name.",
+   "reason": "The comment says the company named on a recall or investigation (its legal name)."
+  },
+  {
+   "id": "concept:value:market",
+   "parent": "place",
+   "definition": "A market in which the company's dealers, vehicles, owners and warranty terms are grouped.",
+   "reason": "A market is given as an example of a place; Dealer, Owner, Vehicle and Warranty term refer to it and Dealer group rolls up to it."
+  },
+  {
+   "id": "concept:value:model",
+   "parent": "vehicle",
+   "definition": "A vehicle model by its name, told apart from models of other makes by make and model together.",
+   "reason": "The comment says a vehicle model named within its make; it rolls up to Make and Vehicle refers to it."
+  },
+  {
+   "id": "concept:value:subject",
+   "parent": "none",
+   "definition": "The subject named on an investigation or a recall report.",
+   "reason": "No comment and no columns; the name and the relations (referred to by Investigation, Investigation cas and Recall report, rolls up to Manufacturer) do not show what kind of thing it is, so it is left for the reviewer."
+  },
+  {
+   "id": "concept:value:system",
+   "parent": "vehicle component",
+   "definition": "A component system under which NHTSA files a complaint, recall or investigation.",
+   "reason": "The comment says NHTSA's component system; Component (NHTSA) and Part roll up to it, so it is a grouping of vehicle parts."
+  }
+ ]
+}
