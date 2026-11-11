@@ -441,14 +441,20 @@ def test_chunking_pathological_input_stays_near_linear() -> None:
     unit = "aa "
     budget = ChunkBudget(max_tokens=20, overlap_tokens=8, min_tokens=2)
 
-    def _time(n_chars: int) -> float:
-        text = (unit * (n_chars // len(unit))).strip()
+    def _time(text: str) -> float:
         t0 = time.perf_counter()
         chunk_document(text, budget)
         return time.perf_counter() - t0
 
-    small = _time(40_000)
-    large = _time(80_000)
+    # The fastest of seven runs per size, the two sizes taken in turn. A busy host only ever
+    # adds time, so the minimum is the closest a wall clock gets to the work itself, and
+    # taking turns lets a burst of load fall on both sizes. One run per size failed on a
+    # shared macOS runner at 3.3x (2026-11-11) on a commit that touched no code.
+    texts = [(unit * (n // len(unit))).strip() for n in (40_000, 80_000)]
+    small = large = float("inf")
+    for _ in range(7):
+        small = min(small, _time(texts[0]))
+        large = min(large, _time(texts[1]))
     # Quadratic would give ~4x for a 2x input; linear ~2x. Allow generous slack for a
     # noisy CI host but stay decisively sub-quadratic (< 3x). ``small`` is floored so a
     # near-zero fast run cannot make the ratio explode on measurement jitter.
