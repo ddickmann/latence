@@ -90,7 +90,7 @@ executable by any **Runner**. Every record at every Stage carries immutable
 | | |
 | --- | --- |
 | **Packages** | 30 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
-| **Decisions** | 72 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0073 (0040 was never issued). |
+| **Decisions** | 73 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0074 (0040 was never issued). |
 | **Runners** | Two shipped: the built-in local Runner and `latence-runner-airflow`. |
 | **Outputs** | A corpus and a knowledge graph, as files: Parquet, JSONL, TTL, GraphML. |
 
@@ -228,7 +228,7 @@ and you should not need to hunt for anything else.
   Contracts, protocols, Runner, Storage and errors, autodoc'd from source.
 
 - :material-scale-balance: **[Decision log](adr/index.md)**
-  The 72 architecture decisions behind the framework.
+  The 73 architecture decisions behind the framework.
 
 </div>
 

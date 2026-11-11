@@ -1,0 +1,24 @@
+# The vehicle and warranty estate, as the local DuckDB mirror names it.
+# In Unity Catalog the schemas carry the prefix below (nhtsa_clean, nhtsa_internal, nhtsa_marts).
+name: vehicles
+title: Vehicle and warranty estate
+schema_prefix: nhtsa_
+schemas: [clean, internal, marts]
+# Objects computed from the others. Where the catalog records lineage this is read from it.
+derived_schemas: [marts]
+# Load and lineage columns: they carry no meaning and are never keys or references.
+ignore_columns: [source_line, source_file, layout_version, added_date]
+# Columns the catalog classes as personal. They are never queried, and no instance of an
+# object that has one is exported.
+sensitive:
+  - internal.owners.name
+  - internal.owners.street
+  - internal.owners.postcode
+  - internal.owners.city
+  - internal.dealers.contact_name
+  - internal.dealers.contact_email
+  - internal.dealers.contact_phone
+  - internal.claims.vin
+  - internal.vehicles.vin
+  - internal.warranty_contracts.vin
+  - clean.complaints.vin

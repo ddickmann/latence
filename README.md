@@ -151,7 +151,7 @@ interface such as `Parser`, `EntityExtractor` or `Embedder`, and the core never 
 Providers live in their own installable packages, so nothing pulls torch into your environment
 unless you ask for it. A **Runner** executes a Pipeline. **Storage** is one fsspec seam. Every
 record carries Provenance and Classification, validated at every Stage boundary. The reasoning
-behind each choice is written down: **72 architecture decisions** in [`docs/adr/`](./docs/adr/),
+behind each choice is written down: **73 architecture decisions** in [`docs/adr/`](./docs/adr/),
 and the glossary that fixes the vocabulary in [`CONTEXT.md`](./CONTEXT.md).
 
 ---

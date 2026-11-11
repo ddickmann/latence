@@ -1,0 +1,4 @@
+duckdb==1.5.4
+PyYAML==6.0.3
+jsonschema==4.25.1
+pytest==8.4.2

@@ -256,6 +256,7 @@ nav:
           - "0071 — Warehouse metadata enters the Pipeline as Sources": adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md
           - "0072 — On Databricks the engine runs as jobs and keeps its state in Delta": adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md
           - "0073 — The schema level is induced by voting signals and exported in W3C standards": adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md
+          - "0074 — A host shows the engine's export in a read-only screen of its own": adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md
       - Foundations & scope:
           - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md

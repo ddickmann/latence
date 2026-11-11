@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graph-export/2",
+  "type": "object",
+  "required": ["schema", "meta", "concepts", "relations", "measures", "dropped"],
+  "properties": {
+    "schema": {"const": "graph-export/2"},
+    "meta": {
+      "type": "object",
+      "required": ["source", "title", "schema_origin", "counts", "decisions", "host_verified_joins", "instances"],
+      "properties": {"schema_origin": {"enum": ["induced", "declared"]}}
+    },
+    "concepts": {"type": "array", "items": {"$ref": "#/$defs/concept"}},
+    "relations": {"type": "array", "items": {"$ref": "#/$defs/relation"}},
+    "measures": {"type": "array", "items": {"$ref": "#/$defs/measure"}},
+    "dropped": {"type": "array"}
+  },
+  "$defs": {
+    "signal": {"type": "object", "required": ["kind", "detail", "ref"], "additionalProperties": false,
+               "properties": {"kind": {"type": "string"}, "detail": {"type": "string"}, "ref": {"type": "string"}}},
+    "decision": {"type": "object", "required": ["verdict", "by"], "properties": {"verdict": {"enum": ["approved", "rejected"]}}},
+    "concept": {
+      "type": "object",
+      "required": ["id", "label", "status", "signals", "kind", "definition", "instances"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^concept:"},
+        "status": {"enum": ["declared", "proposed"]},
+        "kind": {"enum": ["entity", "fact", "reference", "derived"]},
+        "instances": {"enum": ["available", "withheld_personal"]},
+        "signals": {"type": "array", "items": {"$ref": "#/$defs/signal"}},
+        "attributes": {"type": "array", "items": {"type": "object", "required": ["column", "label", "type", "sensitive"], "additionalProperties": false,
+                       "properties": {"column": {"type": "string"}, "label": {"type": "string"}, "type": {"type": "string"},
+                                      "definition": {"type": "string"}, "sensitive": {"type": "boolean"}}}},
+        "decision": {"$ref": "#/$defs/decision"}
+      }
+    },
+    "relation": {
+      "type": "object",
+      "required": ["id", "label", "status", "signals", "from", "to", "columns", "cardinality", "support"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^relation:"},
+        "status": {"enum": ["declared", "proposed"]},
+        "signals": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/signal"}},
+        "support": {"type": ["object", "null"]},
+        "decision": {"$ref": "#/$defs/decision"}
+      }
+    },
+    "measure": {
+      "type": "object",
+      "required": ["id", "label", "name", "concept", "view", "expr", "status", "signals"],
+      "properties": {"id": {"type": "string", "pattern": "^measure:"}, "status": {"const": "declared"}}
+    }
+  }
+}
