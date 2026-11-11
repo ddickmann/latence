@@ -91,6 +91,52 @@ ontology layer** from two input modalities:
   - warehouse and Databricks ingestion is new;
   - the whole retrieval part goes.
 
+## Route to ontology v1 and the local demonstration
+
+Charted on 2026-11-11 from the owner's order: **first the ontology capability at v1 quality,
+only then the whole demonstration on the host's local backend** (DuckDB and pgvector), after
+which the owner updates the main machine and switches to Databricks.
+
+**Owner's decisions for this route (2026-11-11):**
+
+- v1 holds the reviewer loop, a quality pass, a live model call, a Unity Catalog reader and
+  usage signals. Document mentions come after v1.
+- A small hosted model, and only where the builder needs one. No local models where this is
+  built. Spend limit USD 25 for all hosted-model calls of this route; usage is tracked and the
+  work stops at the limit.
+- Live checks run through the host project's gate queue on the owner's computer.
+- Defects found in the host are fixed there, its core included, each with a test that failed
+  first and listed for review.
+- Tests guard a behaviour someone relies on. No test is written to raise a count.
+
+**Ontology v1** (the gate is ticket 34; nothing below it starts before the owner has seen it):
+
+| Ticket | What | Mode | Blocked by |
+|---|---|---|---|
+| [26](issues/26-export-contract-codes-and-claims.md) | the export speaks in codes, every proposal carries its claim (`graph-export/3`) | AFK | |
+| [27](issues/27-quality-fixes-on-the-estate.md) | six defects in what the engine proposes on the vehicle estate | AFK | 26 |
+| [28](issues/28-decisions-on-structure-and-classes.md) | a decision on a hierarchy step or a class changes the layer | AFK | 26 |
+| [29](issues/29-hand-checked-list-and-score.md) | classes and hierarchies scored against a list the owner checked | HITL | 27, 28 |
+| [30](issues/30-label-loop.md) | the matcher asks for labels and takes them from a reviewer | AFK | 26, 28 |
+| [31](issues/31-live-class-voice.md) | the model's voice on classes runs live on a small hosted model | HITL | 26 |
+| [32](issues/32-usage-signals.md) | what people ask is a signal on the elements they use | AFK | 26 |
+| [33](issues/33-unity-catalog-reader.md) | a reader for Unity Catalog, proven against a stand-in | HITL | 26 |
+| [34](issues/34-ontology-v1-acceptance.md) | **is the capability at v1 quality?** | HITL | 26–33 |
+
+**The demonstration on the local backend:**
+
+| Ticket | What | Mode | Blocked by |
+|---|---|---|---|
+| [35](issues/35-local-backend-for-the-host.md) | Postgres with pgvector on this machine | AFK | 34 |
+| [36](issues/36-demo-launcher-and-runbook.md) | one command starts it, one page says how to give it | AFK | 35 |
+| [37](issues/37-every-use-case-walked.md) | every use case walked in a browser; defects fixed | AFK | 36 |
+| [38](issues/38-live-checks-through-the-gate-queue.md) | live checks on real models through the owner's runner | HITL | 37 |
+| [39](issues/39-handoff-to-the-main-machine.md) | handoff and the switch to Databricks | HITL | 38 |
+
+**What this route needs from the owner:** the hand-checked list corrected (29); the key through
+the secure form (31); one build against the real catalog (33); the look at v1 (34); the runner
+started (38).
+
 ## Decisions so far
 
 <!-- the index — one line per closed ticket: enough to judge relevance, then zoom the link -->
@@ -106,7 +152,7 @@ ontology layer** from two input modalities:
 - [Prototype: the expert resolution workbench](issues/22-expert-resolution-workbench.md) — the owner settled the interaction model on a clickable prototype: a queue by cluster, evidence per field, one-key decisions on an append-only log, group merge and split that decide the open pairs and can be undone, and the graph as a tab beside the review. It is one component a Carbon host mounts; the mount in Metis waits for the owner's go.
 - [Remove the retrieval tooling](issues/19-remove-retrieval-tooling.md) — done: four packages, the core retrieval modules, contracts and seams, three stacks and the retrieval benchmark lanes are gone (`SCHEMA_VERSION` 22, 30 packages). Kept pipelines give the same nodes and edges. The ten stale pages were rewritten and the secret-scan gate was made independent of the network on 2026-11-10. What the removal missed was closed in [What the retrieval removal left behind](issues/23-retrieval-removal-leftovers.md): the release gates, the purge, the benchmark leftovers (including the two datasets that only fed retrieval), the stale help texts, two run-time defects, `ROADMAP.md`, anatomy chapters 2 and 3, and the doc statements that had not been checked against code. What that pass found is in [Defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): eight of nine items are fixed (removed config keys are refused, two tuner and two campaign defects, dead benchmark scripts, two stale tests, an unsupported speed figure). Open: the compose and Helm commands have never been executed, and whether a spend cap in the benchmark campaign should be a hard stop.
 - [Prototype: resolution feasibility spike](issues/20-resolution-feasibility-spike.md) — **go** (owner, 2026-11-11). Auto-accept precision 0.986 to 0.990 at 10⁵ records, 0.9955 at 10⁶ and 0.96 on text; the machine alone finds 71% to 90% of true matches; 10⁶ records fit the 4-hour budget on one 24 GB GPU. Splink is the backbone, GLiDE 0.4B the decision model, the reranker second; zero-shot Decide is dropped. Labels drawn from the undecided pairs replace uniform labels. Shown on synthetic data and one public person dataset, where the models add nothing; real data follows. Report: [spike/REPORT.md](spike/REPORT.md). **Put right the same day:** on two real company registers the first run found 36.5% of the true links; a scorer fitted on the same number of reviewer labels finds 97% at 99.7% precision and beats every earlier arm on the other estates, on CPUs ([research note](research/24-company-record-linkage-methods.md)).
-- [ADR-0074 — A host shows the engine's export in a read-only screen of its own](../../docs/adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md) and [The Ontology page over the estate](issues/25-estate-demo-slice.md) (open, cut A built) — the host writes the page in its own style and shares only the export's file format with the engine; read-only, off the answer path; a file first, a service route later; reviewer decisions travel back as a file. Cut A induces the schema level of the vehicle and warranty estate from its metric views and data statistics: 38 concepts, 86 relations with their support, 38 measures. The knowledge graph (cut B) and signals from recorded questions (cut C) are open.
+- [ADR-0074 — A host shows the engine's export in a read-only screen of its own](../../docs/adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md) and [The Ontology page over the estate](issues/25-estate-demo-slice.md) (resolved; what is open continues in the route above) — the host writes the page in its own style and shares only the export's file format with the engine; read-only, off the answer path; a file first, a service route later; reviewer decisions travel back as a file. Cut A induces the schema level of the vehicle and warranty estate from its metric views and data statistics: 38 concepts, 86 relations with their support, 38 measures. Cut B added entities, counted fact edges, a seeded second source linked under a certified line, hierarchies the data proves, a class tree proposed by two voices and a Turtle export. Document mentions are open and not in v1.
 - [Inventory the carve-out](issues/07-carve-out-inventory.md) — no kept package imports a dropped one. Retrieval reaches core through about five import sites plus protocols, hyperedge contracts (`SCHEMA_VERSION` 21), 19 test files and 6 stacks. `graph_features` goes with retrieval; the embedders stay as a resolution signal.
 - [The landscape: who builds semantic and ontology layers](issues/06-landscape-and-positioning.md) — every rival traces answers, not semantic elements, and auto-drafting tools lose curation on rebuild. Positioning: a ledger of evidence and decisions that proposes into UC and exports open formats. Three demo claims: element-level trace and replay; curation that survives rebuilds; add-only proposals on UC.
 - [The state of the art in text extraction](issues/02-sota-text-extraction.md) — the glinker linker (73%) and per-chunk LLM induction are the bottlenecks, not extraction. GLiNER-Relex leads zero-shot relation extraction, and the GLiNER bi-encoder removes the label-count ceiling. Fabricated relations are fixed by requiring offset-grounded triples plus an entailment check. Bake-off shortlist: Relex + bi-encoder, then with an LLM checker, then a small-LLM extractor, with GLiNER 2.5 as the control.

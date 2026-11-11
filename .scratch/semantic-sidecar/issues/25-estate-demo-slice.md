@@ -2,7 +2,7 @@
 
 Type: build
 Mode: HITL
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -187,3 +187,19 @@ accounts), the way up from any concept or entity, and the Turtle download.
   back by the ledger; only concepts, relations and measures are.
 - The top classes are fixed in code. An estate cannot add one yet.
 
+## Answer
+
+The slice is built as far as this ticket goes (2026-11-11): cut A, cut B without document
+mentions, and the four steps from a flat model to an ontology. What is open continues as
+tickets of its own, in the map's *Route to ontology v1 and the local demonstration*:
+
+- the export's text as codes and a claim on every proposal: [26](26-export-contract-codes-and-claims.md);
+- the defects listed under *Limits of step 1*: [27](27-quality-fixes-on-the-estate.md);
+- decisions on hierarchy steps and classes read back: [28](28-decisions-on-structure-and-classes.md);
+- how right the proposals are: [29](29-hand-checked-list-and-score.md);
+- labels from the review screen: [30](30-label-loop.md);
+- the model's voice through an API: [31](31-live-class-voice.md);
+- cut C, usage signals: [32](32-usage-signals.md);
+- the reader for Unity Catalog: [33](33-unity-catalog-reader.md).
+
+Document mentions stay open and are not in v1 (owner, 2026-11-11).
