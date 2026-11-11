@@ -2,7 +2,7 @@
 
 Type: prototype
 Mode: HITL
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -96,7 +96,7 @@ Details and result files: [`../spike/NEXT.md`](../spike/NEXT.md).
 
 ## Progress (2026-11-11): the model arms have run; report and recommendation
 
-Status stays `open` until the owner decides. The report is
+The report is
 [`../spike/REPORT.md`](../spike/REPORT.md); it recommends **go**.
 
 - **Machine:** a rented pod with one 24 GB GPU (owner, 2026-11-11; replaces the L40S plan).
@@ -119,3 +119,35 @@ Status stays `open` until the owner decides. The report is
 - **Two defects found and fixed** in the spike code, each with a test that failed first.
 - **Still open for the decision:** a time and cost budget for 10⁶ records; no real estate or
   real text; no entity-linking benchmark (licence checks pending); no Spark run.
+
+## Answer
+
+**Go** (owner, 2026-11-11). The design in
+[design/resolution-at-scale.md](../design/resolution-at-scale.md) is built.
+
+| Bar | Measured | Verdict |
+|---|---|---|
+| Auto-accept precision ≥ 0.95 under Learn-then-Test | 0.986 to 0.990 at 10⁵ records, 0.9955 at 10⁶, 0.959 to 0.965 on text; every Wilson lower bound above 0.95 | met |
+| 10⁶ records within the budget | **Budget: 4 hours on one 24 GB GPU** (owner, 2026-11-11). Measured: 92 s for the matcher alone, 56 min with one neural pass over 609,117 pairs | met |
+| Guard: the machine alone finds ≥ 60% of true matches | 0.757 to 0.900 at 10⁵, 0.710 at 10⁶ | met |
+| Expert capacity | reported, not gated: 36.7 expert minutes per 1,000 records with the matcher alone, 14.4 with both neural scorers | reported |
+
+**What the go rests on, and what it does not.**
+- Every estate and document is synthetic, except one public person dataset. On that dataset
+  the precision bar is met with the matcher alone, and neither neural model moves a pair out
+  of review. The size of the models' gain is shown on synthetic data only.
+- No Spark run exists; the Databricks sandbox is still open.
+- The ticket's "one permissively licensed entity-linking benchmark" and "hand-labelled slice"
+  are answered by the real-data work that follows this decision (public registers, public
+  filings, CC0 targets), recorded in [`../spike/REPORT.md`](../spike/REPORT.md) when it has
+  run. The licence review is in
+  [`../research/23-entity-linking-benchmark-licences.md`](../research/23-entity-linking-benchmark-licences.md).
+
+**Model set after measurement.** Splink stays the backbone. GLiDE 0.4B is the decision model
+(the smallest variant; larger ones only if the review band has to shrink further). The
+reranker is second on records and useful on text. Zero-shot GLiNER2.5-Decide is dropped. The
+embedder has not earned its place. GLiNER-Relex extracts mentions.
+
+**What follows.** *The upgrade of the resolution engine* loses its last blocker. The pass that
+aims the neural scorer below the reject line, a second stage that uses labels without a
+model, the reviewer's alias loop and the label strategy at 10⁶ are its first inputs.

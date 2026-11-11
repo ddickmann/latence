@@ -166,7 +166,8 @@ acronyms have a resolver (`aliases.py`, `run_b.py --aliases`).
 
 Open, in the order they matter for the decision:
 
-1. **The owner's go or no-go** on ticket 20, and a time and cost budget for 10⁶ records.
+1. **Done:** the owner decided go on 2026-11-11, with a budget of 4 hours for 10⁶ records on
+   one 24 GB GPU.
 2. **One permissively licensed English entity-linking benchmark.** Candidates and their
    licence questions are in the report; none is cleared.
 3. **A real estate and real text,** even a small hand-labelled slice. Everything so far is
@@ -184,5 +185,5 @@ Open, in the order they matter for the decision:
 
 **Go bar:**
 - realised auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05), with its confidence stated;
-- 10⁶ records within a time and cost budget the owner sets;
+- 10⁶ records within 4 hours on one 24 GB GPU (owner, 2026-11-11);
 - no expert-capacity bar during development.

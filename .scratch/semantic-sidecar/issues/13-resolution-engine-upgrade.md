@@ -3,7 +3,7 @@
 Type: grilling
 Mode: HITL
 Status: open
-Blocked by: 04, 10, 20, 21
+Blocked by:
 
 ## Question
 
@@ -22,3 +22,19 @@ Decide the resolution engine for both modalities:
 
 Start from the candidate design in [design/resolution-at-scale.md](../design/resolution-at-scale.md) and the
 feasibility spike's numbers.
+
+## Input from the feasibility spike (2026-11-11)
+
+The spike reported go ([its answer](20-resolution-feasibility-spike.md#answer), numbers in
+[`../spike/REPORT.md`](../spike/REPORT.md)). What it hands to this decision:
+
+- **Matcher:** Fellegi-Sunter (Splink on DuckDB) with isotonic calibration and Learn-then-Test
+  bands clears 0.95 precision on every estate measured; the string cascade reached pairwise F1
+  0.540 where the matcher reached 0.913.
+- **Second stage:** GLiDE 0.4B over the undecided pairs cuts the review band by 56% at 10⁵
+  records; the reranker adds a further 14%. Zero-shot Decide adds nothing.
+- **Labels:** uniform labels over candidate pairs do not scale to 10⁶; labels drawn from the
+  undecided pairs do (7,500 labels did what 50,000 uniform ones did).
+- **The reject line loses recall:** about a quarter of the true pairs at 10⁶ are below it.
+- **Scale in memory:** 10⁶ records run in 92 s at 5.2 GB; Spark is unmeasured.
+- **Budget:** 4 hours for 10⁶ records on one 24 GB GPU (owner).

@@ -2,8 +2,8 @@
 
 Status on 2026-11-11. This is the report the go/no-go ticket
 ([`../issues/20-resolution-feasibility-spike.md`](../issues/20-resolution-feasibility-spike.md))
-asks for. All data is synthetic or public. The decision is the owner's; the recommendation is
-at the end of the first section.
+asks for. All data is synthetic or public. **The owner decided go on 2026-11-11**; the
+recommendation the decision followed is at the end of the first section.
 
 ## The bars and where the measurements stand
 
@@ -11,7 +11,7 @@ at the end of the first section.
 |---|---|---|
 | Auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05) | Structured: 0.986 to 0.990 at 10⁵ records in every arm, 0.9955 at 10⁶. Text: 0.959 to 0.965 in every model arm. Wilson lower bounds are all above 0.95. | Yes, on synthetic data and one public dataset |
 | Guard: the machine alone finds ≥ 60% of true matches at that precision (synthetic estate) | 0.757 with the statistical matcher alone, 0.894 with the smallest decision model added (10⁵); 0.710 at 10⁶ | Yes |
-| 10⁶ records within an agreed time and cost budget | 92 s for the statistical matcher (48 CPU threads, 5.2 GB); 56 min when one small model re-scores 609,117 pairs on one 24 GB GPU. No budget has been agreed. | Open: needs the owner's budget |
+| 10⁶ records within an agreed time and cost budget | 92 s for the statistical matcher (48 CPU threads, 5.2 GB); 56 min when one small model re-scores 609,117 pairs on one 24 GB GPU. The owner's budget is 4 hours on one 24 GB GPU (2026-11-11). | Yes |
 | No expert-capacity bar; review effort is reported | 36.7 expert minutes per 1,000 records with the matcher alone, 14.4 with both neural scorers (10⁵, at 20 s per review group) | Reported |
 
 **Recommendation: go.** The design clears the precision bar and the recall guard with room,
