@@ -24,6 +24,7 @@ from .induce import induce
 from .instances import build_instances
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .reader_duckdb import DuckDBReader
+from .score import score
 from .resolution import merge, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
@@ -152,12 +153,19 @@ def main() -> None:
     sd.add_argument("--out-duckdb", type=Path, required=True)
     sd.add_argument("--out", type=Path, required=True)
     sd.add_argument("--seed", type=int, default=11)
+    sc = sub.add_parser("score", help="precision and recall of the proposals against a hand-checked list")
+    sc.add_argument("--out", type=Path, required=True, help="the build folder that holds ontology.json")
+    sc.add_argument("--gold", type=Path, required=True)
     e = sub.add_parser("export")
     e.add_argument("--out", type=Path, required=True)
     e.add_argument("--ui-dir", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
+    elif a.cmd == "score":
+        result = score(json.loads((a.out / "ontology.json").read_text(encoding="utf-8")), yaml.safe_load(a.gold.read_text(encoding="utf-8")))
+        (a.out / "score.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(json.dumps(result, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
         print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer), indent=1))
     else:

@@ -1,0 +1,89 @@
+# The hand-checked list for the vehicle and warranty estate.
+#
+# DRAFT. Written from the catalog and the data, not from what the engine proposed. Until a
+# person has corrected it and put a name under checked_by, the score against it does not count:
+# `python -m estate score` prints the numbers and marks them as not measured.
+#
+# How to correct it: change a class, add or remove a step, move an entry out of `unsure` once
+# you have decided it, or into it if you would not decide it either. Then set checked_by.
+checked_by:            # e.g. "D. D., 2026-11-12"
+
+# What kind of thing a row of each concept is: one of the six top classes, or none.
+# Top classes: organisation, person, product, event, place, document.
+classes:
+  # the regulator's data
+  clean.bulletins: document              # a service bulletin a manufacturer filed
+  clean.bulletin_components: none        # one row per bulletin and component: a link, not a thing
+  clean.mfr_communications: document
+  clean.complaints: event                # a complaint someone filed on a date
+  clean.investigation_cases: event       # an investigation that was opened and closed
+  clean.investigations: event            # an investigation, per vehicle and component it covers
+  clean.recall_campaigns: event          # a recall
+  clean.recalls: event                   # a recall, per vehicle and component it covers
+  clean.recall_reports: document         # a quarterly report on a recall
+  clean.vehicles: product                # a model in a model year
+  # the company's own data
+  internal.dealers: organisation
+  internal.owners: person
+  internal.vehicles: product             # one vehicle
+  internal.parts: product
+  internal.claims: event
+  internal.claim_lines: event            # a line of a claim
+  internal.campaigns: event              # a service campaign
+  internal.campaign_completion: none     # counts per campaign and dealer: a link with numbers
+  internal.labour_times: none            # a tariff: standard minutes per operation and model
+  internal.warranty_contracts: document
+  internal.warranty_terms: none          # conditions per make and market: a rule, not a thing
+  partner.service_accounts: organisation
+  # tables computed from the others
+  marts.bulletins_by_vehicle_system: none
+  marts.calendar: none
+  marts.complaints_by_vehicle_system: none
+  marts.investigations_by_system: none
+  marts.recall_completion: none
+  marts.recalls_by_vehicle: none
+  marts.vehicle_profile: none
+  # value sets
+  value:manufacturer: organisation
+  value:dealer_group: organisation
+  value:market: place
+  value:model: product
+  value:component: product
+  value:system: product
+  value:distance_unit: none
+  value:kind: none
+  value:subject: none                    # the title of a recall or an investigation
+
+# Hierarchy steps that are right: the first sits under the second.
+# Objects the estate marks as personal (owners, vehicles, contracts, claims) are left out: the
+# engine never shows their rows, so it proposes no step for them.
+steps:
+  - [value:model, value:make]
+  - [value:component, value:system]
+  - [value:dealer_group, value:market]
+  - [internal.dealers, value:dealer_group]
+  - [internal.dealers, value:market]                 # every dealer has a market; fewer than half have a group
+  - [internal.parts, value:make]
+  - [internal.parts, value:system]
+  - [clean.recall_campaigns, value:manufacturer]
+  - [clean.investigation_cases, value:manufacturer]
+
+# What is a part of what: the first is a part of the second.
+part_of:
+  - [internal.claim_lines, internal.claims]
+  - [clean.bulletin_components, clean.bulletins]      # the components a bulletin is filed under
+  - [clean.investigations, clean.investigation_cases] # the rows an investigation covers
+
+# What links what: the first is about one of each of the second, and a part of neither.
+links:
+  - [internal.campaign_completion, internal.campaigns]
+  - [internal.campaign_completion, internal.dealers]
+
+# Not decided in the draft. These count on neither side until someone moves them.
+unsure:
+  classes:
+    - value:make                         # a brand: a product line, or the organisation behind it?
+  steps:
+    - [value:manufacturer, value:make]   # in the data each manufacturer name goes with one make (34 of 36); in the world a make belongs to a manufacturer
+  part_of:
+    - [clean.recall_reports, clean.recall_campaigns]   # a report on a recall: a part of it, or a document about it?
