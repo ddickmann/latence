@@ -121,7 +121,7 @@ which the owner updates the main machine and switches to Databricks.
 | [31](issues/31-live-class-voice.md) | the model's voice on classes runs live on a small hosted model | HITL | **done** |
 | [32](issues/32-usage-signals.md) | what people ask is a signal on the elements they use | AFK | **done** |
 | [33](issues/33-unity-catalog-reader.md) | a reader for Unity Catalog, proven against a stand-in | HITL | built; **waits for the owner's run on the real catalog** |
-| [34](issues/34-ontology-v1-acceptance.md) | **is the capability at v1 quality?** | HITL | 26–33 |
+| [34](issues/34-ontology-v1-acceptance.md) | **is the capability at v1 quality?** | HITL | seven of nine checks met; **the owner's decision is open** |
 
 **The demonstration on the local backend:**
 
