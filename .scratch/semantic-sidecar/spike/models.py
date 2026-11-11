@@ -21,7 +21,7 @@ EMBEDDER_ID = os.environ.get("SPIKE_EMBEDDER", "google/embeddinggemma-2")
 RERANKER_ID = os.environ.get("SPIKE_RERANKER", "Qwen/Qwen3-Reranker-0.6B")
 RELEX_ID = os.environ.get("SPIKE_RELEX", "knowledgator/gliner-relex-large-v1.0")
 DECIDE_ID = os.environ.get("SPIKE_DECIDE", "fastino/GLiNER2.5-Decide")
-GLIDE_DIR = os.environ.get("SPIKE_GLIDE_DIR", "models/GLiDE-9B")  # `hf download fastino/GLiDE-9B --local-dir ...`
+GLIDE_DIR = os.environ.get("SPIKE_GLIDE_DIR", "models/GLiDE-0.4B")  # `python pin_models.py --glide 0.4B` fetches it
 
 # Instructions are part of a run's identity: changing one changes the scores.
 SAME_RECORD_INSTRUCTION = (
@@ -32,6 +32,8 @@ LINK_INSTRUCTION = (
     "is the organisation the mention refers to"
 )
 SAME_QUESTION = "Do record A and record B describe the same real-world organisation?"
+SAME_PERSON_INSTRUCTION = "Given two records about people, judge whether they describe the same real-world person"
+SAME_PERSON_QUESTION = "Do record A and record B describe the same real-world person?"
 LINK_QUESTION = "Is the knowledge-base entry the organisation that the marked mention refers to?"
 
 
@@ -144,7 +146,8 @@ class GlideDecide:
     """GLiDE (a `noul` yes/no question) as a decision model. ``score`` returns P(yes).
 
     GLiDE ships its own `glide` package inside the downloaded model directory, with pinned
-    requirements; it needs a GPU with about 19 GB for the 9B variant.
+    requirements. The smallest variant (0.4B) is the default (owner, 2026-11-11: start small,
+    go up only if needed); its model card states under 2 GB of GPU memory.
     """
 
     def __init__(self, question: str, model_dir: str = GLIDE_DIR, batch_size: int = 16) -> None:

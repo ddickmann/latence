@@ -124,14 +124,142 @@ def generate(n_entities: int, seed: int, n_docs: int, nil_frac: float = 0.15) ->
     return {"anchors": anchors, "docs": docs, "mentions": fixed}
 
 
+def _full_surface(rng: random.Random, e: dict[str, object]) -> tuple[str, str]:
+    while True:
+        s, kind = surface(rng, e)
+        if kind != "acronym":
+            return s, kind
+
+
+def generate_threads(
+    n_entities: int,
+    seed: int,
+    n_threads: int,
+    nil_frac: float = 0.15,
+    p_alias: float = 0.15,
+    p_bare: float = 0.12,
+    p_define: float = 0.3,
+    p_short_later: float = 0.35,
+) -> dict[str, object]:
+    """Documents in threads (a mail thread, a supplier folder), with the things that let a
+    reader resolve an acronym in real text. Each acronym mention records which it has:
+
+    - ``scope``:   the organisation is written in full elsewhere in the same thread;
+    - ``defined``: some document of the corpus introduces the acronym, "Name (AC)";
+    - ``alias``:   the master data lists the acronym as a short name of the anchor;
+    - none of them: only the context of the sentence is left.
+
+    The shares are parameters, not findings: how often real text carries each signal has to be
+    measured on real text. A few organisations recur often, most rarely (rank ** -0.8)."""
+    rng = random.Random(seed)
+    ents = _base_entities(rng, n_entities)
+    ents += _hard_negatives(rng, ents, 0.25)
+    rng.shuffle(ents)
+    nil_ids = {str(e["entity_id"]) for e in ents[: int(len(ents) * nil_frac)]}
+
+    def acr(e: dict[str, object]) -> str | None:
+        words = list(e["words"])  # type: ignore[call-overload]
+        return _acronym(words) if len(words) >= 2 and len(_acronym(words)) >= 2 else None
+
+    has_alias = {str(e["entity_id"]) for e in ents if acr(e) and str(e["entity_id"]) not in nil_ids and rng.random() < p_alias}
+    anchors = [
+        {
+            "anchor_id": e["entity_id"],
+            "name": canonical_name(e),
+            "city": e["city"],
+            "industry": IND_WORD.get(str(e["industry"]), ""),
+            "text": f"{canonical_name(e)}, {IND_WORD.get(str(e['industry']), '')} company in {e['city']}",
+            "aliases": [acr(e)] if str(e["entity_id"]) in has_alias else [],
+        }
+        for e in ents
+        if str(e["entity_id"]) not in nil_ids
+    ]
+    by_rank = list(ents)
+    rng.shuffle(by_rank)  # how often an organisation is written about is independent of being in the KB
+    weights = [(r + 1) ** -0.8 for r in range(len(by_rank))]
+    docs: list[dict[str, str]] = []
+    mentions: list[dict[str, object]] = []
+    defined: set[str] = set()
+    n_doc = 0
+    for t in range(n_threads):
+        picks: list[dict[str, object]] = []
+        while len(picks) < rng.choice([2, 2, 3]):
+            e = rng.choices(by_rank, weights)[0]
+            if e not in picks:
+                picks.append(e)
+        bare = {str(e["entity_id"]): bool(acr(e)) and rng.random() < p_bare for e in picks}
+        seen_full: set[str] = set()
+        for _ in range(rng.randint(2, 5)):
+            tpl = rng.choice(TEMPLATES)
+            pair = rng.sample(picks, 2)
+            fill: dict[str, str] = {
+                "date": f"{rng.randint(1, 28)} {rng.choice(MONTHS)}",
+                "month": rng.choice(MONTHS),
+                "n": str(rng.randint(5, 900)),
+                "inv": f"INV-{rng.randint(10000, 99999)}",
+                "dept": rng.choice(DEPTS),
+            }
+            written: dict[int, tuple[str, str, str, dict[str, object]]] = {}  # slot -> (surface, suffix, kind, entity)
+            for i, e in enumerate(pair):
+                eid = str(e["entity_id"])
+                fill[f"m{i}"] = f"\x00{i}\x00"
+                fill[f"city{i}"] = str(e["city"])
+                fill[f"industry{i}"] = IND_WORD.get(str(e["industry"]), "")
+                if f"{{m{i}}}" not in tpl:
+                    continue
+                short = acr(e)
+                if short and bare[eid]:
+                    written[i] = (short, "", "acronym", e)
+                elif short and eid in seen_full and rng.random() < p_short_later:
+                    written[i] = (short, "", "acronym", e)
+                else:
+                    s, kind = _full_surface(rng, e)
+                    suffix = ""
+                    if short and eid not in seen_full and rng.random() < p_define:
+                        suffix = f" ({short})"
+                        defined.add(eid)
+                    written[i] = (s, suffix, kind, e)
+            text = tpl.format(**fill)
+            doc_id = f"d{n_doc}"
+            n_doc += 1
+            for i in sorted(written, key=lambda i: text.index(f"\x00{i}\x00")):
+                s, suffix, kind, e = written[i]
+                eid = str(e["entity_id"])
+                start = text.index(f"\x00{i}\x00")
+                text = text.replace(f"\x00{i}\x00", s + suffix, 1)
+                row: dict[str, object] = {
+                    "mention_id": f"{doc_id}m{i}", "doc_id": doc_id, "start": start, "end": start + len(s),
+                    "surface": s, "variant": kind, "entity_id": eid, "in_kb": eid not in nil_ids,
+                }
+                if kind == "acronym":
+                    row["signals"] = (["scope"] if eid in seen_full else []) + (["alias"] if eid in has_alias else [])
+                mentions.append(row)
+            for i in written:  # full names of this document count for the whole thread
+                if written[i][2] != "acronym":
+                    seen_full.add(str(written[i][3]["entity_id"]))
+            docs.append({"doc_id": doc_id, "thread_id": f"t{t}", "text": text})
+    thread_of = {d["doc_id"]: d["thread_id"] for d in docs}
+    full_in_thread = {(thread_of[str(m["doc_id"])], m["entity_id"]) for m in mentions if m["variant"] != "acronym"}
+    for m in mentions:
+        if m["variant"] == "acronym":
+            sig = [x for x in m["signals"] if x != "scope"]  # type: ignore[union-attr]
+            if (thread_of[str(m["doc_id"])], m["entity_id"]) in full_in_thread:
+                sig.insert(0, "scope")  # the full name may also come later in the thread
+            if m["entity_id"] in defined:
+                sig.append("defined")
+            m["signals"] = sig
+    return {"anchors": anchors, "docs": docs, "mentions": mentions}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--entities", type=int, default=2000)
     ap.add_argument("--docs", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=23)
+    ap.add_argument("--threads", type=int, default=0, help="write documents in this many threads, with acronym signals (see generate_threads)")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
-    data = generate(a.entities, a.seed, a.docs)
+    data = generate_threads(a.entities, a.seed, a.threads) if a.threads else generate(a.entities, a.seed, a.docs)
     a.out.mkdir(parents=True, exist_ok=True)
     for k in ("anchors", "docs", "mentions"):
         with open(a.out / f"{k}.jsonl", "w", encoding="utf-8") as fh:

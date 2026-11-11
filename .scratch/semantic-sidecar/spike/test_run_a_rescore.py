@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from generate import generate
 from run_a import run
@@ -42,3 +43,15 @@ def test_second_stage_only_touches_uncertain_pairs(tmp_path: Path) -> None:
     assert sum(counts.values()) == res["blocking"]["_union"]["pairs"]
     assert s2["labels_used"]["calibration"] + s2["labels_used"]["ltt"] <= s2["uncertain_pairs"]
     assert set(s2["features"]) >= {"splink_logit", "rerank"}
+
+
+@pytest.mark.parametrize("kind,word", [("org", "organisation"), ("person", "person")])
+def test_the_scorers_are_asked_about_the_kind_of_record_at_hand(kind: str, word: str) -> None:
+    # Measured on the pod (2026-11-11): the public person dataset was scored with the
+    # organisation question, and neither scorer certified anything.
+    from run_a import prompts_for
+
+    question, instruction = prompts_for(kind)
+    assert word in question and word in instruction
+    other = "person" if word == "organisation" else "organisation"
+    assert other not in question and other not in instruction

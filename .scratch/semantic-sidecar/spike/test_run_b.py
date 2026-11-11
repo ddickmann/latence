@@ -100,3 +100,24 @@ def test_extracted_mentions_replace_gold_and_extraction_is_scored(data: Path) ->
     assert res["mentions"] == res["extraction"]["matched"] <= kept
     assert res["extraction"]["recall"] == pytest.approx(res["mentions"] / len(mentions))
     assert res["extraction"]["precision"] < 1.0  # the spurious spans count against precision
+
+
+class RecordingEmbedder:
+    """Remembers what it was asked to embed; every vector is the same, so it adds no ranking."""
+
+    def __init__(self) -> None:
+        self.asked: dict[str, list[str]] = {}
+
+    def encode(self, texts: list[str], prompt_name: str) -> np.ndarray:
+        self.asked[prompt_name] = list(texts)
+        return np.ones((len(texts), 4), dtype=np.float32) / 2.0
+
+
+def test_the_embedder_searches_with_the_mention_not_with_the_whole_document(data: Path) -> None:
+    # Measured on the pod (2026-11-11): searching with the whole document retrieves the OTHER
+    # organisation a document names, and the reranker then prefers it: top-1 fell from 0.854 to
+    # 0.685, and 681 of 1,100 wrong links were the document's other mention.
+    emb = RecordingEmbedder()
+    run(data, "rerank", 5, 300, 500, 7, use_embedder=True, embedder=emb, reranker=OracleishReranker())
+    mentions = [json.loads(x) for x in open(data / "mentions.jsonl", encoding="utf-8")]
+    assert emb.asked["SearchQuery"] == [m["surface"] for m in mentions]

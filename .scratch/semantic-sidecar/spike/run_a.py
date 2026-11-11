@@ -423,6 +423,15 @@ def _stage(name: str, t0: float) -> None:
     print(f"[stage] {name:16s} t={time.time() - t0:7.1f}s peak_rss={rss} MB", file=sys.stderr, flush=True)
 
 
+def prompts_for(kind: str) -> tuple[str, str]:
+    """The (question, instruction) the pair scorers get: they have to name the kind of record."""
+    import models as M
+
+    if kind == "org":
+        return M.SAME_QUESTION, M.SAME_RECORD_INSTRUCTION
+    return M.SAME_PERSON_QUESTION, M.SAME_PERSON_INSTRUCTION
+
+
 def _load_scorers(names: list[str], question: str, instruction: str) -> dict[str, Any]:
     """The neural pair scorers of the agreed model set, loaded only when an arm asks for them."""
     import models as M
@@ -525,9 +534,7 @@ def run(
         text_of = {r["unique_id"]: record_text(r, cols) for r in raw.to_dict("records")}
         pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(ids[left[unc]].tolist(), ids[right[unc]].tolist())]
         if scorers is None:
-            import models as M
-
-            scorers = _load_scorers(rescore, M.SAME_QUESTION, M.SAME_RECORD_INSTRUCTION)
+            scorers = _load_scorers(rescore, *prompts_for(kind))
         sc_times: dict[str, float] = {}
         sc: dict[str, np.ndarray] = {}
         for name in rescore:
