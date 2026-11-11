@@ -101,6 +101,14 @@ one of:
   is not made. Read `<out>/classes_prompt.json` first: it is exactly what is sent. Run once
   on 2026-11-11 on this estate (ticket 31).
 
+## Reading Unity Catalog instead of the mirror
+
+`--catalog <name>` in place of `--duckdb` reads the estate from Unity Catalog and runs the
+counting statements on a SQL warehouse (`estate/reader_databricks.py`). Host, warehouse and
+credentials come from the environment; the commands and what to report back are in ticket 33.
+**Proven against a stand-in server only; not yet run against a workspace.** `estate compare`
+lists what a build from the catalog and one from the mirror hold differently.
+
 ## What to say aloud in a demonstration
 
 - The page shows the **ontology** (concepts, relations, measures) and the **entities** read

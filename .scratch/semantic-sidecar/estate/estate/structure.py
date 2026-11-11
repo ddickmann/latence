@@ -29,7 +29,7 @@ from typing import Any
 
 from .codes import say
 from .ledger import Decisions
-from .induce import SUPPORT_FLOOR, _q
+from .induce import SUPPORT_FLOOR
 from .reader import CatalogObject, Reader
 
 MIN_OBJECTS = 2  # a roll-up seen in one object only may be an accident of that object
@@ -59,7 +59,7 @@ def _breaks(reader: Reader, o: CatalogObject, a: str, b: str) -> tuple[int, int]
     """(values of a seen with a value of b, how many of them go with more than one b)."""
     n, bad = reader.query(
         f"SELECT count(*), coalesce(sum(CASE WHEN k > 1 THEN 1 ELSE 0 END), 0) FROM "
-        f"(SELECT {_q(a)}, count(DISTINCT {_q(b)}) k FROM {reader.quote(o)} WHERE {_q(a)} IS NOT NULL AND {_q(b)} IS NOT NULL GROUP BY 1) t")[0]
+        f"(SELECT {reader.ident(a)}, count(DISTINCT {reader.ident(b)}) k FROM {reader.quote(o)} WHERE {reader.ident(a)} IS NOT NULL AND {reader.ident(b)} IS NOT NULL GROUP BY 1) t")[0]
     return int(n), int(bad)
 
 
@@ -69,7 +69,7 @@ MAX_BREAKING_NAMED = 20
 def _breaking(reader: Reader, objects: list[CatalogObject], a: str, b: str) -> list[dict[str, Any]]:
     """The values of a that go with more than one value of b, each with the values it goes
     with, most frequent first."""
-    parts = [f"SELECT CAST({_q(a)} AS VARCHAR) x, CAST({_q(b)} AS VARCHAR) y FROM {reader.quote(o)} WHERE {_q(a)} IS NOT NULL AND {_q(b)} IS NOT NULL" for o in objects]
+    parts = [f"SELECT {reader.as_text(reader.ident(a))} x, {reader.as_text(reader.ident(b))} y FROM {reader.quote(o)} WHERE {reader.ident(a)} IS NOT NULL AND {reader.ident(b)} IS NOT NULL" for o in objects]
     rows = reader.query(f"SELECT x, y, count(*) FROM ({' UNION ALL '.join(parts)}) t GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2")
     parents: dict[str, list[str]] = {}
     for x, y, _n in rows:
@@ -96,7 +96,7 @@ def entity_names(reader: Reader, model: dict[str, Any], personal_objects: tuple[
             column = o.column(col)
             if column is None or column.sensitive:
                 continue
-            rows, values = reader.query(f"SELECT count({_q(col)}), count(DISTINCT {_q(col)}) FROM {reader.quote(o)}")[0]
+            rows, values = reader.query(f"SELECT count({reader.ident(col)}), count(DISTINCT {reader.ident(col)}) FROM {reader.quote(o)}")[0]
             if rows >= MIN_ROWS_FOR_A_NAME and 2 * values > rows:
                 out.setdefault(col, []).append({"entity": c["id"], "object": name, "keys": int(rows), "values": int(values)})
     return out
@@ -177,7 +177,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
             support = None
             signal = say("refers_to_a_level.all", concept=c["label"], level=a)
             if o is not None and o.column(a) is not None and not o.column(a).sensitive:  # type: ignore[union-attr]
-                rows, filled = reader.query(f"SELECT count(*), count({_q(a)}) FROM {reader.quote(o)}")[0]
+                rows, filled = reader.query(f"SELECT count(*), count({reader.ident(a)}) FROM {reader.quote(o)}")[0]
                 support = {"rows": int(rows), "rows_with_the_level": int(filled), "share": round(filled / rows, 4) if rows else None}
                 if filled < rows:  # a level only some rows carry: the others are in no tree
                     signal = say("refers_to_a_level.some", filled=int(filled), rows=int(rows), concept=c["label"], level=a)
@@ -233,7 +233,7 @@ def broader_edges(reader: Reader, structure: dict[str, Any], known: set[str]) ->
     out = []
     for step, names in sorted(structure["_steps"].items()):
         a, b = step.split("->")
-        parts = [f"SELECT CAST({_q(a)} AS VARCHAR) x, CAST({_q(b)} AS VARCHAR) y FROM {reader.quote(objects[n])} WHERE {_q(a)} IS NOT NULL AND {_q(b)} IS NOT NULL"
+        parts = [f"SELECT {reader.as_text(reader.ident(a))} x, {reader.as_text(reader.ident(b))} y FROM {reader.quote(objects[n])} WHERE {reader.ident(a)} IS NOT NULL AND {reader.ident(b)} IS NOT NULL"
                  for n in names]
         rows = reader.query(f"SELECT x, y, count(*) FROM ({' UNION ALL '.join(parts)}) t GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2")
         seen: dict[str, int] = {}

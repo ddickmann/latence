@@ -92,3 +92,13 @@ class Reader(Protocol):
     def quote(self, obj: CatalogObject) -> str:
         """The object's name as this warehouse's SQL writes it."""
         ...
+
+    def ident(self, name: str) -> str:
+        """A column's name as this warehouse's SQL writes it. Dialects differ: what one reads
+        as a quoted name another reads as a text value, and counts go wrong without an error.
+        Every statement the engine writes takes its names from here."""
+        ...
+
+    def as_text(self, expr: str) -> str:
+        """The expression cast to text, in this warehouse's name for the text type."""
+        ...

@@ -26,7 +26,6 @@ import re
 from typing import Any
 
 from .codes import say
-from .induce import _q, label_of
 from .reader import CatalogObject, Reader
 
 MAX_ENTITY_ROWS = 2_000
@@ -118,7 +117,7 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
     # ---- value nodes ------------------------------------------------------------------------
     value_cols = {c["column"]: c for c in model["concepts"] if c["kind"] == "reference"}
     for col, c in sorted(value_cols.items()):
-        parts = [f"SELECT CAST({_q(col)} AS VARCHAR) AS v FROM {reader.quote(objects[o])} WHERE {_q(col)} IS NOT NULL"
+        parts = [f"SELECT {reader.as_text(reader.ident(col))} AS v FROM {reader.quote(objects[o])} WHERE {reader.ident(col)} IS NOT NULL"
                  for o in c["objects"] if o in objects and o not in personal]
         if not parts:
             continue
@@ -148,7 +147,7 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
             if obj.column(label_col) is None or obj.column(label_col).sensitive:  # type: ignore[union-attr]
                 raise ValueError(f"{name}.{label_col} is missing or personal and cannot label a row")
         refs = [col for col in value_cols if obj.column(col) is not None and not obj.column(col).sensitive]  # type: ignore[union-attr]
-        select = ", ".join(f"CAST({_q(x)} AS VARCHAR)" for x in [key[0], *label_cols, *refs])
+        select = ", ".join(f"{reader.as_text(reader.ident(x))}" for x in [key[0], *label_cols, *refs])
         for row in run(f"SELECT {select} FROM {reader.quote(obj)} ORDER BY 1"):
             nid = f"{name}:{row[0]}"
             said = [str(x) for x in row[1:1 + len(label_cols)] if x is not None]
@@ -170,7 +169,7 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
         for r in rels:
             parent = r["to"].removeprefix("concept:")
             col = r["columns"][0]
-            sql = f"SELECT CAST({_q(col)} AS VARCHAR), count(*) FROM {reader.quote(obj)} WHERE {_q(col)} IS NOT NULL GROUP BY 1 ORDER BY 1"
+            sql = f"SELECT {reader.as_text(reader.ident(col))}, count(*) FROM {reader.quote(obj)} WHERE {reader.ident(col)} IS NOT NULL GROUP BY 1 ORDER BY 1"
             for v, n in run(sql):
                 edges.append({"from": f"{parent}:{v}", "to": r["from"], "relation": r["id"], "kind": "fact_count", "rows": int(n),
                               "counted": {"object": child, "group_by": [col]}})
@@ -179,8 +178,8 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
             ca, cb = a["columns"][0], b["columns"][0]
             if pa == pb:
                 continue
-            sql = (f"SELECT CAST({_q(ca)} AS VARCHAR), CAST({_q(cb)} AS VARCHAR), count(*) FROM {reader.quote(obj)} "
-                   f"WHERE {_q(ca)} IS NOT NULL AND {_q(cb)} IS NOT NULL GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT {MAX_PAIR_EDGES}")
+            sql = (f"SELECT {reader.as_text(reader.ident(ca))}, {reader.as_text(reader.ident(cb))}, count(*) FROM {reader.quote(obj)} "
+                   f"WHERE {reader.ident(ca)} IS NOT NULL AND {reader.ident(cb)} IS NOT NULL GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT {MAX_PAIR_EDGES}")
             for va, vb, n in run(sql):
                 edges.append({"from": f"{pa}:{va}", "to": f"{pb}:{vb}", "relation": None, "kind": "meet_in", "rows": int(n),
                               "via": f"concept:{child}", "counted": {"object": child, "group_by": [ca, cb]}})

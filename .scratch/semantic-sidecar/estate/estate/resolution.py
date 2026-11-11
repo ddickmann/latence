@@ -24,7 +24,6 @@ from typing import Any
 import duckdb
 
 from .codes import check
-from .induce import _q
 from .reader import Reader
 
 COLUMNS = ("unique_id", "source_system", "entity_type", "name", "city", "postcode", "country", "industry", "reg_id", "cluster")
@@ -43,7 +42,7 @@ def write_records(reader: Reader, link: list[dict[str, Any]], truth: dict[str, s
         for col in (spec["id"], spec["name"], spec.get("city"), spec.get("country")):
             if col and (obj.column(col) is None or obj.column(col).sensitive):  # type: ignore[union-attr]
                 raise ValueError(f"{spec['object']}.{col} is missing or personal and cannot be matched on")
-        select = ", ".join(f"CAST({_q(spec[c])} AS VARCHAR)" if spec.get(c) else "NULL" for c in ("id", "name", "city", "country"))
+        select = ", ".join(f"{reader.as_text(reader.ident(spec[c]))}" if spec.get(c) else "NULL" for c in ("id", "name", "city", "country"))
         renames = spec.get("country_map", {})
         for key, name, city, country in reader.query(f"SELECT {select} FROM {reader.quote(obj)} ORDER BY 1"):
             # Without a truth every record is its own: nothing then stands in for a reviewer.

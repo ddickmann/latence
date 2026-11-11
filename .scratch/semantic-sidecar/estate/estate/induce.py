@@ -65,10 +65,6 @@ def label_of(name: str, labels: dict[str, str] | None = None) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _q(col: str) -> str:
-    return '"' + col.replace('"', '""') + '"'
-
-
 class Profiler:
     """Aggregates the induction needs, each computed once inside the warehouse."""
 
@@ -89,8 +85,8 @@ class Profiler:
     def distinct(self, obj: CatalogObject, cols: tuple[str, ...]) -> int:
         key = (obj.full_name, cols)
         if key not in self._distinct:
-            inner = ", ".join(_q(c) for c in cols)
-            where = " AND ".join(f"{_q(c)} IS NOT NULL" for c in cols)
+            inner = ", ".join(self.reader.ident(c) for c in cols)
+            where = " AND ".join(f"{self.reader.ident(c)} IS NOT NULL" for c in cols)
             sql = f"SELECT count(*) FROM (SELECT DISTINCT {inner} FROM {self.reader.quote(obj)} WHERE {where}) t"
             self._distinct[key] = int(self._run(sql)[0][0])
         return self._distinct[key]
@@ -98,7 +94,7 @@ class Profiler:
     def nulls(self, obj: CatalogObject, col: str) -> int:
         key = (obj.full_name, col)
         if key not in self._nulls:
-            sql = f"SELECT count(*) FROM {self.reader.quote(obj)} WHERE {_q(col)} IS NULL"
+            sql = f"SELECT count(*) FROM {self.reader.quote(obj)} WHERE {self.reader.ident(col)} IS NULL"
             self._nulls[key] = int(self._run(sql)[0][0])
         return self._nulls[key]
 
@@ -110,12 +106,12 @@ class Profiler:
     def inclusion(self, child: CatalogObject, c_cols: tuple[str, ...], parent: CatalogObject, p_cols: tuple[str, ...]) -> dict[str, int]:
         """Rows of the child whose value is found in the parent (holds), is not (breaks), or is
         missing (empty)."""
-        on = " AND ".join(f"CAST(c.{_q(a)} AS VARCHAR) = CAST(p.{_q(b)} AS VARCHAR)" for a, b in zip(c_cols, p_cols))
-        some_null = " OR ".join(f"c.{_q(a)} IS NULL" for a in c_cols)
-        keys = ", ".join(_q(b) for b in p_cols)
+        on = " AND ".join(f"{self.reader.as_text('c.' + self.reader.ident(a))} = {self.reader.as_text('p.' + self.reader.ident(b))}" for a, b in zip(c_cols, p_cols))
+        some_null = " OR ".join(f"c.{self.reader.ident(a)} IS NULL" for a in c_cols)
+        keys = ", ".join(self.reader.ident(b) for b in p_cols)
         sql = (
-            f"SELECT count(*) FILTER (WHERE NOT ({some_null}) AND p.{_q(p_cols[0])} IS NOT NULL), "
-            f"count(*) FILTER (WHERE NOT ({some_null}) AND p.{_q(p_cols[0])} IS NULL), "
+            f"SELECT count(*) FILTER (WHERE NOT ({some_null}) AND p.{self.reader.ident(p_cols[0])} IS NOT NULL), "
+            f"count(*) FILTER (WHERE NOT ({some_null}) AND p.{self.reader.ident(p_cols[0])} IS NULL), "
             f"count(*) FILTER (WHERE {some_null}) "
             f"FROM {self.reader.quote(child)} c LEFT JOIN (SELECT DISTINCT {keys} FROM {self.reader.quote(parent)}) p ON {on}"
         )

@@ -2,7 +2,7 @@
 
 Type: task
 Mode: HITL
-Status: open
+Status: open (built; the owner's run on the real catalog is outstanding)
 Blocked by: 26
 
 ## Question
@@ -49,3 +49,62 @@ Databricks' own SQL semantics, types and limits. The stand-in proves the protoco
 ## Cut first if time runs short
 
 Lineage.
+
+## State (2026-11-11): built and proven against the stand-in; waits for the owner's run
+
+- **The dialect seam.** The `Reader` has `ident()` and `as_text()`, and every statement in
+  `induce`, `instances`, `structure` and `resolution` takes its names and its text casts from
+  them. A test reader that speaks the other dialect and refuses a double-quoted name gives the
+  same model as the mirror (red before the seam). The build on the vehicle mirror is
+  byte-identical before and after, export and Turtle file.
+- **`estate/reader_databricks.py`**, standard library only:
+  - objects, columns, comments and ids from the paged table listing; an object's id is the
+    catalog's table id;
+  - tags from one statement over `information_schema.column_tags`; a column is sensitive when
+    the estate file names it or it carries a tag the estate calls sensitive
+    (`sensitive_tags:`);
+  - declared keys from each table's own entry;
+  - a metric view put together again from the stored definition and the comments, display
+    names and synonyms on its listed columns;
+  - statements through the statement API: polled until they end, every further part of a
+    result fetched, values read by the types the result states. A statement that fails stops
+    the build with its id; one that runs past the limit is cancelled.
+  - Credentials from the environment only: a token, or a service principal's id and secret.
+- **The stand-in** (`tests/uc_standin.py`) answers those calls over the toy estate and
+  disagrees the way the services do: a refused token (401, 403), two tables per page, "too
+  many requests" on the first listing, every third statement pending first, results in parts
+  of five rows, every value as text, and a statement in the wrong dialect failed.
+- **Where the endpoints and field names come from:** the host project's own adapter, which
+  runs against a live workspace, and research note 01. The provider's documentation could not
+  be opened from where this was built.
+
+**Tests: 114 pass (10 new):** the same model through another dialect; the same model through
+the catalog as through the mirror, with pages, a retry, pending statements and results in
+parts on the way; a column tagged sensitive is in no statement; a metric view is put together
+again; declared keys; a refused token, a failed statement and one that never ends each stop
+with a clear word, and a refused token is not tried twice; values come back in the types the
+result states; the reader over a real socket; a build from the catalog says what is missing in
+the environment; the compare command.
+
+**Not done:** lineage (the cut named first). Row filters and column masks are not read: the
+reader runs under one identity and sees what that identity may see.
+
+## The owner's run (on the main machine, inside the workspace's reach)
+
+```
+cd .scratch/semantic-sidecar/estate
+export DATABRICKS_HOST=https://<workspace>        # in the shell, never in a file
+export DATABRICKS_WAREHOUSE_ID=<id>
+export DATABRICKS_TOKEN=<token>                    # or DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET
+
+.venv/bin/python -m estate build --config estates/vehicles.yaml --catalog <catalog> \
+    --verified <metis>/tools/synth/estates/catalog.yaml \
+    --class-answer estates/vehicles.classes_answer.gpt-6-luna.json --out out/vehicles-uc
+
+.venv/bin/python -m estate compare --a out/vehicles --b out/vehicles-uc     # the mirror's build beside it
+```
+
+What to report back: whether the build ran; the output of `compare` (what only one side holds,
+and what differs); and the first error if there was one, with the statement id it names. The
+seeded second source is not in the catalog unless `seeded_accounts.sql` was loaded, so the
+catalog's build links no records; that difference is expected.

@@ -80,4 +80,10 @@ class DuckDBReader:
         return self.con.execute(sql).fetchall()
 
     def quote(self, obj: CatalogObject) -> str:
-        return f'"{obj.schema}"."{obj.name}"'
+        return f"{self.ident(obj.schema)}.{self.ident(obj.name)}"
+
+    def ident(self, name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    def as_text(self, expr: str) -> str:
+        return f"CAST({expr} AS VARCHAR)"

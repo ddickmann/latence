@@ -15,6 +15,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -23,6 +24,8 @@ from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
+from .reader import Reader
+from .reader_databricks import DatabricksReader
 from .reader_duckdb import DuckDBReader
 from .score import score
 from .resolution import merge, pair_answers, run_resolver, write_records
@@ -46,18 +49,28 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
     return out
 
 
-def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | None, out: Path,
+def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: Path | None, out: Path,
           resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
-          client: object | None = None, usage: tuple[Path, ...] = ()) -> dict[str, object]:
-    """``hosted_model`` lets a hosted language model propose classes, if the estate allows it.
-    The call is made only when what would be sent has changed, and only if its worst case
-    stays under ``max_usd``. ``client`` stands in for the provider's client in tests."""
+          client: object | None = None, usage: tuple[Path, ...] = (), catalog: str | None = None) -> dict[str, object]:
+    """The estate is read from a DuckDB mirror (``duckdb_path``) or from Unity Catalog
+    (``catalog``; host, warehouse and credentials from the environment). ``hosted_model`` lets
+    a hosted language model propose classes, if the estate allows it. The call is made only
+    when what would be sent has changed, and only if its worst case stays under ``max_usd``.
+    ``client`` stands in for the provider's client in tests."""
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
-    reader = DuckDBReader(
-        duckdb_path, schemas=cfg["schemas"], sensitive=cfg.get("sensitive", []),
-        metric_views=views.read_text(encoding="utf-8") if views else "",
-        schema_prefix=cfg.get("schema_prefix", ""), name=cfg["name"],
-    )
+    reader: Reader
+    if catalog:
+        # The schemas of the catalog that exist: a layer the mirror adds (a seeded source) may be missing there.
+        reader = DatabricksReader.from_env(catalog, cfg["schemas"], schema_prefix=cfg.get("schema_prefix", ""), sensitive=cfg.get("sensitive", []),
+                                           sensitive_tags=cfg.get("sensitive_tags", []))
+    elif duckdb_path is not None:
+        reader = DuckDBReader(
+            duckdb_path, schemas=cfg["schemas"], sensitive=cfg.get("sensitive", []),
+            metric_views=views.read_text(encoding="utf-8") if views else "",
+            schema_prefix=cfg.get("schema_prefix", ""), name=cfg["name"],
+        )
+    else:
+        raise SystemExit("give the estate to read: --duckdb FILE for a mirror, or --catalog NAME for Unity Catalog")
     names = {o.full_name for o in reader.objects()}
     joins = read_verified(verified, names) if verified else []
     shown = tuple(cfg.get("without_personal_columns", ()))
@@ -145,6 +158,29 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
             "resolution": instances["meta"].get("resolution") or resolution_note}
 
 
+def compare(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """What two exports of one estate hold differently, by element id: what only one holds,
+    and for what both hold, whether its key, its ends or its status differ. Counts on the data
+    (rows, support) are left out: a mirror and the catalog may be loaded at different times."""
+    def elements(e: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+        out: dict[str, tuple[Any, ...]] = {}
+        for c in e["concepts"]:
+            out[c["id"]] = (c["kind"], list(c.get("key") or ()), c["status"], c["label"])
+        for r in e["relations"]:
+            out[r["id"]] = (r["from"], r["to"], list(r["columns"]), r["status"])
+        for m in e["measures"]:
+            out[m["id"]] = (m["concept"], m["expr"])
+        for kind in ("roll_ups", "equivalent", "part_of", "describes"):
+            for s in e["structure"].get(kind, []):
+                out[s["id"]] = (s.get("kind", kind), s.get("from"), s.get("to"))
+        return out
+
+    ea, eb = elements(a), elements(b)
+    return {"only_in_a": sorted(set(ea) - set(eb)), "only_in_b": sorted(set(eb) - set(ea)),
+            "differ": {k: {"a": list(ea[k]), "b": list(eb[k])} for k in sorted(set(ea) & set(eb)) if ea[k] != eb[k]},
+            "same": len([k for k in set(ea) & set(eb) if ea[k] == eb[k]])}
+
+
 def seed(config: Path, duckdb_path: Path, out_db: Path, out: Path, seed_no: int) -> dict[str, object]:
     """Copy the mirror and add the seeded second source to the copy, in a schema of its own.
     The truth goes to ``seed_truth.json`` in the output folder, outside the catalog, together
@@ -177,8 +213,9 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("--config", type=Path, required=True)
-    b.add_argument("--duckdb", type=Path, required=True)
-    b.add_argument("--metric-views", type=Path)
+    b.add_argument("--duckdb", type=Path, help="a DuckDB mirror of the estate")
+    b.add_argument("--catalog", help="read Unity Catalog instead: the catalog's name; DATABRICKS_HOST, DATABRICKS_WAREHOUSE_ID and a token or a service principal in the environment")
+    b.add_argument("--metric-views", type=Path, help="the metric views' definitions as text (a mirror does not hold them)")
     b.add_argument("--verified", type=Path)
     b.add_argument("--out", type=Path, required=True)
     b.add_argument("--resolver", type=Path, help="folder of the resolution engine (its link_records.py and environment)")
@@ -195,18 +232,23 @@ def main() -> None:
     sc = sub.add_parser("score", help="precision and recall of the proposals against a hand-checked list")
     sc.add_argument("--out", type=Path, required=True, help="the build folder that holds ontology.json")
     sc.add_argument("--gold", type=Path, required=True)
+    cp = sub.add_parser("compare", help="what two builds of one estate hold differently (a mirror and the catalog)")
+    cp.add_argument("--a", type=Path, required=True)
+    cp.add_argument("--b", type=Path, required=True)
     e = sub.add_parser("export")
     e.add_argument("--out", type=Path, required=True)
     e.add_argument("--ui-dir", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
+    elif a.cmd == "compare":
+        print(json.dumps(compare(json.loads((a.a / "ontology.json").read_text(encoding="utf-8")), json.loads((a.b / "ontology.json").read_text(encoding="utf-8"))), indent=1))
     elif a.cmd == "score":
         result = score(json.loads((a.out / "ontology.json").read_text(encoding="utf-8")), yaml.safe_load(a.gold.read_text(encoding="utf-8")))
         (a.out / "score.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
-        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage)), indent=1))
+        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage), catalog=a.catalog), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:
