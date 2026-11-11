@@ -1,8 +1,9 @@
 """The export a screen reads: ``graph-export/2``.
 
-Schema level only in this cut: concepts with their signals and attributes, relations with
-their support on the data, measures bound to concepts. No row value is written: an attribute
-is a column name and a type, a value set is a count. Instances come with the next cut.
+The schema level (concepts with their signals and attributes, relations with their support on
+the data, measures bound to concepts) and, when instances are built, the instance level: nodes
+for values and master rows, edges that refer or count, and review items. No value of a
+sensitive column is written, and no row of a personal object.
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from typing import Any
 SCHEMA = "graph-export/2"
 
 
-def build_export(layer: dict[str, Any], *, source: str, title: str, verified: list[tuple[str, str]] | None = None) -> dict[str, Any]:
+def build_export(layer: dict[str, Any], *, source: str, title: str, verified: list[tuple[str, str]] | None = None,
+                 instances: dict[str, Any] | None = None) -> dict[str, Any]:
     concepts, relations = layer["concepts"], layer["relations"]
     found = {(r["from"].removeprefix("concept:"), r["to"].removeprefix("concept:")) for r in relations}
     names = {c["id"].removeprefix("concept:"): c for c in concepts}
@@ -41,10 +43,17 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
             },
             "decisions": layer["meta"].get("decisions", {"approved": 0, "rejected": 0, "unknown_subjects": []}),
             "host_verified_joins": compared,
-            "instances": "not_in_this_cut",
+            "instances": "not_in_this_cut" if instances is None else "available",
+            "instance_counts": None if instances is None else {
+                "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"],
+                "review_items": instances["meta"]["review_items"], "certified": instances["meta"]["certified"],
+                "nodes_per_concept": instances["meta"]["nodes_per_concept"]},
         },
         "concepts": concepts,
         "relations": relations,
         "measures": layer["measures"],
         "dropped": layer["meta"]["dropped_below_floor"],
+        "nodes": [] if instances is None else instances["nodes"],
+        "edges": [] if instances is None else instances["edges"],
+        "review": [] if instances is None else instances["review"],
     }

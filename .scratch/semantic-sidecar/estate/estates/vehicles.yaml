@@ -22,3 +22,7 @@ sensitive:
   - internal.vehicles.vin
   - internal.warranty_contracts.vin
   - clean.complaints.vin
+# Objects whose rows are about a person. They give no instance, whatever their columns.
+personal_objects: [internal.owners, internal.vehicles, internal.warranty_contracts, internal.claims]
+# Value sets whose values are names of organisations: spellings that may be the same are listed for review.
+resolve: [manufacturer]

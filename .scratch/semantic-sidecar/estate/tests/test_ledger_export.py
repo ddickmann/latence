@@ -19,6 +19,7 @@ SCHEMA = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "graph-ex
 def project(tmp_path: Path, toy_path: Path) -> dict[str, Path]:
     cfg = tmp_path / "toy.yaml"
     cfg.write_text(yaml.safe_dump({"name": "toy", "title": "Toy estate", "schema_prefix": "acme_", "schemas": ["shop", "marts"],
+                                   "personal_objects": ["shop.owners", "shop.vehicles"], "resolve": ["make"],
                                    "sensitive": SENSITIVE, "ignore_columns": list(OPTIONS["ignore_columns"]),
                                    "derived_schemas": list(OPTIONS["derived_schemas"])}))
     views = tmp_path / "views.txt"
@@ -36,7 +37,8 @@ def test_the_export_matches_its_schema_and_says_where_it_came_from(project: dict
     summary = build(**project)
     export = _export(project)
     jsonschema.validate(export, SCHEMA)
-    assert export["meta"]["schema_origin"] == "induced" and export["meta"]["instances"] == "not_in_this_cut"
+    assert export["meta"]["schema_origin"] == "induced" and export["meta"]["instances"] == "available"
+    assert export["meta"]["instance_counts"]["certified"] is False and export["nodes"] and export["edges"]
     assert summary["concepts"] == len(export["concepts"]) and summary["new_assertions"] > 0
 
 

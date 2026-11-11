@@ -20,6 +20,7 @@ import yaml
 
 from .export import build_export
 from .induce import induce
+from .instances import build_instances
 from .ledger import append, assertions_of, read_decisions, replay
 from .reader_duckdb import DuckDBReader
 
@@ -51,9 +52,11 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     out.mkdir(parents=True, exist_ok=True)
     new = append(out / "assertions.jsonl", assertions_of(model))
     layer = replay(model, read_decisions(out / "decisions.jsonl"))
-    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins)
+    instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())))
+    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances)
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"]}
+    return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
+            "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"]}
 
 
 def main() -> None:
