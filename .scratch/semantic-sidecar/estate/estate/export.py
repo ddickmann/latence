@@ -15,7 +15,7 @@ SCHEMA = "graph-export/2"
 
 
 def build_export(layer: dict[str, Any], *, source: str, title: str, verified: list[tuple[str, str]] | None = None,
-                 instances: dict[str, Any] | None = None) -> dict[str, Any]:
+                 instances: dict[str, Any] | None = None, structure: dict[str, Any] | None = None) -> dict[str, Any]:
     concepts, relations = layer["concepts"], layer["relations"]
     found = {(r["from"].removeprefix("concept:"), r["to"].removeprefix("concept:")) for r in relations}
     names = {c["id"].removeprefix("concept:"): c for c in concepts}
@@ -55,6 +55,7 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
         "relations": relations,
         "measures": layer["measures"],
         "dropped": layer["meta"]["dropped_below_floor"],
+        "structure": {k: (structure or {}).get(k, []) for k in ("roll_ups", "equivalent", "part_of", "describes")},
         "nodes": [] if instances is None else instances["nodes"],
         "edges": [] if instances is None else instances["edges"],
         "review": [] if instances is None else instances["review"],

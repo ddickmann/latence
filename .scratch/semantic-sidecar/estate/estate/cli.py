@@ -25,6 +25,7 @@ from .ledger import append, assertions_of, read_decisions, replay
 from .reader_duckdb import DuckDBReader
 from .resolution import merge, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
+from .structure import broader_edges, build_structure, explain_review
 
 UI_FILES = ("ontology.json",)
 
@@ -65,6 +66,11 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     layer = replay(model, read_decisions(out / "decisions.jsonl"))
     instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown,
                                 also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None)
+    structure = build_structure(reader, layer, tuple(cfg.get("personal_objects", ())))
+    up = broader_edges(reader, structure, {n["id"] for n in instances["nodes"]})
+    edges = sorted(instances["edges"] + up, key=lambda e: (e["kind"], e["from"], e["to"], str(e.get("via")), str(e.get("relation"))))
+    instances = {**instances, "edges": edges, "review": explain_review(instances["review"], edges, instances["nodes"], layer["concepts"]),
+                 "meta": {**instances["meta"], "edges": len(edges)}}
     resolution_note = "no second source in this estate" if link is None else "no resolver given: records not linked"
     if link and resolver is not None:
         truth_file = out / "seed_truth.json"
@@ -77,10 +83,11 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
         instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]))
         resolution_note = "linked"
-    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances)
+    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure)
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
             "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"],
+            "structure": {k: len(v) for k, v in export["structure"].items()},
             "resolution": instances["meta"].get("resolution") or resolution_note}
 
 

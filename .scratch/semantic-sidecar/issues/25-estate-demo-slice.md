@@ -123,3 +123,40 @@ key `on` as a boolean.
 - The Turtle download (OWL 2 QL and SKOS).
 - A minimum count below which a fact count is not exported.
 
+## From a flat model to an ontology (owner, 2026-11-11)
+
+The owner's objection: linking records is entity disambiguation; the model above it is flat,
+"not ontology nor hierarchical yet". Agreed. The route, in order of certainty:
+
+1. **Structure the data proves** (`estate/structure.py`, built 2026-11-11). No model, no guess:
+   - **roll-ups** between value sets, checked in every object that carries both, with how many
+     values break them; master data hangs below the finest level it carries;
+   - **equivalent value sets** (two columns that cut the rows the same way) count as one level;
+   - **part-of** from keys (a claim line of a claim), and derived objects that **describe** an
+     entity;
+   - `broader` edges at the instance level: which value sits under which, with the contested
+     ones marked;
+   - names that may be the same are read against the hierarchy: two manufacturer names under
+     one make is a reason more, under two makes a reason against.
+   - **On the real mirror:** 10 roll-up steps (market ← dealer group ← dealer; make ← model;
+     make ← manufacturer ← recall campaign; system ← component; part → make and system), one
+     equivalence (market and distance unit), 3 part-of, 3 describes, 390 `broader` edges.
+2. **A class tree above the tables** (not built). A language model proposes parent classes and
+   definitions from names, comments and attribute patterns; the data checks what can be
+   checked; a person approves. **Decided (owner, 2026-11-11): no external vocabulary at
+   first; a small set of our own top classes** (Organisation, Person, Product, Event, Place,
+   Document). A hosted model may see the names of this synthetic estate; for a client's
+   estate that is an egress decision per deployment.
+3. **The entity level hangs off that tree** (resolved dealers, parts and manufacturers as
+   instances of classes, with the hierarchy edges between them).
+4. **Export in the standard forms** (OWL 2 QL, SKOS, SHACL). Not built.
+
+**Limits of step 1.**
+- A roll-up needs two objects that carry both columns; one seen in a single object is not
+  proposed.
+- "Subject → manufacturer" holds for 97 of 107 values and is proposed; it is a weak one and a
+  person should reject it.
+- One part-of reads oddly: campaign completion is called a part of the dealer, because the
+  campaign's own key has two columns and is not matched.
+- The host page does not show hierarchies as trees yet.
+

@@ -134,7 +134,8 @@
               "refers_to",
               "fact_count",
               "meet_in",
-              "same_as"
+              "same_as",
+              "broader"
             ]
           },
           "p": {
@@ -208,6 +209,118 @@
                 },
                 "detail": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "structure": {
+      "type": "object",
+      "required": [
+        "roll_ups",
+        "equivalent",
+        "part_of",
+        "describes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "roll_ups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status",
+              "signals"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/signal"
+                }
+              }
+            }
+          }
+        },
+        "equivalent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status",
+              "signals"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/signal"
+                }
+              }
+            }
+          }
+        },
+        "part_of": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status",
+              "signals"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/signal"
+                }
+              }
+            }
+          }
+        },
+        "describes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status",
+              "signals"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "proposed",
+                  "declared"
+                ]
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/signal"
                 }
               }
             }
