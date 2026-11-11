@@ -69,3 +69,47 @@ def test_overlapping_label_samples_are_refused() -> None:
     p1, s, y = _uncertain_world(100, 3, informative=True)
     with pytest.raises(ValueError):
         stage_two(p1, {"rerank": s}, y, np.arange(0, 60), np.arange(50, 100))
+
+
+def test_focused_test_labels_certify_what_a_uniform_sample_cannot() -> None:
+    # A band of 20,000 pairs, 3% of them matches, and a scorer that separates them well. A
+    # uniform test sample of 500 holds about 15 matches: too few to certify any threshold.
+    rng = np.random.default_rng(3)
+    n = 20_000
+    y = (rng.random(n) < 0.03).astype(int)
+    score = np.where(y == 1, rng.normal(4.0, 1.0, n), rng.normal(-4.0, 1.0, n))
+    p1 = np.full(n, 0.2)
+    order = rng.permutation(n)
+    cal, rest = order[:1000], order[1000:]
+    uniform = stage_two(p1, {"s": score}, y, cal, rest[:500])
+    assert uniform.bands.accept_at is None
+    probe = stage_two(p1, {"s": score}, y, cal, rest[:0])
+    focused_idx = rest[probe.p2[rest] >= 0.5][:500]
+    focused = stage_two(p1, {"s": score}, y, cal, focused_idx, focus_floor=0.5)
+    assert focused.bands.accept_at is not None and focused.bands.accept_at >= 0.5
+    assert focused.bands.reject_below is None  # nothing is claimed below the floor
+    accepted = focused.p2 >= focused.bands.accept_at
+    assert accepted.sum() > 300 and y[accepted].mean() >= 0.95
+
+
+def test_a_focused_test_never_accepts_below_its_floor() -> None:
+    rng = np.random.default_rng(4)
+    n = 5000
+    y = np.ones(n, dtype=int)  # everything matches: the plain test would accept at any threshold
+    p1 = rng.uniform(0.05, 0.95, n)
+    order = rng.permutation(n)
+    y[order[:10]] = 0  # two classes in the calibration sample
+    cal, rest = order[:800], order[800:]
+    probe = stage_two(p1, {}, y, cal, rest[:0])
+    idx = rest[probe.p2[rest] >= 0.9][:400]
+    st = stage_two(p1, {}, y, cal, idx, focus_floor=0.9)
+    assert st.bands.accept_at is None or st.bands.accept_at >= 0.9
+
+
+def test_a_stage_with_nothing_left_to_decide_decides_nothing() -> None:
+    # At 10^6 records the labels-only stage accepted every undecided pair; the scorers' stage
+    # then had an empty region and crashed (2026-11-11).
+    none = np.zeros(0)
+    st = stage_two(none, {"s": none}, none.astype(int), none.astype(int), none.astype(int))
+    assert len(st.p2) == 0 and st.bands.accept_at is None and st.bands.reject_below is None
+    assert st.n_cal == 0 and st.n_ltt == 0

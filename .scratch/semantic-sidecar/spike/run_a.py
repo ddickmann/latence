@@ -38,7 +38,7 @@ from er import (
     pairwise_and_bcubed,
     wilson_lower,
 )
-from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, stage_two, uncertain_region
+from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, rescue_curve, rescue_region, stage_two, uncertain_region
 
 LEGAL_CANON = {
     "ltd": "ltd", "limited": "ltd", "inc": "inc", "incorporated": "inc", "llc": "llc",
@@ -481,11 +481,24 @@ def run(
     export_graph: Path | None = None,
     export_graph_entities: int = 400,
     dump: Path | None = None,
+    relabel: bool = False,
+    rescue: int = 0,
+    curve: bool = False,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
-    first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes)."""
+    first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes).
+
+    ``relabel`` adds a stage with no scorer before that: labels drawn from the undecided pairs,
+    tested on the first-stage probability. ``rescue`` adds the best ``rescue`` rejected pairs to
+    the scorers' region. ``curve`` records, for a grid of band sizes, how many of the true
+    matches lost below the reject line each size would reach."""
     rescore = list(rescore or [])
-    delta = 0.05 / 2 if rescore else 0.05  # two accept claims share the 0.05 by the union bound
+    if rescue and not rescore:
+        raise ValueError("a rescue band needs a scorer: below the reject line the matcher has already said no")
+    # Every stage makes its own accept claim; they share the 0.05 by the union bound. The rescue
+    # band is a stage of its own: tested together with the undecided pairs, its accepts were
+    # only 83% right while the easy pairs carried the pooled test (100k estate, 2026-11-11).
+    delta = 0.05 / (1 + int(relabel) + int(bool(rescore)) + int(rescue > 0))
     t0 = time.time()
     raw = pd.read_parquet(path)
     kind = "org" if dataset == "estate" else "person"
@@ -526,44 +539,110 @@ def run(
     acc, rej = band_masks(p, bands)
     _stage("bands", t0)
 
-    stage2_info: dict[str, Any] | None = None
-    if rescore:
-        t = time.time()
-        unc = np.where(uncertain_region(p, bands, veto))[0]
-        cols = ORG_TEXT_COLS if kind == "org" else PERSON_TEXT_COLS
-        text_of = {r["unique_id"]: record_text(r, cols) for r in raw.to_dict("records")}
-        pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(ids[left[unc]].tolist(), ids[right[unc]].tolist())]
-        if scorers is None:
-            scorers = _load_scorers(rescore, *prompts_for(kind))
-        sc_times: dict[str, float] = {}
+    p1 = p.copy()  # the first stage's probability: what later stages rank and calibrate on
+    curve_info = None
+    if curve:
+        grid = [10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000, 5_000_000]
+        curve_info = rescue_curve(p1, rej, veto, y, grid)
+
+    def stage(
+        region: np.ndarray, names: list[str], seed_: int, focus_floor: float | None = None
+    ) -> tuple[Any, np.ndarray, np.ndarray, dict[str, Any]]:
+        """One later stage over ``region``: score (if scorers are named), label a sample of the
+        region, calibrate, test. Returns the stage, its accept and reject masks and its record.
+
+        With ``focus_floor`` the calibration sample is uniform, and the test sample is the
+        first ``n_ltt2`` pairs, in a random order, that the calibrated score puts at or above
+        the floor (see ``rescore.stage_two``)."""
+        nonlocal scorers
         sc: dict[str, np.ndarray] = {}
-        for name in rescore:
-            ts = time.time()
-            sc[name] = np.asarray(scorers[name].score(pairs), dtype=float)
-            sc_times[name] = round(time.time() - ts, 2)
-        # A reviewer labels a sample of the uncertain region only: disjoint halves again.
-        order2 = np.random.default_rng(seed + 1).permutation(len(unc))
+        sc_times: dict[str, float] = {}
+        if names:
+            cols = ORG_TEXT_COLS if kind == "org" else PERSON_TEXT_COLS
+            text_of = {r["unique_id"]: record_text(r, cols) for r in raw.to_dict("records")}
+            pairs = [(text_of[a_], text_of[b_]) for a_, b_ in zip(ids[left[region]].tolist(), ids[right[region]].tolist())]
+            if scorers is None:
+                scorers = _load_scorers(names, *prompts_for(kind))
+            for name in names:
+                ts = time.time()
+                sc[name] = np.asarray(scorers[name].score(pairs) if pairs else [], dtype=float)
+                sc_times[name] = round(time.time() - ts, 2)
+        # A reviewer labels a sample of this region only: disjoint halves again.
+        order2 = np.random.default_rng(seed_).permutation(len(region))
         cal2, ltt2 = order2[:n_cal2], order2[n_cal2 : n_cal2 + n_ltt2]
-        s2 = stage_two(p[unc], sc, y[unc], cal2, ltt2, target=0.95, delta=delta, reject_target=reject_target)
+        if focus_floor is None:
+            s2 = stage_two(p1[region], sc, y[region], cal2, ltt2, target=0.95, delta=delta, reject_target=reject_target)
+        else:
+            # Find the test pairs with a first fit, then run the stage on exactly those: the
+            # fit reads calibration labels only, so the choice of test pairs never sees a test label.
+            rest = order2[n_cal2:]
+            first = stage_two(p1[region], sc, y[region], cal2, rest[:0], target=0.95, delta=delta, reject_target=reject_target)
+            ltt2 = rest[first.p2[rest] >= focus_floor][:n_ltt2]
+            s2 = stage_two(p1[region], sc, y[region], cal2, ltt2, target=0.95, delta=delta,
+                           reject_target=reject_target, focus_floor=focus_floor)
         acc2, rej2 = band_masks(s2.p2, s2.bands)
-        acc[unc], rej[unc] = acc2, rej2
-        p[unc] = s2.p2  # the cluster-level check reads the better-informed probability
-        timings["rescore"] = time.time() - t
-        _stage("rescore", t0)
-        stage2_info = {
-            "scorers": rescore,
-            "uncertain_pairs": int(len(unc)),
+        info = {
+            "scorers": names,
+            "uncertain_pairs": int(len(region)),
             "labels_used": {"calibration": s2.n_cal, "ltt": s2.n_ltt},
             "features": dict(zip(s2.feature_names, s2.coefficients)),
             "accept_at": s2.bands.accept_at,
             "reject_below": s2.bands.reject_below,
             "delta_per_stage": delta,
+            "test_labels_drawn_at_or_above": focus_floor,
             "moved": {"accept": int(acc2.sum()), "review": int((~acc2 & ~rej2).sum()), "reject": int(rej2.sum())},
-            "accept_precision_realised": float(y[unc][acc2].mean()) if acc2.any() else float("nan"),
-            "reject_true_match_rate": float(y[unc][rej2].mean()) if rej2.any() else float("nan"),
+            "accept_precision_realised": float(y[region][acc2].mean()) if acc2.any() else float("nan"),
+            "reject_true_match_rate": float(y[region][rej2].mean()) if rej2.any() else float("nan"),
             "scorer_secs": sc_times,
-            "pairs_per_s": {n: (len(unc) / v if v > 0 else float("inf")) for n, v in sc_times.items()},
+            "pairs_per_s": {n_: (len(region) / v if v > 0 else float("inf")) for n_, v in sc_times.items()},
         }
+        return s2, acc2, rej2, info
+
+    relabel_info: dict[str, Any] | None = None
+    if relabel:
+        t = time.time()
+        unc = np.where(uncertain_region(p, bands, veto))[0]
+        s2, acc2, rej2, relabel_info = stage(unc, [], seed + 2)
+        acc[unc], rej[unc] = acc2, rej2
+        p[unc] = s2.p2
+        timings["relabel"] = time.time() - t
+        _stage("relabel", t0)
+
+    stage2_info: dict[str, Any] | None = None
+    if rescore:
+        t = time.time()
+        unc = np.where(~acc & ~rej & ~veto)[0]  # what is still undecided
+        rescued = rescue_region(p1, rej, veto, rescue)
+        s2, acc2, rej2, stage2_info = stage(unc, rescore, seed + 1)
+        acc[unc], rej[unc] = acc2, rej2
+        p[unc] = s2.p2  # the cluster-level check reads the better-informed probability
+        stage2_info["rescue"] = None
+        if rescue:
+            # Its own labelled sample, calibrator and test: an accepted rescue pair has to meet
+            # the target among rescue pairs. One that is not accepted stays rejected.
+            # Its test labels are drawn among the pairs the scorer rates at 0.5 or more: a
+            # uniform sample of a band where few pairs match cannot certify anything.
+            s3, took, _, info3 = stage(rescued, rescore, seed + 3, focus_floor=0.5)
+            acc[rescued[took]], rej[rescued[took]] = True, False
+            p[rescued] = s3.p2
+            stage2_info["rescue"] = {
+                "pairs": int(len(rescued)),
+                "lowest_p": float(p1[rescued[-1]]) if len(rescued) else float("nan"),
+                "true_matches": int(y[rescued].sum()),
+                "labels_used": info3["labels_used"],
+                "features": info3["features"],
+                "accept_at": info3["accept_at"],
+                "test_labels_drawn_at_or_above": 0.5,
+                "accepted": int(took.sum()),
+                "accepted_true": int(y[rescued[took]].sum()),
+                "accepted_precision": float(y[rescued[took]].mean()) if took.any() else float("nan"),
+                "true_matches_rejected_before": int(y[rej].sum() + y[rescued[took]].sum()),
+                "true_matches_rejected_after": int(y[rej].sum()),
+                "scorer_secs": info3["scorer_secs"],
+                "pairs_per_s": info3["pairs_per_s"],
+            }
+        timings["rescore"] = time.time() - t
+        _stage("rescore", t0)
     rev = ~acc & ~rej
 
     # Realised quality of the bands on ALL candidate pairs (full gold): does the guarantee hold?
@@ -666,7 +745,9 @@ def run(
             "target": bands.target,
             "reject_target": reject_target,
             "delta": bands.delta,
+            "relabel_stage": relabel_info,
             "second_stage": stage2_info,
+            "rescue_curve": curve_info,
             "share": {"accept": float(acc.mean()), "review": float(rev.mean()), "reject": float(rej.mean())},
             "counts": {"accept": int(acc.sum()), "review": int(rev.sum()), "reject": int(rej.sum())},
             "auto_accept_precision_realised": acc_prec,
@@ -709,6 +790,9 @@ def main() -> None:
     ap.add_argument("--baseline-max", type=int, default=15_000)
     ap.add_argument("--reject-target", type=float, default=0.99)
     ap.add_argument("--rescore", default="", help="comma-separated pair scorers for the uncertain pairs: rerank,decide,glide")
+    ap.add_argument("--relabel", action="store_true", help="a stage with no scorer: labels drawn from the undecided pairs")
+    ap.add_argument("--rescue", type=int, default=0, help="also score this many of the best rejected pairs (needs --rescore)")
+    ap.add_argument("--rescue-curve", action="store_true", help="record how many lost true matches each rescue band size would reach")
     ap.add_argument("--n-cal2", type=int, default=1000)
     ap.add_argument("--n-ltt2", type=int, default=1500)
     ap.add_argument("--export-review", type=Path, default=None, help="write the review-band items for the workbench")
@@ -722,6 +806,7 @@ def main() -> None:
         rescore=[x for x in a.rescore.split(",") if x], n_cal2=a.n_cal2, n_ltt2=a.n_ltt2,
         export_review=a.export_review, export_groups=a.export_groups,
         export_graph=a.export_graph, export_graph_entities=a.export_graph_entities, dump=a.dump,
+        relabel=a.relabel, rescue=a.rescue, curve=a.rescue_curve,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(res, indent=2, default=float))

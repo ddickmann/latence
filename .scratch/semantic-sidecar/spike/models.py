@@ -47,6 +47,20 @@ def device() -> str:
     return "cpu"
 
 
+BATCH = int(os.environ.get("SPIKE_BATCH", "0"))  # 0: each scorer's own default
+
+
+def in_length_order(pairs: Sequence[tuple[str, str]], score_batch: Any, batch_size: int) -> np.ndarray:
+    """Score ``pairs`` in batches of similar length (less padding, so more pairs per second) and
+    give the scores back in the order the pairs were asked in."""
+    order = sorted(range(len(pairs)), key=lambda i: -(len(pairs[i][0]) + len(pairs[i][1])))
+    out = np.empty(len(pairs), dtype=np.float32)
+    for at in range(0, len(order), batch_size):
+        idx = order[at : at + batch_size]
+        out[idx] = np.asarray(score_batch([pairs[i] for i in idx]), dtype=np.float32)
+    return out
+
+
 class PairScorer(Protocol):
     """Scores (left text, right text) pairs; higher means more likely the same thing."""
 
@@ -102,7 +116,7 @@ class Reranker:
             default_prompt_name="task",
             max_length=max_length,
         )
-        self.bs = batch_size
+        self.bs = BATCH or batch_size
 
     def score(self, pairs: Sequence[tuple[str, str]]) -> np.ndarray:
         if not pairs:
@@ -156,21 +170,18 @@ class GlideDecide:
         from glide import Glide  # type: ignore[import-not-found]  # provided by the model directory
 
         self.model = Glide.from_pretrained(model_dir)
-        self.question, self.bs = question, batch_size
+        self.question, self.bs = question, BATCH or batch_size
+
+    def _batch(self, batch: Sequence[tuple[str, str]]) -> list[float]:
+        reqs = [
+            {"state": _pair_state(a, b), "questions": {"same": {"type": "noul", "instructions": self.question}}}
+            for a, b in batch
+        ]
+        # A glide.RequestError instead of an answer: an unknown stays unknown.
+        return [float(r["answers"]["same"]["noul"]) if isinstance(r, dict) else float("nan") for r in self.model.decide_batch(reqs)]
 
     def score(self, pairs: Sequence[tuple[str, str]]) -> np.ndarray:
-        out: list[float] = []
-        for i in range(0, len(pairs), self.bs):
-            reqs = [
-                {"state": _pair_state(a, b), "questions": {"same": {"type": "noul", "instructions": self.question}}}
-                for a, b in pairs[i : i + self.bs]
-            ]
-            for r in self.model.decide_batch(reqs):
-                if not isinstance(r, dict):  # a glide.RequestError: an unknown stays unknown
-                    out.append(float("nan"))
-                else:
-                    out.append(float(r["answers"]["same"]["noul"]))
-        return np.array(out, dtype=np.float32)
+        return in_length_order(pairs, self._batch, self.bs)
 
 
 class RelexExtractor:

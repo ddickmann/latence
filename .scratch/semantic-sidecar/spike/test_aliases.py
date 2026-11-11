@@ -89,3 +89,45 @@ def test_alias_routes_resolve_short_forms_that_characters_cannot(threads: Path) 
         assert routed["by_variant"][v]["top1_accuracy"] == plain["by_variant"][v]["top1_accuracy"]
     assert set(routed["short_forms"]["by_route"]) <= {"scope", "defined", "alias", "initials", "none"}
     assert np.isfinite(list(routed["features"].values())).all()
+
+
+# ---- definitions as company filings write them (2026-11-11) -----------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('International Business Machines Corporation ("IBM") was incorporated in 1911.', [("IBM", "International Business Machines Corporation")]),
+    ("General Motors Company (“GM”) designs vehicles.", [("GM", "General Motors Company")]),
+    ('Apple Inc. ("Apple" or the "Company") designs phones.', [("Apple", "Apple Inc.")]),
+    ('Kestrel Haven Holdings, Inc. (the "Company", "KHH", "we" or "us") is a holding company.', [("KHH", "Kestrel Haven Holdings, Inc.")]),
+    ('The agreement with First National Bank of Omaha ("FNBO") was amended.', [("FNBO", "First National Bank of Omaha")]),
+    # "the X" is usually a defined term ("the Company"), but an acronym whose letters fit is a name.
+    ('The Securities and Exchange Commission (the "SEC") adopted the rule.', [("SEC", "Securities and Exchange Commission")]),
+])
+def test_quoted_definitions_in_filings_are_read(text: str, expected: list[tuple[str, str]]) -> None:
+    assert [(d["short"], d["long"]) for d in mine_definitions(text)] == expected
+
+
+@pytest.mark.parametrize("text", [
+    'Kestrel Haven Holdings, Inc. (the "Company") is a holding company.',  # a defined term, not a name
+    'We filed our Annual Report on Form 10-K (the "Annual Report") in March.',
+    'Revenue rose in the fourth quarter ("Q4") of the year.',  # the letters fit no name before it
+])
+def test_defined_terms_that_are_not_short_names_are_left_out(text: str) -> None:
+    assert mine_definitions(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    # Each was mined from a real annual report on 2026-11-11 and is wrong.
+    "used in tablets and application such as smartphones, automotive safety (ADAS) and more.",  # starts with a small word
+    "The “Applicable Amount” means the sum of (A) the base amount and (B) the margin.",  # a list letter, not a name
+    "advances from the Federal Home Loan Bank (“FHLB”) of New York (“FHLBNY”) were repaid.",  # runs across another definition
+    "holds a MSA rank of 37.\n(5) KNTS (AM) is a station.",  # runs across a line break
+])
+def test_what_real_filings_showed_to_be_wrong_is_left_out(text: str) -> None:
+    longs = [str(d["long"]) for d in mine_definitions(text)]
+    assert not any(l.startswith(("and ", "a ", "Amount")) or "”" in l or "\n" in l for l in longs), longs
+    assert "A" not in [d["short"] for d in mine_definitions(text)]
+
+
+def test_a_lower_case_long_form_is_still_read() -> None:
+    assert [(d["short"], d["long"]) for d in mine_definitions("patients with short bowel syndrome (SBS) were enrolled")] == [("SBS", "short bowel syndrome")]

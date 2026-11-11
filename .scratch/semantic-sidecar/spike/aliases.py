@@ -28,6 +28,7 @@ from collections.abc import Iterable
 LEGAL_FORMS = {"ltd", "limited", "inc", "incorporated", "llc", "corp", "corporation", "plc", "co", "company", "gmbh", "ag", "sa", "bv", "nv"}
 STOP = {"of", "and", "the", "for", "de", "der", "und", "&"}
 ROUTES = ("scope", "defined", "alias", "initials")
+_SMALL = {"a", "an", "and", "the", "of", "or", "in", "on", "for", "to", "with", "as", "by", "at", "from", "is", "are", "such"}
 _PART = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")  # CamelCase and digit boundaries
 
 
@@ -102,11 +103,68 @@ def _long_form_before(text: str, end: int, short: str) -> tuple[int, int] | None
         j -= 1
         i -= 1
     start = i + 1
-    return (start, end) if end - start > len(key) else None
+    long = text[start:end]
+    if end - start <= len(key) or len(key) < 2:
+        return None
+    # Seen on real filings: a "long form" that runs across a quote, a bracket or a line break
+    # belongs to something else, and one that starts with a small word is a piece of a sentence.
+    if re.search(r"[\u201c\u201d\"()\n]", long) or long.split()[0].lower() in _SMALL:
+        return None
+    return (start, end)
+
+
+_QUOTED = re.compile(r"[\u201c\"]([^\u201c\u201d\"]{1,40})[\u201d\"]")
+_CONNECT = {"of", "and", "&", "de", "the", "for", "du", "la"}
+
+
+def _name_before(text: str, end: int) -> tuple[int, int] | None:
+    """The name that ends at ``end``: the run of capitalised words (with small connecting words
+    and a legal form after a comma) directly before it."""
+    start = end
+    for m in reversed(list(re.finditer(r"\S+", text[:end]))):
+        word = m.group().strip(",.;:")
+        if not word:
+            continue
+        if word[0].isupper() or word[0].isdigit() or word.lower() in _CONNECT:
+            start = m.start()
+        else:
+            break
+    words = text[start:end].split()
+    while words and words[0].lower() in _CONNECT:  # a name does not begin with "The" or "of"
+        start += len(words[0]) + 1
+        words = words[1:]
+    return (start, end) if words else None
+
+
+def _quoted_definitions(text: str, inner: str, before_end: int) -> list[dict[str, object]]:
+    """Short names a filing gives in quotes after a name: ``Name Inc. ("NI" or the "Company")``.
+    An acronym counts when its letters fit the text before the bracket. Another quoted term
+    counts when it is the beginning of the name ("Apple" for "Apple Inc."). What is introduced
+    with "the" and does not fit as an acronym is a defined term of the document, not a name."""
+    found: list[dict[str, object]] = []
+    for q in _QUOTED.finditer(inner):
+        term = q.group(1).strip()
+        after_the = re.search(r"\bthe\s*$", inner[: q.start()], re.I) is not None
+        span: tuple[int, int] | None = None
+        if is_short_form(term):
+            span = _long_form_before(text, before_end, term)
+            if span and not text[span[0]].isupper():
+                span = None
+        elif not after_the:
+            name = _name_before(text, before_end)
+            if name:
+                words = [w.strip(",.") for w in text[name[0] : name[1]].split()]
+                given = term.split()
+                if given and len(given) < len(words) and [w.lower() for w in words[: len(given)]] == [w.lower() for w in given]:
+                    span = name
+        if span:
+            found.append({"short": term, "long": text[span[0] : span[1]], "start": span[0], "end": span[1]})
+    return found
 
 
 def mine_definitions(text: str) -> list[dict[str, object]]:
-    """Definitions a text gives: "long form (SF)" and "SF (long form)".
+    """Definitions a text gives: "long form (SF)", "SF (long form)", and the quoted form of
+    company filings, ``Long Name Inc. ("LN")``.
 
     Each result has ``short`` (as written), ``long`` and the long form's ``start`` and ``end``
     in the text."""
@@ -114,6 +172,9 @@ def mine_definitions(text: str) -> list[dict[str, object]]:
     for m in re.finditer(r"\(([^()]{1,60})\)", text):
         inner = m.group(1).strip()
         before = text[: m.start()].rstrip()
+        if _QUOTED.search(inner):  # Name ("SF" or the "Company")
+            found.extend(_quoted_definitions(text, inner, len(before)))
+            continue
         if is_short_form(inner):  # long form (SF)
             span = _long_form_before(text, len(before), inner)
             if span:
