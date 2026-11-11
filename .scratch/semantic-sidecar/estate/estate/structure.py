@@ -114,10 +114,18 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
             continue
         levels = {x for step in steps for x in step}
         finest = [a for a in cols if a in levels and a not in lesser and not any((x, a) in steps for x in cols)]  # no finer level on this entity
+        o = objects.get(str(c.get("object_name")))
         for a in sorted(finest):
+            support = None
+            detail = f"each {c['label'].lower()} carries one {a}, which is a level of a hierarchy"
+            if o is not None and o.column(a) is not None and not o.column(a).sensitive:  # type: ignore[union-attr]
+                rows, filled = reader.query(f"SELECT count(*), count({_q(a)}) FROM {reader.quote(o)}")[0]
+                support = {"rows": int(rows), "rows_with_the_level": int(filled), "share": round(filled / rows, 4) if rows else None}
+                if filled < rows:  # a level only some rows carry: the others are in no tree
+                    detail = f"{int(filled)} of {int(rows)} rows of {c['label']} carry a {a}, which is a level of a hierarchy; the others sit under none"
             roll_ups.append({"id": f"roll_up:{c['object_name']}->value:{a}", "from": cid, "to": vs[a]["id"], "kind": "belongs_to", "status": "proposed",
-                             "label": f"{c['label']} → {vs[a]['label']}", "support": None,
-                             "signals": [{"kind": "refers_to_a_level", "detail": f"each {c['label'].lower()} carries one {a}, which is a level of a hierarchy", "ref": ""}]})
+                             "label": f"{c['label']} → {vs[a]['label']}", "support": support,
+                             "signals": [{"kind": "refers_to_a_level", "detail": detail, "ref": ""}]})
 
     # ---- part-of, from keys ------------------------------------------------------------------
     part_of = []

@@ -66,6 +66,25 @@ def test_master_data_hangs_below_the_finest_level_it_carries(shop: DuckDBReader)
     st = build_structure(shop, _model())
     below = [r for r in st["roll_ups"] if r["kind"] == "belongs_to"]
     assert [(r["from"], r["to"]) for r in below] == [("concept:s.orders", "concept:value:town")]  # not region or country: they follow from the town
+    assert below[0]["support"] == {"rows": 600, "rows_with_the_level": 600, "share": 1.0}
+
+
+def test_a_level_that_only_some_rows_carry_says_how_many(tmp_path: Path) -> None:
+    # Seen on the real dealers (2026-11-11): 95 of 211 carry a dealer group, and the export
+    # proposed "dealer belongs to dealer group" without a word about the other 116.
+    path = tmp_path / "half.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE SCHEMA s")
+    con.execute("CREATE TABLE s.orders AS SELECT 'O' || i AS order_id, CASE WHEN i % 2 = 0 THEN 'T' || (i % 60) END AS town, CASE WHEN i % 2 = 0 THEN 'R' || (i % 60 % 6) END AS region FROM range(600) t(i)")
+    con.execute("CREATE TABLE s.visits AS SELECT i AS visit_no, 'T' || (i % 60) AS town, 'R' || (i % 60 % 6) AS region FROM range(900) t(i)")
+    con.close()
+    model = _model()
+    model["concepts"] = [c for c in model["concepts"] if c["id"] in ("concept:value:town", "concept:value:region", "concept:s.orders")]
+    model["relations"] = [r for r in model["relations"] if r["to"] in ("concept:value:town", "concept:value:region")]
+    st = build_structure(DuckDBReader(path, schemas=["s"], name="half"), model)
+    step = next(r for r in st["roll_ups"] if r["kind"] == "belongs_to")
+    assert step["support"] == {"rows": 600, "rows_with_the_level": 300, "share": 0.5}
+    assert "300 of 600" in step["signals"][0]["detail"]
 
 
 def test_part_of_comes_from_keys_and_a_derived_object_describes_its_entity(shop: DuckDBReader) -> None:
