@@ -1,6 +1,6 @@
 # Running the Ontology page on another machine
 
-State on 2026-11-11, after cut A. Two repositories, one branch name in both:
+State on 2026-11-11, after cut A and the first half of cut B (entities and review items). Two repositories, one branch name in both:
 `claude/blissful-maxwell-bpln7a`. The engine side is in this repository (draft pull request 6);
 the page is in the host's repository (draft pull request 5).
 
@@ -10,9 +10,9 @@ the page is in the host's repository (draft pull request 5).
 |---|---|---|
 | Estate mirror as DuckDB from the host's committed fixture | done | same commands |
 | Metric views printed offline | done, 13 views | same command |
-| `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures | rerun |
-| Engine tests (`estate/tests`, 20) | pass | rerun |
-| Host UI: type check, 139 unit tests, build | pass on Node 24.11.0 | rerun |
+| `estate build` on the mirror | done: 38 concepts, 86 relations, 38 measures; 1,240 entities, 6,417 edges, 7 review items | rerun |
+| Engine tests (`estate/tests`, 26) | pass | rerun |
+| Host UI: type check, 146 unit tests, build | pass on Node 24.11.0 | rerun |
 | Host UI: browser tests of the page with accessibility checks, English and German | pass against the host's e2e world | rerun |
 | Host checks `layout`, `register`, `secrets`, `domain-terms` | pass | rerun |
 | Host checks `names`, `client-terms`, `assistant` | **not run: they need the guard key** | run |
@@ -58,8 +58,13 @@ show as approved, rejected ones are gone from the page and stay in `assertions.j
 
 ## What to say aloud in a demonstration
 
-- The page shows the **schema level only**: concepts, relations, measures. No entities and no
-  graph of instances yet; that is the next cut.
+- The page shows the **ontology** (concepts, relations, measures) and the **entities** read
+  from the data: values, master rows, and facts as counts between them.
+- **Nothing is merged by the machine.** Names that may be the same are listed for a person.
+  Certified merging of a second source is the next step; the scorer for it is measured (97%
+  of true links at 99.7% precision on two real company registers) and not yet connected.
+- **Known blemishes on the page:** the label "Investigation cas"; recall campaigns labelled
+  by their key; review reasons in English on the German page.
 - The ontology is built from the **local mirror**, not read live from Unity Catalog.
 - **Stated** means a metric view or a verified join says so. **Proposed** means mined from the
   data and not yet reviewed by anyone. Nothing is approved automatically.

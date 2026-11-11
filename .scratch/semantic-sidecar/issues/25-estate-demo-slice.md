@@ -29,7 +29,7 @@ induce its schema level, build the instance level, and show both in the host.
 | Cut | Holds | State |
 |---|---|---|
 | A, the ontology | reader, metric views, induction with signals and support, ledger, `graph-export/2`, the host's page | built 2026-11-11 |
-| B, the knowledge graph | table roles, aggregated fact edges, resolution (manufacturers, seeded dealers), document mentions, node view, Turtle download | open |
+| B, the knowledge graph | table roles, aggregated fact edges, resolution (manufacturers, seeded dealers), document mentions, node view, Turtle download | **partly built** (2026-11-11): entities, counted fact edges, review items and the two host views. Open: the seeded second source with certified merges, document mentions, the Turtle download |
 | C, usage signals | joins and terms from recorded questions and queries as evidence and proposals | open |
 | Later | a reader for Unity Catalog run against a live workspace; a service route in the host; the generic workbench as a registry package | open |
 
@@ -73,3 +73,41 @@ key `on` as a boolean.
   names are not joined.
 - Labels come from table names and metric-view display names; nothing writes definitions.
 - No reader for Unity Catalog exists yet, so nothing has run against the estate in Databricks.
+
+## Cut B, as built so far (2026-11-11)
+
+- **Instances** (`estate/instances.py`): every value of a value set and every row of master
+  data is a node. Master data is what other objects refer to, with a single-column key and at
+  most 2,000 rows. A fact row is never a node: a fact is a count on an edge ("this dealer has
+  240 claims", "this dealer and this part meet in 6 claims"), with the object and the columns
+  it was counted over.
+- **Names that may be the same** are listed for review with the reason (the same first word,
+  or a shared rare word). Nothing is merged: without labels there is no certified band, and
+  the export says `certified: false`.
+- **Personal data:** an object about persons gives no node. An object that only carries a
+  contact person's columns gives nodes when the estate file names it under
+  `without_personal_columns`; those columns are still never read. The vehicle estate names
+  the dealers.
+- **On the real mirror:** 1,240 nodes (211 dealers, 464 parts, 76 recall campaigns, 21
+  investigation cases, 468 values of ten value sets), 6,417 edges, 7 review items, among them
+  two spellings of one manufacturer.
+- **The host page** has two more views, entities and names that may be the same; a person's
+  answer downloads with the other decisions.
+
+**Seen on the real export and not fixed:**
+- The label "Investigation cas": the singular rule cuts "cases" wrongly.
+- Recall campaigns have no name column, so their label is their key.
+- An investigation case refers to a subject value identical to its own label, because the
+  subject column is both its name and a value set.
+- Review reasons are English text and show untranslated in the host's German.
+- A manufacturer value carried only by fact rows shows no links.
+
+**Open in cut B.**
+- **The seeded second dealer source with certified merges.** The scorer for it now exists:
+  on two real company registers a scorer fitted on reviewer labels finds 97% of the true
+  links at 99.7% precision ([spike report](../spike/REPORT.md#a-scorer-fitted-on-the-reviewers-labels)).
+  It is not yet connected to the estate build.
+- Mentions of organisations in the estate's documents.
+- The Turtle download (OWL 2 QL and SKOS).
+- A minimum count below which a fact count is not exported.
+
