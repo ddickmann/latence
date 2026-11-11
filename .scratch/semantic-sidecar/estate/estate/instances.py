@@ -86,11 +86,15 @@ def possibly_same(values: list[tuple[str, int]]) -> list[dict[str, Any]]:
 
 
 def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = (),
-                    resolve: tuple[str, ...] = (), without_personal_columns: tuple[str, ...] = ()) -> dict[str, Any]:
+                    resolve: tuple[str, ...] = (), without_personal_columns: tuple[str, ...] = (),
+                    also: dict[str, str] | None = None) -> dict[str, Any]:
     """Nodes, edges and review items for an induced model. ``personal_objects`` never give
     nodes. Neither does any object with a sensitive column, unless it is named in
     ``without_personal_columns``: then its rows are nodes and the sensitive columns stay
-    unread. ``resolve`` names the value sets whose values are names to compare."""
+    unread. ``resolve`` names the value sets whose values are names to compare. ``also`` names
+    objects whose rows are nodes although nothing refers to them (the records of a second
+    source that are to be linked), each with the column that labels a row."""
+    also = also or {}
     both = set(personal_objects) & set(without_personal_columns)
     if both:
         raise ValueError(f"listed as personal and as shown without personal columns: {sorted(both)}")
@@ -132,9 +136,11 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
         obj, key = objects[name], c.get("key") or []
         if any(col.sensitive for col in obj.columns) and name not in without_personal_columns:
             continue
-        if len(key) != 1 or not obj.rows or obj.rows > MAX_ENTITY_ROWS or c["id"] not in referred_to:
+        if len(key) != 1 or not obj.rows or obj.rows > MAX_ENTITY_ROWS or (c["id"] not in referred_to and name not in also):
             continue  # master data is what other objects refer to; a table nothing points at is a list of events
-        label_col = _label_column(obj, key[0])
+        label_col = also.get(name) or _label_column(obj, key[0])
+        if obj.column(label_col) is None or obj.column(label_col).sensitive:  # type: ignore[union-attr]
+            raise ValueError(f"{name}.{label_col} is missing or personal and cannot label a row")
         refs = [col for col in value_cols if obj.column(col) is not None and not obj.column(col).sensitive]  # type: ignore[union-attr]
         select = ", ".join(f"CAST({_q(x)} AS VARCHAR)" for x in [key[0], label_col, *refs])
         for row in run(f"SELECT {select} FROM {reader.quote(obj)} ORDER BY 1"):

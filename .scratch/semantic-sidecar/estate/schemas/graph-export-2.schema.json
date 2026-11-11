@@ -34,6 +34,56 @@
             "induced",
             "declared"
           ]
+        },
+        "resolution": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "seeded",
+            "master",
+            "records",
+            "labels",
+            "labels_from",
+            "target",
+            "certified",
+            "pairs",
+            "linked",
+            "review_pairs"
+          ],
+          "properties": {
+            "seeded": {
+              "type": "boolean"
+            },
+            "certified": {
+              "type": "boolean"
+            },
+            "reject_line_certified": {
+              "type": "boolean"
+            },
+            "target": {
+              "type": "number"
+            },
+            "labels": {
+              "type": "object",
+              "required": [
+                "training",
+                "accept_test",
+                "reject_test",
+                "total"
+              ]
+            },
+            "checked_against_seed": {
+              "type": "object",
+              "required": [
+                "linked",
+                "linked_right",
+                "share_right",
+                "share_found"
+              ]
+            }
+          }
         }
       }
     },
@@ -83,8 +133,33 @@
             "enum": [
               "refers_to",
               "fact_count",
-              "meet_in"
+              "meet_in",
+              "same_as"
             ]
+          },
+          "p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "detail"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -100,7 +175,44 @@
           "b",
           "reason",
           "strength"
-        ]
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "possibly_same"
+            ]
+          },
+          "strength": {
+            "enum": [
+              "strong",
+              "weak"
+            ]
+          },
+          "p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "detail"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -215,6 +327,9 @@
         },
         "decision": {
           "$ref": "#/$defs/decision"
+        },
+        "seeded": {
+          "type": "boolean"
         }
       }
     },

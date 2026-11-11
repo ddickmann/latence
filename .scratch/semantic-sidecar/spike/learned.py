@@ -17,6 +17,7 @@ uniform sample of everything, and spends its labels where the line will be.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -50,16 +51,18 @@ def draw_training(strata: np.ndarray, n: int, rng: np.random.Generator) -> tuple
     return idx, (sizes[strata[idx]] / take[strata[idx]]).astype(float)
 
 
-def fit_score(X: np.ndarray, y: np.ndarray, idx: np.ndarray, weights: np.ndarray | None, model: str = "gbt") -> np.ndarray:
-    """Fit on the labelled pairs ``idx`` (``y`` is read only there) and score every pair."""
+def fit_scorer(X: np.ndarray, y: np.ndarray, idx: np.ndarray, weights: np.ndarray | None, model: str = "gbt") -> Callable[[np.ndarray], np.ndarray]:
+    """Fit on the labelled pairs ``idx`` (``y`` is read only there). Returns the scorer: evidence
+    in, probability out. It can score pairs of another estate that lays out the same evidence."""
     yt = y[idx].astype(int)
     if len(set(yt.tolist())) < 2:
-        return np.full(len(X), float(yt.mean()) if len(yt) else 0.0)
+        base = float(yt.mean()) if len(yt) else 0.0
+        return lambda Z: np.full(len(Z), base)
     if model == "logit":
         mu, sd = X[idx].mean(axis=0), X[idx].std(axis=0)
         sd[sd == 0] = 1.0
         clf = LogisticRegression(max_iter=3000).fit((X[idx] - mu) / sd, yt, sample_weight=weights)
-        return clf.predict_proba((X - mu) / sd)[:, 1]
+        return lambda Z: clf.predict_proba((Z - mu) / sd)[:, 1]
     gbt = HistGradientBoostingClassifier(max_iter=150, learning_rate=0.08, max_leaf_nodes=8, min_samples_leaf=8,
                                          l2_regularization=1.0, random_state=0)
     if min(np.bincount(yt)) >= 10:
@@ -69,9 +72,14 @@ def fit_score(X: np.ndarray, y: np.ndarray, idx: np.ndarray, weights: np.ndarray
         # estate (recall 0.904 against 0.886) and was more precise on the real registers
         # (0.999 against 0.983).
         folds = CalibratedClassifierCV(gbt, method="sigmoid", cv=5).fit(X[idx], yt, sample_weight=weights)
-        return folds.predict_proba(X)[:, 1]
+        return lambda Z: folds.predict_proba(Z)[:, 1]
     gbt.fit(X[idx], yt, sample_weight=weights)
-    return gbt.predict_proba(X)[:, 1]
+    return lambda Z: gbt.predict_proba(Z)[:, 1]
+
+
+def fit_score(X: np.ndarray, y: np.ndarray, idx: np.ndarray, weights: np.ndarray | None, model: str = "gbt") -> np.ndarray:
+    """Fit on the labelled pairs ``idx`` and score every pair."""
+    return fit_scorer(X, y, idx, weights, model)(X)
 
 
 @dataclass

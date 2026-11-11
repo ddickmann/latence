@@ -3,7 +3,7 @@
 name: vehicles
 title: Vehicle and warranty estate
 schema_prefix: nhtsa_
-schemas: [clean, internal, marts]
+schemas: [clean, internal, marts, partner]  # `partner` exists only in the mirror with the seed
 # Objects computed from the others. Where the catalog records lineage this is read from it.
 derived_schemas: [marts]
 # Load and lineage columns: they carry no meaning and are never keys or references.
@@ -29,3 +29,22 @@ personal_objects: [internal.owners, internal.vehicles, internal.warranty_contrac
 without_personal_columns: [internal.dealers]
 # Value sets whose values are names of organisations: spellings that may be the same are listed for review.
 resolve: [manufacturer]
+# The seeded second source (`python -m estate seed`): accounts of a partner portal, generated
+# from the dealers below into the schema `partner` of a copy of the mirror. Generated data,
+# marked as such in the catalog, in the export and on the screen.
+seeded:
+  from: internal.dealers
+  id: dealer_id
+  name: name
+  city: city
+  market: market
+seeded_objects: [partner.service_accounts]
+# Records of a second source linked to a master list by the resolution engine. The first
+# object is the master. A source named under duplicate_free holds no duplicates: no two of its
+# records are ever the same thing. The labels are what a reviewer would have to give.
+link:
+  duplicate_free: [dealer master]
+  labels: {fit: 400, test: 900}
+  records:
+    - {object: internal.dealers, id: dealer_id, name: name, city: city, country: market, country_map: {UK: GB}, source: dealer master}
+    - {object: partner.service_accounts, id: account_id, name: account_name, city: city, country: country, source: partner portal (seeded)}

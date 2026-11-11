@@ -289,7 +289,13 @@ class ArrayClusterer:
     partition and the same counters.
     """
 
-    def __init__(self, n: int, table: NeighbourTable, hard: str) -> None:
+    def __init__(self, n: int, table: NeighbourTable, hard: str, occupied: np.ndarray | None = None) -> None:
+        """``occupied`` gives every record a bit per source that is known to hold no
+        duplicates (0 for a record of any other source). Two clusters that both hold a record
+        of one such source are never merged, whether or not those two records were ever
+        compared."""
+        self.occupied = None if occupied is None else occupied.astype(np.int64).copy()
+        self.blocked_by_source = 0
         self.label = np.arange(n, dtype=np.int32)
         self._members: dict[int, list[int]] = {}  # clusters of two or more; a singleton is implicit
         self.table = table
@@ -317,11 +323,19 @@ class ArrayClusterer:
             return ps[0], hs[0]
         return np.concatenate(ps), np.concatenate(hs)
 
+    def _two_of_one_source(self, ca: int, cb: int) -> bool:
+        if self.occupied is None or not (self.occupied[ca] & self.occupied[cb]):
+            return False
+        self.blocked_by_source += 1
+        return True
+
     def _merge(self, ca: int, cb: int) -> None:
         ma, mb = self.members(ca), self.members(cb)
         if len(ma) < len(mb):
             ca, cb, ma, mb = cb, ca, mb, ma
         self.label[mb] = ca
+        if self.occupied is not None:
+            self.occupied[ca] |= self.occupied[cb]
         self._members[ca] = ma + mb
         self._members.pop(cb, None)
         self.merges += 1
@@ -330,6 +344,8 @@ class ArrayClusterer:
         ca, cb = int(self.label[a]), int(self.label[b])
         if ca == cb:
             return True
+        if self._two_of_one_source(ca, cb):
+            return False
         if self._crossing(ca, cb)[1].any():
             self.blocked_merges += 1
             return False
@@ -341,6 +357,8 @@ class ArrayClusterer:
         ca, cb = int(self.label[a]), int(self.label[b])
         if ca == cb:
             return True
+        if self._two_of_one_source(ca, cb):
+            return False
         ps, hard = self._crossing(ca, cb)
         if ps.size and (ps.min() < strong_negative or math.fsum(ps.tolist()) / ps.size < min_mean):
             self.blocked_by_linkage += 1

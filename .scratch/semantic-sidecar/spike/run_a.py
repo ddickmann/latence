@@ -40,7 +40,7 @@ from er import (
     wilson_lower,
 )
 from learned import certify, draw_training, fit_score
-from pairfeat import ORG_PATTERN, PERSON_PATTERN, org_features, pattern_strata, person_features
+from pairfeat import ORG_PATTERN, PERSON_PATTERN, master_features, org_features, pattern_strata, person_features
 from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, rescue_curve, rescue_region, stage_two, uncertain_region
 
 LEGAL_CANON = {
@@ -54,6 +54,7 @@ EXPAND = {
     "sys": "systems", "consult": "consulting", "hldgs": "holdings",
 }
 STOP = {"the"}
+SKIPPED_PASSES: list[str] = []  # training passes of the first stage that found no pairs, in the last call of score()
 DUCKDB_MEM = os.environ.get("SPIKE_DUCKDB_MEM", "4GB")  # DuckDB spills to disk above this
 TRAIN_MAX = 150_000  # EM trains on at most this many records (seeded sample)
 BLOCK_CAP = 300  # a blocking key shared by more records than this is skipped (logged)
@@ -136,6 +137,9 @@ ORG_PASSES: dict[str, list[str]] = {
     "acronym": ["@acr"],  # special: acr_first on one side == acr_key on the other
     "rare_token": ["@rare"],  # special: share a token whose document frequency is low
 }
+# For linking a small source to a master list: names there reuse a few words, so a shared word
+# is rarely rare. A shared word in the same town, and a wider shared-word pass, propose more.
+LINK_PASSES: dict[str, list[str]] = {**ORG_PASSES, "token+city": ["@tok_city"], "shared_token": ["@rare:300"]}
 PERSON_PASSES: dict[str, list[str]] = {
     "first+surname": ["first_name", "surname"],
     "surname+dob": ["surname", "dob"],
@@ -186,6 +190,20 @@ def _rare_token_pairs(con: duckdb.DuckDBPyConnection, max_df: int = 40) -> tuple
     return sql, 0
 
 
+def _token_city_pairs(con: duckdb.DuckDBPyConnection) -> tuple[str, int]:
+    """Records in one town whose names share a word of four letters or more. A word and town
+    shared by more than BLOCK_CAP records is skipped, like every other key."""
+    con.execute(
+        """CREATE OR REPLACE TEMP TABLE tc AS SELECT DISTINCT rid, t || '|' || city_n AS bk
+        FROM (SELECT rid, city_n, unnest(string_split(name_core, ' ')) AS t FROM recs WHERE city_n IS NOT NULL) WHERE length(t) >= 4"""
+    )
+    skipped = con.execute(f"SELECT count(*) FROM (SELECT bk FROM tc GROUP BY bk HAVING count(*) > {BLOCK_CAP})").fetchall()[0][0]
+    sql = f"""WITH ok AS (SELECT bk FROM tc GROUP BY bk HAVING count(*) BETWEEN 2 AND {BLOCK_CAP}),
+        k AS (SELECT rid, bk FROM tc WHERE bk IN (SELECT bk FROM ok))
+        SELECT a.rid AS l, b.rid AS r FROM k a JOIN k b USING (bk) WHERE a.rid < b.rid"""
+    return sql, int(skipped)
+
+
 def record_numbers(unique_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Number the records 0..n-1 in the order of their ids.
 
@@ -231,6 +249,10 @@ def block(df: pd.DataFrame, passes: dict[str, list[str]]) -> tuple[np.ndarray, n
             sql, skipped = _acronym_pairs(con)
         elif keys == ["@rare"]:
             sql, skipped = _rare_token_pairs(con)
+        elif keys[0].startswith("@rare:"):
+            sql, skipped = _rare_token_pairs(con, max_df=int(keys[0].split(":")[1]))
+        elif keys == ["@tok_city"]:
+            sql, skipped = _token_city_pairs(con)
         else:
             sql, skipped = _pairs_on(con, keys)
         con.execute(f"CREATE OR REPLACE TEMP TABLE pass_t AS SELECT DISTINCT l, r FROM ({sql})")
@@ -286,6 +308,7 @@ def score(
         else ["unique_id", "first_name", "surname", "dob", "birth_place", "postcode_fake", "occupation", "gender"]
     )
     os.makedirs("out/duckdb_tmp", exist_ok=True)
+    SKIPPED_PASSES.clear()
     con = duckdb.connect(config={"memory_limit": DUCKDB_MEM, "temp_directory": "out/duckdb_tmp"})
     db = DuckDBAPI(con)
 
@@ -306,7 +329,7 @@ def score(
             cl.ExactMatch("num_tokens"),
         ]
         prior_rules = [block_on("reg_norm"), block_on("name_core", "city_n")]
-        em_rules = [block_on("pc_out"), block_on("name_core")]
+        em_passes = [["pc_out"], ["name_core"]]
     else:
         comparisons = [
             cl.NameComparison("first_name").configure(term_frequency_adjustments=True),
@@ -318,7 +341,7 @@ def score(
             cl.ExactMatch("gender"),
         ]
         prior_rules = [block_on("first_name", "surname", "dob")]
-        em_rules = [block_on("first_name", "surname"), block_on("dob")]
+        em_passes = [["first_name", "surname"], ["dob"]]
     settings = SettingsCreator(
         link_type="dedupe_only", comparisons=comparisons, blocking_rules_to_generate_predictions=prior_rules
     )
@@ -332,8 +355,15 @@ def score(
     trainer = Linker(tdb.register(train_df.copy()), settings, log_level=40)
     trainer.training.estimate_probability_two_random_records_match(prior_rules, recall=0.6)
     trainer.training.estimate_u_using_random_sampling(max_pairs=2e6)
-    for r in em_rules:
-        trainer.training.estimate_parameters_using_expectation_maximisation(r)
+    from splink.internals.exceptions import EMTrainingException
+
+    for fields in em_passes:
+        try:
+            trainer.training.estimate_parameters_using_expectation_maximisation(block_on(*fields))
+        except EMTrainingException:
+            # A pass over a field no two records share (an estate without postcodes) has
+            # nothing to learn from. The other passes still run; the pass is named in the result.
+            SKIPPED_PASSES.append(" and ".join(fields))
     model = trainer.misc.save_model_to_json()
     if detail is not None:  # keeps gamma_* and bf_* per comparison; probabilities are unchanged
         model["retain_intermediate_calculation_columns"] = True
@@ -488,6 +518,9 @@ def run(
     rescue: int = 0,
     curve: bool = False,
     learned: bool = False,
+    duplicate_free: tuple[str, ...] = (),
+    passes: dict[str, list[str]] | None = None,
+    link_only: bool = False,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes).
@@ -500,7 +533,14 @@ def run(
     ``learned`` replaces the first stage's calibration and test: a scorer is fitted on
     ``n_cal`` reviewer labels over the evidence of every pair (``pairfeat``), the first-stage
     probability being one piece of it, and its accept and reject lines are certified on
-    ``n_ltt`` fresh labels. The label budget is the same as without it."""
+    ``n_ltt`` fresh labels. The label budget is the same as without it.
+
+    ``duplicate_free`` names sources that hold no duplicates (a master list with a key). Two
+    records of such a source are never the same thing: their pairs are ruled out, no cluster
+    ever holds two of them, and the fitted scorer sees where a pair stands among a record's
+    candidates in that source. ``passes`` replaces the blocking passes. ``link_only`` keeps only
+    candidate pairs between two sources: records of one source are then never compared, and
+    meet only through a record of another source they are both linked to."""
     rescore = list(rescore or [])
     if rescue and not rescore:
         raise ValueError("a rescue band needs a scorer: below the reject line the matcher has already said no")
@@ -523,7 +563,12 @@ def run(
     timings: dict[str, float] = {"normalise": time.time() - t0}
 
     t = time.time()
-    left, right, block_stats = block(df, ORG_PASSES if kind == "org" else PERSON_PASSES)
+    left, right, block_stats = block(df, passes or (ORG_PASSES if kind == "org" else PERSON_PASSES))
+    if link_only:
+        src = _codes(by_record.source_system.astype(str).to_numpy())
+        between = src[left] != src[right]
+        left, right = left[between], right[between]
+        block_stats["link_only"] = {"pairs_between_sources": int(between.sum())}
     n_pairs = len(left)
     timings["block"] = time.time() - t
     _stage("block", t0)
@@ -535,6 +580,20 @@ def run(
     _stage("score", t0)
     veto = vetoes(by_record, left, right, kind)
     y = (gold_codes[left] == gold_codes[right]).astype(int)
+    dup_info: dict[str, Any] | None = None
+    occupied: np.ndarray | None = None
+    source_codes, dup_codes = np.zeros(n, dtype=np.int64), set()
+    if duplicate_free:
+        codes, source_names = pd.factorize(by_record.source_system.astype(str).to_numpy())
+        unknown = sorted(set(duplicate_free) - set(source_names.tolist()))
+        if unknown:
+            raise ValueError(f"no record comes from {unknown}; the sources are {sorted(source_names.tolist())}")
+        source_codes = codes.astype(np.int64)
+        dup_codes = {k for k, name in enumerate(source_names.tolist()) if name in duplicate_free}
+        ruled_out = (source_codes[left] == source_codes[right]) & np.isin(source_codes[left], list(dup_codes))
+        veto |= ruled_out
+        occupied = np.where(np.isin(source_codes, list(dup_codes)), np.int64(1) << source_codes, 0).astype(np.int64)
+        dup_info = {"sources": sorted(duplicate_free), "pairs_ruled_out": int(ruled_out.sum())}
 
     # Labelled samples a reviewer would provide: uniform over candidate pairs, disjoint halves.
     rng = np.random.default_rng(seed)
@@ -552,6 +611,14 @@ def run(
         # estate with several records per organisation it cost precision (0.924 against 0.951
         # above even odds at 10^6 records, 2026-11-11), since a record there has several right partners.
         p = fit_score(X, y, cal_idx, weights)
+        if dup_codes:
+            # A second fit that also sees where each pair stands among a record's candidates
+            # in a source without duplicates, read off the first fit's scores.
+            p[veto] = 0.0
+            M, master_names = master_features(left, right, p, source_codes, dup_codes)
+            p = fit_score(np.column_stack([X, M]), y, cal_idx, weights)
+            names = [*names, *master_names]
+            del M
         del X
         p[veto] = 0.0
         n_accept = (2 * n_ltt) // 3
@@ -698,7 +765,7 @@ def run(
 
     # Constrained clustering.
     def cluster(with_expert: bool) -> tuple[np.ndarray, dict[str, int]]:
-        cc = ArrayClusterer(n, table, "expert" if with_expert else "machine")
+        cc = ArrayClusterer(n, table, "expert" if with_expert else "machine", occupied)
         if with_expert:  # the simulated expert resolves the review band from gold
             for i in np.where(rev & (y == 1))[0]:
                 cc.try_union(int(left[i]), int(right[i]))
@@ -708,6 +775,7 @@ def run(
             "merges": cc.merges,
             "blocked_merges": cc.blocked_merges,
             "blocked_by_linkage": cc.blocked_by_linkage,
+            "blocked_by_source": cc.blocked_by_source,
         }
 
     def as_clusters(labels: np.ndarray) -> dict[str, str]:
@@ -778,6 +846,7 @@ def run(
         "seed": seed,
         "blocking": block_stats,
         "labels_used": {"calibration": int(len(cal_idx)), "ltt": int(len(ltt_idx))},
+        "first_stage": {"training_passes_skipped": list(SKIPPED_PASSES)},
         "bands": {
             "accept_at": bands.accept_at,
             "reject_below": bands.reject_below,
@@ -785,6 +854,7 @@ def run(
             "reject_target": reject_target,
             "delta": bands.delta,
             "learned": learned_info,
+            "duplicate_free": dup_info,
             "relabel_stage": relabel_info,
             "second_stage": stage2_info,
             "rescue_curve": curve_info,

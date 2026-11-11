@@ -56,7 +56,9 @@ def squeezed(v: object) -> str | None:
 def _counts_of(values: Sequence[object]) -> np.ndarray:
     """For every record, how many records carry its value (0 where it has none)."""
     c = _codes(values)
-    n = np.bincount(c[c >= 0], minlength=int(c.max()) + 1 if len(c) else 0)
+    if not (c >= 0).any():  # a field no record carries
+        return np.zeros(len(c), dtype=np.float64)
+    n = np.bincount(c[c >= 0])
     return np.where(c >= 0, n[np.clip(c, 0, None)], 0).astype(np.float64)
 
 
@@ -96,6 +98,56 @@ def rank_features(n: int, left: np.ndarray, right: np.ndarray, score: np.ndarray
     lo = np.minimum(out[:, [0, 1]], out[:, [2, 3]])
     hi = np.maximum(out[:, [0, 1]], out[:, [2, 3]])
     return np.column_stack([lo, hi]), ["best_for_both", "margin_min", "best_for_one", "margin_max"]
+
+
+def master_features(left: np.ndarray, right: np.ndarray, score: np.ndarray, source: np.ndarray, duplicate_free: set[int]) -> tuple[np.ndarray, list[str]]:
+    """Where a pair stands among a record's candidates in a source that holds no duplicates.
+
+    Such a source (a master list with a key) has at most one record for any real thing. So for
+    a record of another source, at most one of its candidates there is right: a candidate that
+    is clearly ahead of the others is stronger than its own score says, and two candidates
+    level with each other (the same name in two towns, and no town on the record) are a tie
+    nobody should break by guessing. ``source`` is a code per record, ``duplicate_free`` the
+    codes of the sources without duplicates. For a pair that touches no such source every
+    column is 0.
+
+    ``master_pair`` 1 if it does; ``master_best`` 1 if no other candidate of that source scores
+    higher; ``master_margin`` its score minus the best other candidate's (1 if there is none);
+    ``master_rivals`` how many candidates the record has there.
+    """
+    n_src = int(source.max()) + 1 if len(source) else 1
+    sl, sr = source[left], source[right]
+    out = np.zeros((len(left), 4))
+    best_all = np.ones(len(left))
+    margin_all = np.ones(len(left))
+    for x, m_src, mask in ((left, sr, np.isin(sr, list(duplicate_free)) & (sl != sr)), (right, sl, np.isin(sl, list(duplicate_free)) & (sl != sr))):
+        i = np.where(mask)[0]
+        if not len(i):
+            continue
+        key = x[i].astype(np.int64) * n_src + m_src[i]
+        order = np.lexsort((-score[i], key))
+        k_s, s_s = key[order], score[i][order]
+        first = np.r_[True, k_s[1:] != k_s[:-1]]
+        group = np.cumsum(first) - 1
+        best = s_s[first][group]
+        size = np.bincount(group)[group]
+        second_at = np.where(first)[0] + 1  # the second entry of each group, if it has one
+        second = np.full(int(group.max()) + 1, -np.inf)
+        has = second_at < len(s_s)
+        ok = np.zeros(len(second_at), dtype=bool)
+        ok[has] = ~first[second_at[has]]
+        second[ok] = s_s[second_at[ok]]
+        is_best = s_s >= best
+        other = np.where(is_best, second[group], best)
+        margin = np.where(np.isfinite(other), s_s - other, 1.0)
+        rows = i[order]
+        out[rows, 0] = 1.0
+        best_all[rows] = np.minimum(best_all[rows], is_best.astype(float))
+        margin_all[rows] = np.minimum(margin_all[rows], np.clip(margin, -1.0, 1.0))
+        out[rows, 3] = np.maximum(out[rows, 3], np.minimum(size, 50))
+    touched = out[:, 0] == 1
+    out[touched, 1], out[touched, 2] = best_all[touched], margin_all[touched]
+    return out, ["master_pair", "master_best", "master_margin", "master_rivals"]
 
 
 def org_features(rec: pd.DataFrame, left: np.ndarray, right: np.ndarray, p1: np.ndarray | None = None) -> tuple[np.ndarray, list[str]]:

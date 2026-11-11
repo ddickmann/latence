@@ -2,8 +2,9 @@
 
 The schema level (concepts with their signals and attributes, relations with their support on
 the data, measures bound to concepts) and, when instances are built, the instance level: nodes
-for values and master rows, edges that refer or count, and review items. No value of a
-sensitive column is written, and no row of a personal object.
+for values and master rows, edges that refer or count, records of a second source linked to
+their master record (``same_as``), and review items. No value of a sensitive column is
+written, and no row of a personal object.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
                 "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"],
                 "review_items": instances["meta"]["review_items"], "certified": instances["meta"]["certified"],
                 "nodes_per_concept": instances["meta"]["nodes_per_concept"]},
+            "resolution": None if instances is None else instances["meta"].get("resolution"),
         },
         "concepts": concepts,
         "relations": relations,

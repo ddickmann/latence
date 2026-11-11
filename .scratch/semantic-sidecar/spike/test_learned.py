@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 
 from learned import certify, draw_training, fit_score
-from pairfeat import org_features, pattern_strata, rank_features, squeezed, three_way
-from run_a import normalise_org, run
+from pairfeat import master_features, org_features, pattern_strata, rank_features, squeezed, three_way
+from run_a import LINK_PASSES, ORG_PASSES, block, normalise_org, record_numbers, run
 
 
 def test_a_missing_value_is_never_a_difference() -> None:
@@ -192,3 +192,101 @@ def test_without_the_learned_stage_nothing_changes(tmp_path: Path) -> None:
     two_registers(600, seed=4).to_parquet(path, index=False)
     res = run("estate", path, 400, 600, 7, baseline_max=0)
     assert res["bands"]["learned"] is None
+
+
+def test_an_estate_without_a_single_postcode_still_runs(tmp_path: Path) -> None:
+    # Found when the dealers of the vehicle estate were linked (2026-11-11): they carry no
+    # postcode, and the first stage stopped because one of its training passes found no pairs.
+    frame = two_registers(600, seed=5)
+    frame["postcode"] = None
+    path = tmp_path / "no_postcode.parquet"
+    frame.to_parquet(path, index=False)
+    res = run("estate", path, 400, 900, 7, baseline_max=0, learned=True)
+    assert res["first_stage"]["training_passes_skipped"] == ["pc_out"]
+    assert res["clustering"]["machine_only"]["pairwise_precision"] >= 0.95 and res["clustering"]["machine_only"]["pairwise_recall"] >= 0.9
+
+
+def test_where_a_record_stands_among_its_candidates_in_a_source_without_duplicates() -> None:
+    # records 0, 1, 2 are the master (source 0); 3, 4 and 5 are accounts (source 1)
+    source = np.array([0, 0, 0, 1, 1, 1])
+    left, right = np.array([0, 1, 0, 1, 3, 2]), np.array([3, 3, 4, 4, 4, 5])
+    score = np.array([0.9, 0.9, 0.9, 0.2, 0.8, 0.7])
+    F, names = master_features(left, right, score, source, {0})
+    f = {n: F[:, k].round(2).tolist() for k, n in enumerate(names)}
+    assert names == ["master_pair", "master_best", "master_margin", "master_rivals"]
+    assert f["master_pair"] == [1.0, 1.0, 1.0, 1.0, 0.0, 1.0]  # the pair of two accounts touches no master record
+    assert f["master_margin"][:2] == [0.0, 0.0]  # account 3 fits two master records equally: no way to choose
+    assert f["master_best"][2:4] == [1.0, 0.0] and f["master_margin"][2:4] == [0.7, -0.7]  # account 4 has a clear best
+    assert f["master_best"][5] == 1.0 and f["master_margin"][5] == 1.0 and f["master_rivals"][5] == 1.0  # the only candidate
+
+
+def namesakes(n: int, seed: int) -> pd.DataFrame:
+    """A master list in which every name is carried by two organisations in two towns, and a
+    second source with several accounts of each, a tenth of them typed without a town."""
+    rng = np.random.default_rng(seed)
+    towns = ["Leeds", "York", "Hull", "Bath", "Derby", "Luton"]
+    rows = []
+    for i in range(n):
+        name = f"{'ABCDEFGHJKLM'[i % 12]}{'aeiou'[i % 5]}{'rnst'[i % 4]}{'ow'[i % 2]}{i % 97:02d}field Motors"
+        for twin in range(2):
+            town, key = towns[(i + 3 * twin) % 6], f"{i}-{twin}"
+            rows.append((f"m:{key}", "master", f"{name} Ltd", town, key))
+            for k in range(int(rng.integers(2, 5))):
+                typed = [f"{name} Ltd", name.upper(), f"{name} Limited", f"{name} Workshop"][int(rng.integers(0, 4))]
+                rows.append((f"a:{key}-{k}", "portal", typed, None if rng.random() < 0.1 else town, key))
+    out = pd.DataFrame(rows, columns=["unique_id", "source_system", "name", "city", "cluster"])
+    out["entity_type"], out["country"], out["industry"], out["reg_id"], out["postcode"] = "organization", "GB", None, None, None
+    return out
+
+
+def test_a_source_without_duplicates_is_never_merged_with_itself_and_ties_are_not_guessed(tmp_path: Path) -> None:
+    # Seen on the dealers of the vehicle estate (2026-11-11): different dealers carry the same
+    # name in different towns. Without knowing that the dealer list has no duplicates, the
+    # scorer rated two of them as one, and an account without a town as either.
+    path = tmp_path / "namesakes.parquet"
+    namesakes(400, seed=2).to_parquet(path, index=False)
+    dump = tmp_path / "pairs.npz"
+    res = run("estate", path, 400, 900, 7, baseline_max=0, learned=True, duplicate_free=("master",), dump=dump)
+    z = np.load(dump)
+    cluster = dict(zip(z["ids"].astype(str).tolist(), z["machine"].astype(str).tolist()))
+    masters = [c for u, c in cluster.items() if u.startswith("m:")]
+    assert len(masters) == len(set(masters)) == 800  # no two master records in one cluster
+    assert res["bands"]["duplicate_free"] == {"sources": ["master"], "pairs_ruled_out": int(((np.char.startswith(z["l"].astype(str), "m:")) & (np.char.startswith(z["r"].astype(str), "m:"))).sum())}
+    assert res["bands"]["duplicate_free"]["pairs_ruled_out"] >= 400
+    assert "master_margin" in res["bands"]["learned"]["features"]
+    assert res["bands"]["auto_accept_precision_realised"] >= 0.95 and res["clustering"]["machine_only"]["pairwise_precision"] >= 0.95
+    before = run("estate", path, 400, 900, 7, baseline_max=0, learned=True)
+    assert before["bands"]["accept_at"] is None or before["clustering"]["machine_only"]["pairwise_precision"] < res["clustering"]["machine_only"]["pairwise_precision"]
+
+
+def test_two_spellings_that_share_a_common_word_and_the_town_are_candidates() -> None:
+    # "dornfeld" is in too many names to count as rare, and the two first words differ.
+    rows = [("x:1", "AH Dornfeld GmbH", "Kassel"), ("x:2", "Autohaus Dornfeld GmbH", "Kassel")]
+    rows += [(f"y:{k}", f"Dornfeld Werk {k} GmbH", f"Town{k}") for k in range(60)]
+    raw = pd.DataFrame(rows, columns=["unique_id", "name", "city"])
+    raw["source_system"], raw["entity_type"], raw["postcode"], raw["country"], raw["industry"], raw["reg_id"] = "s", "organization", None, "DE", None, None
+    raw["cluster"] = ["c", "c", *[f"o{k}" for k in range(60)]]
+    df = normalise_org(raw)
+    df["rid"], _ = record_numbers(df.unique_id.to_numpy())
+    pair = tuple(sorted(df.rid[df.unique_id.isin(["x:1", "x:2"])].tolist()))
+    left, right, _ = block(df, ORG_PASSES)
+    assert pair not in set(zip(left.tolist(), right.tolist()))
+    left, right, stats = block(df, LINK_PASSES)
+    assert pair in set(zip(left.tolist(), right.tolist())) and stats["token+city"]["pairs"] >= 1
+
+
+def test_linking_to_a_master_list_compares_no_two_records_of_one_source(tmp_path: Path) -> None:
+    # Seen on the dealers (2026-11-11): three quarters of the true pairs were between two
+    # accounts of one dealer, both typed carelessly. They are not the question when a master
+    # list exists: an account is linked to its dealer, and two accounts meet through it.
+    path = tmp_path / "namesakes.parquet"
+    namesakes(400, seed=2).to_parquet(path, index=False)
+    dump = tmp_path / "pairs.npz"
+    res = run("estate", path, 300, 600, 7, baseline_max=0, learned=True, duplicate_free=("master",), link_only=True, dump=dump)
+    z = np.load(dump)
+    left, right = z["l"].astype(str), z["r"].astype(str)
+    assert len(left) and (np.char.startswith(left, "a:") != np.char.startswith(right, "a:")).all()
+    assert res["blocking"]["link_only"]["pairs_between_sources"] == len(left) < res["blocking"]["_union"]["pairs"]
+    mo = res["clustering"]["machine_only"]
+    assert mo["pairwise_precision"] >= 0.95 and mo["pairwise_recall"] >= 0.8  # two accounts of one dealer meet through the dealer
+
