@@ -151,3 +151,19 @@ embedder has not earned its place. GLiNER-Relex extracts mentions.
 **What follows.** *The upgrade of the resolution engine* loses its last blocker. The pass that
 aims the neural scorer below the reject line, a second stage that uses labels without a
 model, the reviewer's alias loop and the label strategy at 10⁶ are its first inputs.
+
+## After the decision (2026-11-11): what real registers showed
+
+Run the same day, after the go; details in [`../spike/REPORT.md`](../spike/REPORT.md). The
+decision stands as the owner made it; this is what it did not yet know.
+
+- **Two real company registers** (120,192 legal-entity records against the UK company
+  register, the company number withheld): the matcher alone certifies nothing. With GLiDE
+  0.4B auto-accept precision is 0.995 and the machine alone finds 36.5% of the true links;
+  about 594,000 pairs stay in review. The 60% guard is defined on the synthetic estate and is
+  not met here.
+- **The first-stage matcher is the weak part on real names and addresses,** not the model.
+  The fixes belong to *The upgrade of the resolution engine*.
+- **The pass below the reject line** was built and certified nothing with the zero-shot
+  model, at 10⁵ and at 10⁶ (68 minutes, inside the 4-hour budget).
+- **A labels-only stage** reproduces the 10⁶ result in 83 s without a model.

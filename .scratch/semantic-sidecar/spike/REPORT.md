@@ -22,6 +22,11 @@ claim travels; the size of the models' gain is shown on synthetic data only. Wha
 does not show is listed under [Not done](#not-done-and-limits): no real estate, no real text,
 no entity-linking benchmark, no Spark run.
 
+**Added after the decision (2026-11-11):** on two real company registers the precision bar is
+met only with the model, and the machine alone finds 36.5% of the true links, not the 60% the
+guard asks for on the synthetic estate. The first-stage matcher is the weak part there. See
+[After the decision](#after-the-decision-labels-without-a-model-the-pass-below-the-reject-line-real-registers).
+
 ## Setup
 
 - **Machine:** one NVIDIA RTX PRO 4000 Blackwell (24 GB), 48 CPU threads, 125 GB RAM, Python
@@ -175,10 +180,100 @@ By the evidence an acronym mention has (reranker + alias evidence; a mention can
   definition or alias column gives them; acronyms that are not organisations ("VP"), which is
   the extractor's typing decision and was not measured; real documents.
 
+## After the decision: labels without a model, the pass below the reject line, real registers
+
+Run on 2026-11-11 after the owner's go, on the same pod. They change what the go rests on.
+
+### A stage that uses labels and no model
+
+`run_a.py --relabel` draws its labels from the undecided pairs and tests the matcher's own
+probability there. On the 10⁶ estate it accepts all 609,117 undecided pairs at precision
+0.9955 in 83 s: the same outcome as the 56-minute run with the model, as predicted above. On
+the 10⁵ estate it moves nothing; there the undecided pairs are a real mix and only a model
+separates them.
+
+### The pass below the reject line
+
+The reject line loses true matches: at 10⁶, 219,730 true pairs lie below it, a quarter of all.
+`--rescue K` scores the K best-scored rejected pairs with the model. The band is a stage of
+its own: its own labels, its own calibrator, its own test, and its test labels are drawn among
+the pairs the model rates at 0.5 or more (a uniform sample of a band where few pairs match
+cannot certify anything).
+
+| Estate | Band | True matches in the band | Accepted at 0.95 | Model time |
+|---|---|---|---|---|
+| 10⁵ | 20,000 pairs | 2,548 (93% of those lost below the line) | **none** | 50 s |
+| 10⁶ | 1,000,000 pairs | 207,751 (95% of those lost below the line) | **none** | 66 min, 254 pairs/s |
+
+- **Zero-shot GLiDE 0.4B cannot pick the lost matches out at the bar.** The matches are
+  there, and the test abstains at every threshold. Machine-only recall stays at 0.893 (10⁵)
+  and 0.713 (10⁶).
+- **A first version tested the band together with the undecided pairs.** It accepted 668
+  band pairs at 10⁵, of which 83% were right, while the easy pairs carried the pooled test.
+  That is why the band has its own test now. The pooled result is kept as
+  `results/pod/a_100k_relabel_glide_rescue20k_pooled.json`.
+- **How close the model came is not recorded:** the result holds the verdict, not the
+  precision at each threshold. A larger GLiDE variant or a fine-tuned scorer is the next thing
+  to try here; neither has run.
+- **The whole 10⁶ run with this pass took 68 minutes,** inside the owner's 4-hour budget.
+- **Batch size made no difference** to GLiDE's rate (383, 368 and 377 pairs per second at 16,
+  64 and 256), and scores shift slightly with it, enough to move a threshold by 0.01.
+
+### Two real registers
+
+120,192 UK legal-entity records from GLEIF and the UK company register, linked by the company
+number both carry: 102,732 true links between two independently kept sources. One estate adds
+80,000 other companies as distractors (302,924 records), one adds a million (1,222,924). The
+number is withheld from the matcher. Sources and terms:
+[`../research/22-real-data-sources.md`](../research/22-real-data-sources.md).
+
+| Run (302,924 records unless stated) | Auto-accept precision (lower bound) | Machine only: pairwise P / R / F1 | Left for review |
+|---|---|---|---|
+| Matcher alone, with the labels-only stage | none certified | nothing merged | 632,147 pairs |
+| Matcher alone, 1,222,924 records | none certified | nothing merged | 116,343 pairs; 57,000 true pairs below the reject line |
+| + GLiDE 0.4B on the undecided pairs | 0.995 (0.994) | 0.991 / 0.365 / 0.533 | 594,359 pairs |
+| Matcher with the company number (the ceiling) | 0.993 (0.993) | 1.000 / 0.883 / 0.938 | none |
+
+- **On real organisation records the model is what makes any automatic merge possible.** The
+  matcher alone certifies nothing; with GLiDE the precision bar is met. This is the opposite
+  of the public person dataset, where the models added nothing.
+- **The recall guard (60% on the synthetic estate) is far from met here:** the machine alone
+  finds 36.5% of the true links, and almost 600,000 pairs stay in review.
+- **The first-stage matcher is the weak part.** It ranks a true link above a non-link only 94%
+  of the time (AUC 0.938), although the two names are the same apart from case in 95.8% of
+  the true links. What it gets wrong, seen in the data:
+  - true links whose two addresses differ score near zero;
+  - different companies at one address with names one token apart score near one (fund
+    series "A" and "B", "JNR" and "SNR", partnerships numbered "IV C" and "IV D");
+  - half of all candidate pairs are within one register, where no two records can be the
+    same company, and nothing tells the matcher so.
+- **For the engine upgrade (ticket 13):** the weight of an exact name against an address, a
+  veto for names that differ in one short token, a "no duplicates within this source" rule
+  per source, and labels drawn by score instead of uniformly (2,000 uniform labels held 26
+  true links here). None is built.
+- **Cost:** 52 minutes for 632,147 pairs with the GPU shared between two jobs.
+
+### Short names defined in real annual reports
+
+`aliases.mine_definitions` now reads the form company filings use, a name followed by its
+short name in quotes and brackets. On 685 annual reports (60 million characters, the 2020
+test split of the packaged corpus) it finds 6,852 definitions in 568 of them: 6,037 acronyms
+and 815 short names.
+
+- **Precision, counted by hand on a random sample of 80:** 74 right before four fixes (92%),
+  78 right on a fresh sample after them (97%). The count is one reader's; the sample is in
+  `results/pod/sec_definitions.json`.
+- **Only about a third of the definitions name organisations** (29 of 80). The rest are
+  terms, laws, products and measures ("FFO", "GDPR", "EBITDA"). An alias table for linking
+  organisations needs a type check on the long form before it takes a definition.
+- **Not done:** linking the mined short names to the right filer, which needs the
+  regulator's list of company names; and the short names and register links from Wikidata.
+
 ## What the models are worth
 
-- **All of this is on synthetic organisations.** On the public person records neither the
-  reranker nor GLiDE changed a decision.
+- **Most of this is on synthetic organisations.** On the public person records neither the
+  reranker nor GLiDE changed a decision. On two real company registers GLiDE is what makes
+  automatic merges possible at all, at a recall of 36.5% (see the section above).
 - **GLiDE 0.4B beats GLiNER2.5-Decide in every comparison.** Zero-shot, Decide gives nearly
   the same answer for matches and non-matches (its weight in the calibrated score is near
   zero on records; on text it adds about one point of auto-linking). GLiDE 0.4B alone removes
@@ -218,14 +313,16 @@ price, which is not recorded here.
 
 ## Not done and limits
 
-- **No real data.** Every estate and document is synthetic, except the public person
-  dataset. The generator's hard cases follow a few patterns; a real estate will be harder.
+- **Real data is thin and it is harder.** Beside the public person dataset there is now one
+  real organisation estate (two company registers), where the recall guard is not met, and
+  real filings for definitions only. No real customer estate, no real text linked end to end.
 - **No permissively licensed entity-linking benchmark** has been run. Candidates need a
   licence check first: Mewsli-X (code Apache-2.0, text from Wikinews), KILT's linking sets
   (MIT wrapper, mixed sources), ZESHEL (CC BY-SA, share-alike). None is cleared.
 - **No hand-labelled slice** from an enterprise-like corpus.
 - **No Spark run:** the Databricks sandbox does not exist yet.
-- **No larger GLiDE variant, no fine-tuned arm, no model pass below the reject line at 10⁶.**
+- **No larger GLiDE variant and no fine-tuned arm.** The pass below the reject line exists and
+  certified nothing with the zero-shot 0.4B model.
 - **The review-item explanations** from the hosted model have not been generated (they gate
   nothing, and no key was set on this run).
 - **One seed, one run per arm.** Differences of a point or less between arms are not
@@ -241,4 +338,7 @@ price, which is not recorded here.
 - `results/pod/a_100k_*.json`, `a_1m_*.json`, `a_hist50k_*.json`: structured arms.
 - `results/pod/b_*.json`: text arms on `data/text_2k` (`*_docquery.json`: before defect 1).
 - `results/pod/t_*.json`: text arms on `data/text_threads`.
+- `results/pod/a_*_relabel*.json`: the labels-only stage and the rescue band;
+  `results/pod/r_real_*.json`: the two real registers; `results/pod/sec_definitions.json`:
+  definitions mined from annual reports.
 - Earlier runs on the 4-CPU machine: `results/*.json`, described in [`NEXT.md`](NEXT.md).

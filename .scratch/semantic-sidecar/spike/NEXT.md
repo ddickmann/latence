@@ -170,10 +170,14 @@ Open, in the order they matter for the decision:
    one 24 GB GPU.
 2. **One permissively licensed English entity-linking benchmark.** Candidates and their
    licence questions are in the report; none is cleared.
-3. **A real estate and real text,** even a small hand-labelled slice. Everything so far is
-   synthetic except one public person dataset.
-4. **A second stage without a model** (labels drawn from the undecided pairs, no scorer), and
-   **a model pass just below the reject line** at 10⁶, where the missed matches are.
+3. **Partly done 2026-11-11:** two real company registers (`realdata/gleif_ch.py`) and
+   definitions from real annual reports (`realdata/sec_definitions.py`). Open: linking mined
+   short names to the right filer, short names and register links from Wikidata, and any
+   real customer estate.
+4. **Done 2026-11-11:** a second stage without a model (`--relabel`) and a model pass below
+   the reject line (`--rescue`). The first reproduces the 10⁶ result in 83 s; the second
+   certified nothing with zero-shot GLiDE 0.4B. Next there: a larger variant or a fine-tuned
+   scorer, and the first-stage fixes the real registers call for (ticket 13).
 5. **The reviewer's alias loop:** a reviewer's choice for a bare acronym becomes a stored
    alias with its scope. Acronyms that are not organisations ("VP") need the extractor's
    typing measured.
