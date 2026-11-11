@@ -5,7 +5,7 @@ Input: one parquet file in the estate layout of ``run_a.py`` (``unique_id``, ``s
 ``cluster``). ``cluster`` is the truth: it stands in for a reviewer's labels and is what the
 realised figures are counted against. It is never evidence.
 
-Output: one JSON file (``resolution/1``): the certified lines and how many labels they cost,
+Output: one JSON file (``resolution/2``): the certified lines and how many labels they cost,
 every accepted pair and every pair left for review with what it rests on, the cluster of
 every record, and how right the machine was.
 
@@ -27,24 +27,27 @@ from pairfeat import org_features
 from run_a import LINK_PASSES, normalise_org, record_numbers, run
 
 
-def evidence_of(f: dict[str, float], sources: tuple[str, str]) -> list[dict[str, str]]:
-    """What a pair rests on, in words, from its evidence row."""
+def _say(code: str, **params: object) -> dict[str, object]:
+    return {"kind": code.split(".", 1)[0], "code": code, "params": params, "ref": ""}
+
+
+def evidence_of(f: dict[str, float], sources: tuple[str, str]) -> list[dict[str, object]]:
+    """What a pair rests on, from its evidence row, as codes a host renders in its own words
+    (the table of codes is the estate build's ``codes.py``, which checks every one it reads)."""
     if f["name_same"] == 1:
-        name = "the same name"
+        name = _say("name.same")
     elif f["core_same"] == 1:
-        name = "the same name apart from the legal form"
+        name = _say("name.same_core")
     elif f["name_jw"] >= 0.92:
-        name = "nearly the same name"
+        name = _say("name.near")
     else:
-        name = f"the names share {round(100 * f['token_share'])}% of their distinctive words"
-    out = [{"kind": "name", "detail": name}]
-    town = {1.0: "the same town", -1.0: "different towns", 0.0: "one record has no town"}[f["city"]]
-    out.append({"kind": "town", "detail": town})
+        name = _say("name.token_share", percent=round(100 * f["token_share"]))
+    out = [name, _say({1.0: "town.same", -1.0: "town.different", 0.0: "town.missing"}[f["city"]])]
     if f["postcode"] != 0:
-        out.append({"kind": "postcode", "detail": "the same postcode" if f["postcode"] == 1 else "different postcodes"})
+        out.append(_say("postcode.same" if f["postcode"] == 1 else "postcode.different"))
     if f["legal"] == -1:
-        out.append({"kind": "legal form", "detail": "different legal forms"})
-    out.append({"kind": "source", "detail": f"both from {sources[0]}" if sources[0] == sources[1] else f"{sources[0]} and {sources[1]}"})
+        out.append(_say("legal_form.different"))
+    out.append(_say("source.same", source=sources[0]) if sources[0] == sources[1] else _say("source.two", a=sources[0], b=sources[1]))
     return out
 
 
@@ -75,7 +78,7 @@ def link(records: Path, n_cal: int, n_ltt: int, seed: int = 7, max_review: int =
     review = sorted(pairs["review"], key=lambda d: (-d["p"], d["a"], d["b"]))
     b_, mo, learned = res["bands"], res["clustering"]["machine_only"], res["bands"]["learned"]
     return {
-        "format": "resolution/1",
+        "format": "resolution/2",
         "records": int(res["records"]),
         "sources": {str(k): int(v) for k, v in raw.source_system.value_counts().sort_index().items()},
         "candidate_pairs": int(res["blocking"].get("link_only", {}).get("pairs_between_sources", res["blocking"]["_union"]["pairs"])),

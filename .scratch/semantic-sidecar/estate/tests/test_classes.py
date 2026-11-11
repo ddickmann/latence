@@ -83,12 +83,12 @@ def test_a_model_adds_definitions_and_classes_of_its_own_and_a_disagreement_is_k
     by = {s["concept"].removeprefix("concept:"): s for s in out["subclass_of"]}
     assert [c["id"] for c in out["classes"]] == ["class:service_event"] and out["classes"][0]["parent"] == "class:event"  # a class under nothing known is not taken
     claim = by["s.claims"]
-    assert claim["parent"] == "class:service_event" and claim["definition"] == "One warranty claim a dealer filed." and not claim["contested"]
+    assert claim["parent"] == "class:service_event" and claim["definition"] == [{"text": "One warranty claim a dealer filed.", "lang": "en", "origin": "model:fake-model"}] and not claim["contested"]
     assert [x["kind"] for x in claim["signals"]] == ["language_model", "attribute_pattern"]  # the two voices agree: an event either way
     assert by["s.parts"]["contested"] and by["s.parts"]["parent"] == "class:document" and by["s.parts"]["other_parent"] == "class:product"
     assert "made.up" not in by and "value:unit" not in by  # an unknown concept is ignored; "none" places nothing
     bulletin = by["s.bulletins"]  # the model says none of the classes, the columns say document: placed, and marked as disputed
-    assert bulletin["parent"] == "class:document" and bulletin["contested"] and "none of the classes" in bulletin["signals"][0]["detail"]
+    assert bulletin["parent"] == "class:document" and bulletin["contested"] and bulletin["signals"][0]["code"] == "language_model.declined" and bulletin["signals"][0]["text"]["text"] == "every column is a count"
     assert by["s.owners"]["parent"] == "class:person" and [x["kind"] for x in by["s.owners"]["signals"]] == ["attribute_pattern"]  # the model was silent
     assert out["voices"]["language_model"] == "fake-model" and all(s["status"] == "proposed" for s in out["subclass_of"])
     pack, top = fake.seen[0]
@@ -134,7 +134,7 @@ def test_a_recorded_answer_stands_in_for_the_call_and_the_prompt_file_holds_all_
                                 "concepts": [{"id": "concept:s.dealers", "parent": "organisation", "definition": "A workshop.", "reason": "a name with a town"}]})
     out = propose_classes(MODEL, STRUCTURE, voice=voice)
     dealer = next(s for s in out["subclass_of"] if s["concept"] == "concept:s.dealers")
-    assert dealer["definition"] == "A workshop." and dealer["signals"][0]["ref"] == "recorded answer (a model session, 2026-11-11)"
+    assert dealer["definition"][0]["text"] == "A workshop." and dealer["definition"][0]["origin"].startswith("model:recorded answer") and dealer["signals"][0]["ref"] == "recorded answer (a model session, 2026-11-11)"
     assert out["voices"]["language_model"] == "recorded answer (a model session, 2026-11-11)"
     with pytest.raises(ValueError, match="answered_by"):
         RecordedClassModel({"classes": [], "concepts": []})

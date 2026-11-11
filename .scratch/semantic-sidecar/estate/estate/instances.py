@@ -25,6 +25,7 @@ import itertools
 import re
 from typing import Any
 
+from .codes import say
 from .induce import _q, label_of
 from .reader import CatalogObject, Reader
 
@@ -74,13 +75,13 @@ def possibly_same(values: list[tuple[str, int]]) -> list[dict[str, Any]]:
         shared = [w for w in dict.fromkeys(oa + ia) if w in set(ob + ib) and len(w) >= 3 and w not in GENERIC]
         rare_at = max(2, min(3, len(values) // 4))  # a word in more names than this is not a reason
         if oa[0] == ob[0]:
-            reason, strength = f"both names begin with “{oa[0]}”", "strong"
+            reason, strength = say("same_start", word=oa[0]), "strong"
         elif shared and any(seen_in[w] <= rare_at for w in shared):
             rare = next(w for w in shared if seen_in[w] <= rare_at)
-            reason, strength = f"both names contain “{rare}”", "weak"
+            reason, strength = say("shared_rare_word", word=rare), "weak"
         else:
             continue
-        out.append({"a": a, "b": b, "rows_a": na, "rows_b": nb, "reason": reason, "strength": strength,
+        out.append({"a": a, "b": b, "rows_a": na, "rows_b": nb, "reasons": [reason], "strength": strength,
                     "shared_words": shared})
     return out
 
@@ -124,7 +125,7 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
             for pair in possibly_same([(str(v), int(n)) for v, n in rows]):
                 review.append({"id": f"same:{col}:{pair['a']}~{pair['b']}", "kind": "possibly_same", "concept": c["id"],
                                "a": f"value:{col}:{pair['a']}", "b": f"value:{col}:{pair['b']}",
-                               **{k: pair[k] for k in ("rows_a", "rows_b", "reason", "strength", "shared_words")}})
+                               **{k: pair[k] for k in ("rows_a", "rows_b", "reasons", "strength", "shared_words")}})
 
     # ---- entity nodes -----------------------------------------------------------------------
     referred_to = {r["to"] for r in model["relations"] if not r["from"].startswith("concept:value:")}

@@ -22,6 +22,33 @@ def _canon(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+# What an element states, per kind: the fields a decision is about. Support counts, signals and
+# labels are not among them, so a rebuild on changed data keeps the claim, and a proposal that
+# now says something else (another parent, other columns) gets a new one.
+CLAIM_FIELDS: dict[str, tuple[str, ...]] = {
+    "concept": ("id", "kind", "object_name", "column", "key"),
+    "relation": ("id", "from", "to", "columns", "to_columns"),
+    "measure": ("id", "concept", "view", "expr"),
+    "roll_up": ("from", "to", "kind"),
+    "equivalent": ("concepts",),
+    "part_of": ("from", "to", "kind"),
+    "describes": ("from", "to"),
+    "class": ("id", "parent"),
+    "subclass": ("concept", "parent"),
+    "possibly_same": ("a", "b"),
+}
+UNORDERED = {("equivalent", "concepts")}
+
+
+def claim_of(kind: str, el: dict[str, Any]) -> str:
+    """A short digest of what the element states. A decision is made on a claim, not on an id."""
+    if kind == "possibly_same":
+        stated: list[Any] = sorted((el["a"], el["b"]))
+    else:
+        stated = [sorted(el.get(f) or []) if (kind, f) in UNORDERED else el.get(f) for f in CLAIM_FIELDS[kind]]
+    return hashlib.sha256(_canon([kind, stated]).encode()).hexdigest()[:16]
+
+
 def assertions_of(model: dict[str, Any], actor: str = ENGINE) -> list[dict[str, Any]]:
     out = []
     for kind in ("concepts", "relations", "measures"):

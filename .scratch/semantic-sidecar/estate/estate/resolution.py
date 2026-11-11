@@ -1,7 +1,7 @@
 """Records of two sources linked by the resolution engine, brought into the export.
 
 The estate build hands the engine one file of records (``write_records``), runs it
-(``run_resolver``) and reads back its answer (``resolution/1``): which pairs it accepts under a
+(``run_resolver``) and reads back its answer (``resolution/2``): which pairs it accepts under a
 certified line, which it leaves for a person, and what each rests on. ``merge`` turns that into
 ``same_as`` edges, review items and a summary.
 
@@ -20,6 +20,7 @@ from typing import Any
 
 import duckdb
 
+from .codes import check
 from .induce import _q
 from .reader import Reader
 
@@ -78,6 +79,11 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
       is known, how right it was.
 
     The result is a new instances dict; the one passed in is not changed."""
+    if resolution.get("format") != "resolution/2":
+        raise ValueError(f"the resolver's answer is {resolution.get('format')!r}; this build reads resolution/2")
+    for d in resolution["accepted"] + resolution["review"]:
+        for e in d["evidence"]:
+            check(e)
     master_obj = link["records"][0]["object"]
     prefix = master_obj + ":"
     known = {n["id"] for n in instances["nodes"]}
@@ -108,7 +114,7 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
             continue
         a, b = (d["a"], d["b"]) if d["a"].startswith(prefix) else (d["b"], d["a"])
         review.append({"id": f"same:{a}~{b}", "kind": "possibly_same", "concept": concept_of[master_obj], "a": a, "b": b,
-                       "reason": "; ".join(e["detail"] for e in d["evidence"] if e["kind"] != "source"),
+                       "reasons": [e for e in d["evidence"] if e["kind"] != "source"],
                        "strength": "strong" if d["p"] >= 0.5 else "weak", "p": d["p"], "evidence": d["evidence"]})
     others = sum(not r.startswith(prefix) for r in resolution["clusters"])
     summary: dict[str, Any] = {
@@ -119,7 +125,7 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
         "records": resolution["records"],
         "candidate_pairs": resolution["candidate_pairs"],
         "labels": {k: resolution["labels"][k] for k in ("training", "accept_test", "reject_test", "total")},
-        "labels_from": "the seed's truth, standing in for a reviewer" if truth is not None else "a reviewer",
+        "labels_from": "seed_truth" if truth is not None else "reviewer",
         "target": resolution["lines"]["target"],
         "certified": bool(resolution["certified"]),
         "reject_line_certified": resolution["lines"]["reject_below"] is not None,

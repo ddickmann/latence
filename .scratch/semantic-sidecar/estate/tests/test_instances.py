@@ -78,5 +78,5 @@ def test_names_that_may_be_the_same_are_listed_with_the_reason() -> None:
     assert found[("Kia America, Inc.", "Kia Motors America")]["strength"] == "strong"
     assert found[("Chrysler (FCA US LLC)", "Chrysler (FCA US, LLC)")]["strength"] == "strong"
     weak = found[("Southeast Toyota Distributors, LLC", "Toyota Motor Corporation")]
-    assert weak["strength"] == "weak" and "toyota" in weak["reason"]
+    assert weak["strength"] == "weak" and weak["reasons"] == [{"kind": "shared_rare_word", "code": "shared_rare_word", "params": {"word": "toyota"}, "ref": ""}]
     assert not any("Ford Motor Company" in k for k in found)  # "motor" is in too many names to be a reason

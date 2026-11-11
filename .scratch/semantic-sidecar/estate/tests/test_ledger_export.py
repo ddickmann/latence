@@ -12,7 +12,7 @@ from estate.ledger import read_decisions
 
 from .conftest import OPTIONS, SENSITIVE, VIEWS
 
-SCHEMA = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "graph-export-2.schema.json").read_text())
+SCHEMA = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "graph-export-3.schema.json").read_text())
 
 
 @pytest.fixture()

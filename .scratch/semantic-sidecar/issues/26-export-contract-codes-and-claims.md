@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -49,3 +49,35 @@ English and German; an unknown code is shown raw, never hidden.
 ## Not tested, and why
 
 The wording of each message. It is read by a person in the browser walk, in both languages.
+
+## Answer
+
+Built on 2026-11-11.
+
+- **Engine.** `estate/codes.py` holds 59 codes with their parameters and English; `say()`
+  refuses an unknown code or a wrong parameter where the statement is made. Signals, reasons
+  on review items (`reasons`, a list) and the matcher's evidence are statements; the matcher
+  writes `resolution/2` and the build refuses another format or a code the table does not
+  hold. Definitions are lists of texts with language and origin; the six top classes carry the
+  code of their label and definition. `claim` is on concepts, relations, measures, the four
+  kinds of structure, proposed classes, placements and review pairs (`ledger.claim_of`).
+- **Contract.** `schemas/graph-export-3.schema.json`; `schemas/codes.json` is generated and a
+  test fails when it is stale. The Turtle file writes definitions with their language tag.
+- **Vehicle estate.** The rebuild validates against schema 3: 4,096 statements over 41 codes,
+  the same 39 concepts, 86 relations, 38 measures, 2,514 nodes and 3,857 triples as before.
+- **Host.** The page reads schema 3 and says every code from its own English and German
+  messages. Its tests: 196 unit and route tests (6 new), and the browser walk in both
+  languages with the accessibility checks.
+- **Tests here:** 58 pass (7 new): no sentence in the export; every statement in the export is
+  in the table with its parameters; a wrong parameter fails where it is made; the committed
+  table is the code's; a claim follows what is stated and not what was counted; every
+  decidable element carries one; an answer of the matcher in another format or with an unknown
+  code is refused.
+
+**Left to later tickets, on purpose:**
+
+- the page does not yet write the claim into `decisions.jsonl`, and the ledger does not read
+  it (ticket 28);
+- the labels of the six top classes are shown in English on the German page; their codes are
+  in the file (`label_code`), the page's tree does not use them yet (ticket 28, page work);
+- a model's definition exists in English only (ticket 31).

@@ -26,14 +26,8 @@ import json
 import re
 from typing import Any, Protocol
 
-TOP: dict[str, str] = {
-    "organisation": "A company, a public body or a unit of one that acts under a name.",
-    "person": "A human being. Records of persons are never shown.",
-    "product": "A thing that is made, sold, owned or repaired, or a kind of such things.",
-    "event": "Something that happened at a time and involves other things: a claim, a visit, a recall.",
-    "place": "A location or an area: a town, a region, a market.",
-    "document": "A text someone wrote and filed: a bulletin, a report, a letter.",
-}
+from .codes import TOP, say, text
+
 PERSONAL_NAME = re.compile(r"^(name|first_?name|last_?name|surname|full_?name|birth|street|address)", re.I)
 ORG_NAME = re.compile(r"(^|_)name$", re.I)
 PLACE = re.compile(r"^(city|town|region|country|postcode|zip|market|state|county)$", re.I)
@@ -63,9 +57,9 @@ def describe(model: dict[str, Any], structure: dict[str, Any], personal_objects:
     return out
 
 
-def pattern_voice(pack: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+def pattern_voice(pack: list[dict[str, Any]]) -> dict[str, tuple[str, dict[str, Any]]]:
     """concept id -> (top class, why), for the concepts whose columns say something."""
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, dict[str, Any]]] = {}
     for c in pack:
         cols = c["columns"]
         names = [x["name"] for x in cols]
@@ -74,20 +68,20 @@ def pattern_voice(pack: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
         dated = [x["name"] for x in cols if DATED.search(x["type"]) or DATED.search(x["name"])]
         if c["kind"] == "reference":
             if PLACE.search(str(c["object"])):
-                out[c["id"]] = ("place", f"the column is called {c['object']}")
+                out[c["id"]] = ("place", say("attribute_pattern.place", column=str(c["object"])))
             continue
         if c["kind"] == "derived":
             continue
         if personal_names:
-            out[c["id"]] = ("person", f"it carries personal columns that name a human ({', '.join(personal_names)})")
+            out[c["id"]] = ("person", say("attribute_pattern.person", columns=personal_names))
         elif open_names and (any(PLACE.search(n) for n in names) or any(n.startswith("contact_") for n in names)):
-            out[c["id"]] = ("organisation", f"it carries a name that is not personal ({open_names[0]}) with a place or a contact")
+            out[c["id"]] = ("organisation", say("attribute_pattern.organisation", column=open_names[0]))
         elif dated and c["refers_to"] and (c["kind"] == "fact" or len(c["refers_to"]) >= 2):
-            out[c["id"]] = ("event", f"it is dated ({dated[0]}) and points at {', '.join(c['refers_to'][:3])}")
+            out[c["id"]] = ("event", say("attribute_pattern.event", column=dated[0], targets=c["refers_to"][:3]))
         elif any(TEXT.search(n) for n in names) and not c["referred_to_by"]:
-            out[c["id"]] = ("document", f"it carries text columns ({', '.join(n for n in names if TEXT.search(n))}) and nothing refers to it")
+            out[c["id"]] = ("document", say("attribute_pattern.document", columns=[n for n in names if TEXT.search(n)]))
         elif c["referred_to_by"] and (any(THING.search(k) for k in c["key"]) or THING.search(str(c["object"]))):
-            out[c["id"]] = ("product", f"other concepts refer to it ({', '.join(c['referred_to_by'][:3])}) and its key names a thing")
+            out[c["id"]] = ("product", say("attribute_pattern.product", sources=c["referred_to_by"][:3]))
     return out
 
 
@@ -171,6 +165,12 @@ class RecordedClassModel:
         return {"classes": self.answer["classes"], "concepts": self.answer["concepts"]}
 
 
+def _with_reason(signal: dict[str, Any], reason: str | None, origin: str) -> dict[str, Any]:
+    """A model's own words ride along with the statement that it spoke, marked as its text."""
+    said = text(reason, origin)
+    return {**signal, "text": said[0]} if said else signal
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
@@ -184,6 +184,7 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
     by_pattern = pattern_voice(pack)
     answer = voice.propose(pack, TOP) if voice is not None else {"classes": [], "concepts": []}
     served = answer.get("served_by") or (voice.name if voice is not None else None)
+    origin = f"model:{served}"
 
     mid, parent_of = [], {}
     names = {_slug(k): f"class:{k}" for k in TOP}
@@ -194,8 +195,8 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
         if parent is None or _slug(c["name"]) in TOP:
             continue  # a class that hangs under nothing we know is not taken
         parent_of[names[_slug(c["name"])]] = parent
-        mid.append({"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": c["definition"], "status": "proposed",
-                    "signals": [{"kind": "language_model", "detail": f"proposed by {served} as a class between concepts and {c['parent']}", "ref": ""}]})
+        mid.append({"id": names[_slug(c["name"])], "label": c["name"], "parent": parent, "definition": text(c["definition"], origin), "status": "proposed",
+                    "signals": [say("language_model.class", str(served), model=str(served), parent=c["parent"])]})
 
     def top_of(cid: str | None) -> str | None:
         seen: set[str] = set()
@@ -212,22 +213,23 @@ def propose_classes(model: dict[str, Any], structure: dict[str, Any], personal_o
         signals = []
         declined = bool(m and m_parent is None and _slug(m["parent"]) == "none")
         if m and m_parent:
-            signals.append({"kind": "language_model", "detail": m["reason"], "ref": str(served)})
+            signals.append(_with_reason(say("language_model.placed", str(served), model=str(served)), m.get("reason"), origin))
         elif declined and p:
-            signals.append({"kind": "language_model", "detail": f"none of the classes: {m['reason']}", "ref": str(served)})
+            signals.append(_with_reason(say("language_model.declined", str(served), model=str(served)), m.get("reason"), origin))
         if p:
-            signals.append({"kind": "attribute_pattern", "detail": p[1], "ref": ""})
+            signals.append(p[1])
         parent = m_parent or (f"class:{p[0]}" if p else None)
         if parent is None:
             continue
         contested = bool(p and ((m_parent and top_of(m_parent) != f"class:{p[0]}") or declined))
         subclass_of.append({"id": f"subclass:{c['id'].removeprefix('concept:')}", "concept": c["id"], "parent": parent, "status": "proposed",
-                            "definition": (m or {}).get("definition", ""), "contested": contested,
+                            "definition": text((m or {}).get("definition"), origin), "contested": contested,
                             **({"other_parent": f"class:{p[0]}"} if contested and p and m_parent else {}), "signals": signals})
     used = {s["parent"] for s in subclass_of} | {s.get("other_parent") for s in subclass_of} | set(parent_of.values())
     mid = [m for m in mid if sum(s["parent"] == m["id"] for s in subclass_of) + sum(v == m["id"] for v in parent_of.values()) >= 1]
     return {
-        "top": [{"id": f"class:{k}", "label": k.capitalize(), "definition": v, "status": "declared", "in_use": f"class:{k}" in used} for k, v in TOP.items()],
+        "top": [{"id": f"class:{k}", "label": k.capitalize(), "label_code": f"top_class.{k}.label", "definition": text(v, "engine", code=f"top_class.{k}.definition"),
+                 "status": "declared", "in_use": f"class:{k}" in used} for k, v in TOP.items()],
         "classes": mid,
         "subclass_of": subclass_of,
         "voices": {"attribute_pattern": True, "language_model": served},

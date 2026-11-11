@@ -46,7 +46,7 @@ def test_a_reference_that_holds_for_half_the_rows_is_dropped_and_listed(reader: 
 def test_concepts_carry_their_key_their_kind_and_their_signals(reader: DuckDBReader) -> None:
     by = {c["id"]: c for c in induce(reader)["concepts"]}
     dealers, claims = by["concept:shop.dealers"], by["concept:shop.claims"]
-    assert dealers["key"] == ["dealer_id"] and dealers["kind"] == "entity" and dealers["definition"] == "One row per dealer."
+    assert dealers["key"] == ["dealer_id"] and dealers["kind"] == "entity" and dealers["definition"] == "One row per dealer."  # the catalog's comment; the export marks it as such
     assert claims["kind"] == "fact" and claims["status"] == "declared"  # a metric view's source, with measures
     assert {s["kind"] for s in dealers["signals"]} >= {"unique_key", "referenced"}
     assert label_of("recall_campaigns") == "Recall campaign"

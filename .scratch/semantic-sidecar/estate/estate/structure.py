@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
+from .codes import say
 from .induce import SUPPORT_FLOOR, _q
 from .reader import CatalogObject, Reader
 
@@ -84,8 +85,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         if checked[(a, b)]["values_breaking"] == 0 and checked[(b, a)]["values_breaking"] == 0:
             keep, other = (a, b) if len(vs[a]["objects"]) >= len(vs[b]["objects"]) else (b, a)
             equivalent.append({"id": f"equivalent:{keep}={other}", "concepts": [vs[keep]["id"], vs[other]["id"]], "status": "proposed",
-                               "signals": [{"kind": "same_grouping", "ref": "", "detail":
-                                            f"in all {len(checked[(a, b)]['objects'])} objects that carry both, each {keep} goes with exactly one {other} and each {other} with exactly one {keep}"}]})
+                               "signals": [say("same_grouping", objects=len(checked[(a, b)]["objects"]), a=keep, b=other)]})
     lesser = {e["concepts"][1].removeprefix("concept:value:") for e in equivalent}
     same = {frozenset(c.removeprefix("concept:value:") for c in e["concepts"]) for e in equivalent}
 
@@ -98,11 +98,11 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
     roll_ups = []
     for (a, b), s in sorted(steps.items()):
         clean = s["values_breaking"] == 0
-        detail = (f"in all {len(s['objects'])} objects that carry both, each {a} goes with exactly one {b}" if clean else
-                  f"over {len(s['objects'])} objects, {s['values_checked'] - s['values_breaking']} of {s['values_checked']} values of {a} go with exactly one {b}")
+        signal = (say("functional_dependency.all", objects=len(s["objects"]), a=a, b=b) if clean else
+                  say("functional_dependency.most", objects=len(s["objects"]), holding=s["values_checked"] - s["values_breaking"], checked=s["values_checked"], a=a, b=b))
         roll_ups.append({"id": f"roll_up:value:{a}->value:{b}", "from": vs[a]["id"], "to": vs[b]["id"], "kind": "roll_up", "status": "proposed",
                          "label": f"{vs[a]['label']} → {vs[b]['label']}", "support": s,
-                         "signals": [{"kind": "functional_dependency", "detail": detail, "ref": ""}]})
+                         "signals": [signal]})
     # Master data below the value set it refers to: the last level of a hierarchy.
     refers = [r for r in model["relations"] if r["to"].startswith("concept:value:") and not r["from"].startswith("concept:value:")]
     below: dict[str, list[str]] = {}
@@ -117,15 +117,15 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         o = objects.get(str(c.get("object_name")))
         for a in sorted(finest):
             support = None
-            detail = f"each {c['label'].lower()} carries one {a}, which is a level of a hierarchy"
+            signal = say("refers_to_a_level.all", concept=c["label"], level=a)
             if o is not None and o.column(a) is not None and not o.column(a).sensitive:  # type: ignore[union-attr]
                 rows, filled = reader.query(f"SELECT count(*), count({_q(a)}) FROM {reader.quote(o)}")[0]
                 support = {"rows": int(rows), "rows_with_the_level": int(filled), "share": round(filled / rows, 4) if rows else None}
                 if filled < rows:  # a level only some rows carry: the others are in no tree
-                    detail = f"{int(filled)} of {int(rows)} rows of {c['label']} carry a {a}, which is a level of a hierarchy; the others sit under none"
+                    signal = say("refers_to_a_level.some", filled=int(filled), rows=int(rows), concept=c["label"], level=a)
             roll_ups.append({"id": f"roll_up:{c['object_name']}->value:{a}", "from": cid, "to": vs[a]["id"], "kind": "belongs_to", "status": "proposed",
                              "label": f"{c['label']} → {vs[a]['label']}", "support": support,
-                             "signals": [{"kind": "refers_to_a_level", "detail": detail, "ref": ""}]})
+                             "signals": [signal]})
 
     # ---- part-of, from keys ------------------------------------------------------------------
     part_of = []
@@ -138,8 +138,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         for r in sorted(wholes, key=lambda r: r["to"]):
             part_of.append({"id": f"part_of:{c['id'].removeprefix('concept:')}->{r['to'].removeprefix('concept:')}", "from": c["id"], "to": r["to"],
                             "kind": "part_of" if len(wholes) == 1 else "links", "status": "proposed", "relation": r["id"],
-                            "signals": [{"kind": "key_contains_key", "ref": "",
-                                         "detail": f"the key of {c['label']} ({', '.join(c['key'])}) contains the key of {concepts[r['to']]['label']} ({', '.join(r['columns'])})"}]})
+                            "signals": [say("key_contains_key", concept=c["label"], key=list(c["key"]), whole=concepts[r["to"]]["label"], columns=list(r["columns"]))]})
 
     # ---- the same thing at another layer -----------------------------------------------------
     by_key: dict[tuple[str, ...], list[dict[str, Any]]] = {}
@@ -154,7 +153,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         for d in sorted((c for c in group if c["kind"] == "derived"), key=lambda c: c["id"]):
             describes.append({"id": f"describes:{d['id'].removeprefix('concept:')}->{base[0]['id'].removeprefix('concept:')}", "from": d["id"], "to": base[0]["id"],
                               "kind": "describes", "status": "proposed",
-                              "signals": [{"kind": "same_key", "detail": f"a derived object with the key of {base[0]['label']} ({', '.join(key)})", "ref": ""}]})
+                              "signals": [say("same_key", base=base[0]["label"], key=list(key))]})
 
     return {"roll_ups": roll_ups, "equivalent": equivalent, "part_of": part_of, "describes": describes,
             "_steps": {f"{a}->{b}": s["objects"] for (a, b), s in steps.items()}}
@@ -200,9 +199,9 @@ def explain_review(review: list[dict[str, Any]], edges: list[dict[str, Any]], no
         if pa is None or pb is None:
             out.append(item)
             continue
-        level = concept_label.get(of.get(pa, ""), "level").lower()
+        level = concept_label.get(of.get(pa, ""), "")
         if pa == pb:
-            out.append({**item, "reason": f"{item['reason']}; both belong to the {level} {label.get(pa, pa)}", "strength": "strong", "same_parent": pa})
+            out.append({**item, "reasons": [*item["reasons"], say("same_parent", pa, level=level, parent=label.get(pa, pa))], "strength": "strong", "same_parent": pa})
         else:
-            out.append({**item, "reason": f"{item['reason']}; they belong to different {level}s ({label.get(pa, pa)}, {label.get(pb, pb)})", "strength": "weak"})
+            out.append({**item, "reasons": [*item["reasons"], say("different_parents", level=level, a=label.get(pa, pa), b=label.get(pb, pb))], "strength": "weak"})
     return out

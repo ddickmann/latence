@@ -3,7 +3,7 @@
 Prototype code for map ticket [*The Ontology page over the estate*](../issues/25-estate-demo-slice.md).
 It reads an estate (tables, columns, comments, metric views), induces the schema level of its
 ontology with the evidence for every element, keeps assertions and decisions in an append-only
-ledger, and writes the file a screen reads (`graph-export/2`). Cut A covers the schema level
+ledger, and writes the file a screen reads (`graph-export/3`). Cut A covers the schema level
 only: no rows, no values.
 
 It is not a shipped package. It has its own pinned environment and its own tests.
@@ -23,7 +23,7 @@ PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests          # a toy estate wit
 | `estate/metric_views.py` | reads metric-view definitions |
 | `estate/induce.py` | concepts, relations, value sets, hierarchies, attributes, measure bindings, each with signals and support |
 | `estate/ledger.py` | assertions and decisions, append-only; the layer is their replay |
-| `estate/export.py` | the `graph-export/2` file; its JSON Schema is in `schemas/` |
+| `estate/export.py` | the `graph-export/3` file; its JSON Schema and the table of codes are in `schemas/` |
 | `estates/vehicles.yaml` | what the engine is told about the vehicle and warranty estate |
 
 A person's decisions go into `out/<estate>/decisions.jsonl`, one JSON object per line with

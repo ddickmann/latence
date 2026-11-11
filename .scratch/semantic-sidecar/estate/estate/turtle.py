@@ -39,6 +39,11 @@ def _lit(text: object) -> str:
     return f'"{s}"'
 
 
+def _defined(texts: list[dict[str, str]] | None) -> list[tuple[str, str]]:
+    """One ``skos:definition`` per text, with its language tag."""
+    return [("skos:definition", f"{_lit(t['text'])}@{t['lang']}") for t in texts or []]
+
+
 def _xsd(sql_type: str) -> str:
     t = sql_type.upper()
     return "xsd:" + next((x for key, x in XSD if key in t), "string")
@@ -66,7 +71,7 @@ def _status(el: dict[str, Any]) -> str:
 
 
 def to_turtle(export: dict[str, Any], base: str) -> str:
-    """The Turtle text for an export (``graph-export/2``). The same export gives the same text."""
+    """The Turtle text for an export (``graph-export/3``). The same export gives the same text."""
     if not re.match(r"^[a-z][a-z0-9+.-]*:", base) or not base.endswith(("/", "#", ":")):
         raise ValueError("the base address must be an absolute IRI that ends in '/', '#' or ':'")
     w = _Writer(base)
@@ -80,9 +85,9 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
 
     classes = export.get("classes") or {}
     for c in classes.get("top", []):
-        w.add(w.iri(c["id"]), [("a", "owl:Class"), ("rdfs:label", _lit(c["label"])), ("skos:definition", _lit(c["definition"])), ("v:reviewStatus", _lit("stated"))])
+        w.add(w.iri(c["id"]), [("a", "owl:Class"), ("rdfs:label", _lit(c["label"])), *_defined(c["definition"]), ("v:reviewStatus", _lit("stated"))])
     for c in classes.get("classes", []):
-        w.add(w.iri(c["id"]), [("a", "owl:Class"), ("rdfs:label", _lit(c["label"])), ("skos:definition", _lit(c["definition"])),
+        w.add(w.iri(c["id"]), [("a", "owl:Class"), ("rdfs:label", _lit(c["label"])), *_defined(c["definition"]),
                                ("rdfs:subClassOf", w.iri(c["parent"])), ("v:reviewStatus", _lit(_status(c)))])
     kind_of = {s["concept"]: s for s in classes.get("subclass_of", [])}
 
@@ -93,9 +98,7 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
             pairs = [("a", "skos:ConceptScheme"), ("rdfs:label", _lit(c["label"])), ("v:reviewStatus", _lit(status))]
         else:
             pairs = [("a", "owl:Class"), ("rdfs:label", _lit(c["label"])), ("v:reviewStatus", _lit(status))]
-        definition = c.get("definition") or (kind_of.get(c["id"]) or {}).get("definition")
-        if definition:
-            pairs.append(("skos:definition", _lit(definition)))
+        pairs.extend(_defined(c.get("definition") or (kind_of.get(c["id"]) or {}).get("definition")))
         w.add(iri, pairs)
         placed = kind_of.get(c["id"])
         if placed and c["id"] not in schemes:

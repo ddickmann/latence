@@ -9,6 +9,7 @@ import duckdb
 import pytest
 
 from estate.reader_duckdb import DuckDBReader
+from estate.codes import render, say
 from estate.structure import broader_edges, build_structure, explain_review
 
 
@@ -50,9 +51,9 @@ def test_roll_ups_are_proposed_with_their_support_and_what_follows_from_two_is_l
     assert "roll_up:value:town->value:country" not in steps  # it follows from town -> region -> country
     assert not any("colour" in k for k in steps)  # a colour goes with any region: no hierarchy
     clean, near = steps["roll_up:value:town->value:region"], steps["roll_up:value:brand_name->value:brand"]
-    assert clean["support"]["values_breaking"] == 0 and "each town goes with exactly one region" in clean["signals"][0]["detail"]
+    assert clean["support"]["values_breaking"] == 0 and clean["signals"][0] == {"kind": "functional_dependency", "code": "functional_dependency.all", "params": {"objects": 2, "a": "town", "b": "region"}, "ref": ""}
     assert near["support"] == {"objects": ["s.orders", "s.visits"], "values_checked": 22, "values_breaking": 2, "share": 0.9091}
-    assert "20 of 22 values of brand_name" in near["signals"][0]["detail"]
+    assert near["signals"][0]["code"] == "functional_dependency.most" and near["signals"][0]["params"] == {"objects": 2, "holding": 20, "checked": 22, "a": "brand_name", "b": "brand"}
     assert all(r["status"] == "proposed" for r in st["roll_ups"])  # nothing here is accepted by the machine
 
 
@@ -84,13 +85,13 @@ def test_a_level_that_only_some_rows_carry_says_how_many(tmp_path: Path) -> None
     st = build_structure(DuckDBReader(path, schemas=["s"], name="half"), model)
     step = next(r for r in st["roll_ups"] if r["kind"] == "belongs_to")
     assert step["support"] == {"rows": 600, "rows_with_the_level": 300, "share": 0.5}
-    assert "300 of 600" in step["signals"][0]["detail"]
+    assert step["signals"][0]["code"] == "refers_to_a_level.some" and step["signals"][0]["params"]["filled"] == 300 and step["signals"][0]["params"]["rows"] == 600
 
 
 def test_part_of_comes_from_keys_and_a_derived_object_describes_its_entity(shop: DuckDBReader) -> None:
     st = build_structure(shop, _model())
     assert [(p["from"], p["to"], p["kind"]) for p in st["part_of"]] == [("concept:s.lines", "concept:s.orders", "part_of")]
-    assert "contains the key of Order (order_id)" in st["part_of"][0]["signals"][0]["detail"]
+    assert st["part_of"][0]["signals"][0]["params"] == {"concept": "Line", "key": ["order_id", "line_no"], "whole": "Order", "columns": ["order_id"]}
     assert [(d["from"], d["to"]) for d in st["describes"]] == [("concept:m.order_profile", "concept:s.orders")]
 
 
@@ -110,10 +111,10 @@ def test_the_hierarchy_is_a_reason_for_or_against_two_names_being_the_same() -> 
     nodes += [{"id": f"value:make:{n}", "concept": "concept:value:make", "label": n} for n in ("KIA", "TOYOTA", "LEXUS")]
     edges = [{"from": "value:maker:Kia America", "to": "value:make:KIA", "kind": "broader"}, {"from": "value:maker:Kia Motors", "to": "value:make:KIA", "kind": "broader"},
              {"from": "value:maker:Toyota Corp", "to": "value:make:TOYOTA", "kind": "broader"}, {"from": "value:maker:Lexus Corp", "to": "value:make:LEXUS", "kind": "broader"}]
-    review = [{"id": "1", "a": "value:maker:Kia America", "b": "value:maker:Kia Motors", "reason": "both names begin with “kia”", "strength": "weak"},
-              {"id": "2", "a": "value:maker:Toyota Corp", "b": "value:maker:Lexus Corp", "reason": "both names contain “corp”", "strength": "strong"},
-              {"id": "3", "a": "value:other:x", "b": "value:other:y", "reason": "r", "strength": "weak"}]
+    review = [{"id": "1", "a": "value:maker:Kia America", "b": "value:maker:Kia Motors", "reasons": [say("same_start", word="kia")], "strength": "weak"},
+              {"id": "2", "a": "value:maker:Toyota Corp", "b": "value:maker:Lexus Corp", "reasons": [say("shared_rare_word", word="corp")], "strength": "strong"},
+              {"id": "3", "a": "value:other:x", "b": "value:other:y", "reasons": [say("same_start", word="x")], "strength": "weak"}]
     out = explain_review(review, edges, nodes, [{"id": "concept:value:make", "label": "Make"}])
-    assert out[0]["reason"].endswith("; both belong to the make KIA") and out[0]["strength"] == "strong"
-    assert out[1]["reason"].endswith("; they belong to different makes (TOYOTA, LEXUS)") and out[1]["strength"] == "weak"
+    assert [render(r) for r in out[0]["reasons"]] == ["both names begin with “kia”", "both belong to the Make KIA"] and out[0]["strength"] == "strong"
+    assert out[1]["reasons"][1] == say("different_parents", level="Make", a="TOYOTA", b="LEXUS") and out[1]["strength"] == "weak"
     assert out[2] == review[2] and review[0]["strength"] == "weak"  # no hierarchy above them: unchanged; the input is not altered

@@ -5,7 +5,7 @@
   python -m estate export --out out/vehicles --ui-dir <host ui>/public/data/ontology
 
 ``build`` appends to ``assertions.jsonl`` in the output folder, reads ``decisions.jsonl``
-there if a person has written one, and writes ``ontology.json`` (graph-export/2).
+there if a person has written one, and writes ``ontology.json`` (graph-export/3).
 ``export`` copies the files a screen reads into the host's static folder.
 """
 
@@ -91,7 +91,8 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
         instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]))
         resolution_note = "linked"
-    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes)
+    export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
+                          language=cfg.get("language", "en"))
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],

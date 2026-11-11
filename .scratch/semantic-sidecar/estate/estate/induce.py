@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .codes import say
 from .metric_views import join_columns
 from .reader import CatalogObject, MetricView, Reader
 
@@ -26,21 +27,11 @@ REFERENCE_MIN_TABLES = 3
 
 
 @dataclass
-class Signal:
-    kind: str
-    detail: str
-    ref: str = ""
-
-    def as_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "detail": self.detail, "ref": self.ref}
-
-
-@dataclass
 class Element:
     id: str
     label: str
     status: str  # "declared" | "proposed"
-    signals: list[Signal] = field(default_factory=list)
+    signals: list[dict[str, Any]] = field(default_factory=list)
     body: dict[str, Any] = field(default_factory=dict)
 
 
@@ -140,21 +131,21 @@ def _key_of(obj: CatalogObject, prof: Profiler, join_targets: set[str], objects:
     usable = [c.name for c in obj.columns if not c.sensitive and c.name not in ignore]
     for col in usable:
         if col in join_targets and prof.unique(obj, (col,)):
-            return (col,), "the target of a metric-view join, unique in the data"
+            return (col,), "join_target"
     for col in usable:
         if _owner_of(col, objects) == obj.full_name and prof.unique(obj, (col,)):
-            return (col,), "named after the object, unique in the data"
+            return (col,), "own_name"
     free = [c for c in usable if _owner_of(c, objects) in (None, obj.full_name)]
     for col in free:
         if prof.unique(obj, (col,)):
-            return (col,), "unique in the data"
+            return (col,), "unique"
     if obj.rows and len(usable) <= 16:
         # A combination is a key only if no single column of it already is one.
         small = [c for c in usable if prof.nulls(obj, c) == 0 and not prof.unique(obj, (c,))][:8]
         for size in (2, 3):
             for combo in itertools.combinations(small, size):
                 if prof.unique(obj, combo):
-                    return combo, "a combination unique in the data"
+                    return combo, "combination"
     return (), ""
 
 
@@ -204,17 +195,17 @@ def induce(
     keys: dict[str, tuple[str, ...]] = {}
     concepts: dict[str, Element] = {}
     for o in objects:
-        sig: list[Signal] = []
+        sig: list[dict[str, Any]] = []
         if o.full_name in declared_pk:
             keys[o.full_name] = declared_pk[o.full_name]
-            sig.append(Signal("declared_key", f"primary key ({', '.join(declared_pk[o.full_name])})", o.id))
+            sig.append(say("declared_key", o.id, columns=list(declared_pk[o.full_name])))
         else:
             key, how = _key_of(o, prof, join_targets.get(o.full_name, set()), objects, ignore)
             if key:
                 keys[o.full_name] = key
-                sig.append(Signal("unique_key", f"({', '.join(key)}): {how}, over {o.rows} rows", o.id))
+                sig.append(say(f"unique_key.{how}", o.id, columns=list(key), rows=o.rows))
         for v in view_of.get(o.full_name, []):
-            sig.append(Signal("metric_view_source", f"source of the metric view {v.name}", v.name))
+            sig.append(say("metric_view_source", v.name, view=v.name))
         comment = o.comment or next((v.comment for v in view_of.get(o.full_name, []) if v.comment), "")
         personal_key = any((c := o.column(k)) is not None and c.sensitive for k in keys.get(o.full_name, ()))
         concepts[o.full_name] = Element(
@@ -229,7 +220,7 @@ def induce(
     relations: dict[tuple[str, tuple[str, ...], str], Element] = {}
 
     def add_relation(child: CatalogObject, c_cols: tuple[str, ...], parent: CatalogObject, p_cols: tuple[str, ...],
-                     status: str, signal: Signal) -> None:
+                     status: str, signal: dict[str, Any]) -> None:
         rid = (child.full_name, c_cols, parent.full_name)
         if rid in relations:
             relations[rid].signals.append(signal)
@@ -260,7 +251,7 @@ def induce(
             if child is None or parent is None or cols is None:
                 continue
             add_relation(child, (cols[0],), parent, (cols[1],), "declared",
-                         Signal("metric_view_join", f"the metric view {v.name} joins on {j.on.strip()}", v.name))
+                         say("metric_view_join", v.name, view=v.name, on=j.on.strip()))
 
     for parent_name, key in sorted(keys.items()):
         parent = by_name[parent_name]
@@ -278,17 +269,17 @@ def induce(
                     if (child.full_name, (c,), parent_name) in relations:
                         continue
                     add_relation(child, (c,), parent, key, "proposed",
-                                 Signal("name_and_inclusion", f"{child.name}.{c} is named like the key {parent.name}.{k} and its values are found there", child.id))
+                                 say("name_and_inclusion.column", child.id, child=child.name, column=c, parent=parent.name, key=k))
             elif all(child.column(k) is not None for k in key) and prof.usable(child, key):
                 add_relation(child, key, parent, key, "proposed",
-                             Signal("name_and_inclusion", f"{child.name} carries ({', '.join(key)}), the key of {parent.name}, and its values are found there", child.id))
+                             say("name_and_inclusion.key", child.id, child=child.name, columns=list(key), parent=parent.name))
 
     stated_only = []
     for child_name, parent_name in verified_joins or []:
         hit = [r for (c, _, p), r in relations.items() if c == child_name and p == parent_name]
         for r in hit:
             r.status = "declared"
-            r.signals.append(Signal("verified_join", "verified by the host's layer job", f"{child_name}->{parent_name}"))
+            r.signals.append(say("verified_join", f"{child_name}->{parent_name}"))
         if not hit:
             stated_only.append({"from": child_name, "to": parent_name})
 
@@ -297,7 +288,7 @@ def induce(
         has_measures = any(v.measures for v in view_of.get(name, []))
         points_out = any(r.body["from"] == c.id for r in relations.values())
         if c.id in referenced:
-            c.signals.append(Signal("referenced", f"{sum(r.body['to'] == c.id for r in relations.values())} relations point here"))
+            c.signals.append(say("referenced", relations=sum(r.body["to"] == c.id for r in relations.values())))
         elif has_measures and points_out and c.body["kind"] != "derived":
             c.body["kind"] = "fact"
         if c.id in referenced and by_name[name].schema in derived:
@@ -329,15 +320,15 @@ def induce(
         label, definition, synonyms = display.get(col, (label_of(col), "", ()))
         value_sets[col] = Element(
             id=f"concept:value:{col}", label=label, status="proposed",
-            signals=[Signal("shared_column", f"the column {col} appears in {len(objs)} objects with at most {max(counts.values())} distinct values")]
-            + ([Signal("metric_view_dimension", f"named {label!r} as a dimension of a metric view")] if col in display else []),
+            signals=[say("shared_column.value_set", column=col, objects=len(objs), values=max(counts.values()))]
+            + ([say("metric_view_dimension", label=label)] if col in display else []),
             body={"kind": "reference", "column": col, "definition": definition, "synonyms": list(synonyms),
                   "values": max(counts.values()), "objects": sorted(counts), "instances": "available"},
         )
         for o in objs:
             relations[(o.full_name, (col,), f"value:{col}")] = Element(
                 id=f"relation:{o.full_name}.{col}->value:{col}", label=f"{label_of(o.name)} → {label}", status="proposed",
-                signals=[Signal("shared_column", f"{o.name}.{col} holds {counts[o.full_name]} of the shared values", o.id)],
+                signals=[say("shared_column.holds", o.id, object=o.name, column=col, values=counts[o.full_name])],
                 body={"from": f"concept:{o.full_name}", "to": f"concept:value:{col}", "columns": [col], "to_columns": [col],
                       "cardinality": "many_to_one", "support": None},
             )
@@ -351,7 +342,7 @@ def induce(
         if len(holds) == len(both):
             relations[(f"value:{a}", (a,), f"value:{b}")] = Element(
                 id=f"relation:value:{a}->value:{b}", label=f"{value_sets[a].label} → {value_sets[b].label}", status="proposed",
-                signals=[Signal("functional_dependency", f"in all {len(both)} objects that carry both, each {a} goes with exactly one {b}")],
+                signals=[say("functional_dependency.all", objects=len(both), a=a, b=b)],
                 body={"from": f"concept:value:{a}", "to": f"concept:value:{b}", "columns": [a], "to_columns": [b],
                       "cardinality": "many_to_one", "support": {"objects_checked": len(both), "objects_holding": len(holds)}},
             )
@@ -382,10 +373,10 @@ def induce(
         for m in v.measures:
             measures.append({"id": f"measure:{v.name}.{m.name}", "label": m.display_name or label_of(m.name), "name": m.name,
                              "concept": concepts[v.source].id, "view": v.name, "expr": m.expr, "definition": m.comment,
-                             "status": "declared", "signals": [Signal("metric_view_measure", f"a measure of the metric view {v.name}", v.name).as_dict()]})
+                             "status": "declared", "signals": [say("metric_view_measure", v.name, view=v.name)]})
 
     def out(e: Element) -> dict[str, Any]:
-        return {"id": e.id, "label": e.label, "status": e.status, "signals": [s.as_dict() for s in e.signals], **e.body}
+        return {"id": e.id, "label": e.label, "status": e.status, "signals": list(e.signals), **e.body}
 
     all_concepts = [out(c) for _, c in sorted(concepts.items())] + [out(c) for _, c in sorted(value_sets.items())]
     return {

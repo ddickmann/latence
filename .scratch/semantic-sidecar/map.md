@@ -111,9 +111,9 @@ which the owner updates the main machine and switches to Databricks.
 
 **Ontology v1** (the gate is ticket 34; nothing below it starts before the owner has seen it):
 
-| Ticket | What | Mode | Blocked by |
+| Ticket | What | Mode | Blocked by, or state |
 |---|---|---|---|
-| [26](issues/26-export-contract-codes-and-claims.md) | the export speaks in codes, every proposal carries its claim (`graph-export/3`) | AFK | |
+| [26](issues/26-export-contract-codes-and-claims.md) | the export speaks in codes, every proposal carries its claim (`graph-export/3`) | AFK | **done** |
 | [27](issues/27-quality-fixes-on-the-estate.md) | six defects in what the engine proposes on the vehicle estate | AFK | 26 |
 | [28](issues/28-decisions-on-structure-and-classes.md) | a decision on a hierarchy step or a class changes the layer | AFK | 26 |
 | [29](issues/29-hand-checked-list-and-score.md) | classes and hierarchies scored against a list the owner checked | HITL | 27, 28 |
