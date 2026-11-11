@@ -80,3 +80,32 @@ def test_names_that_may_be_the_same_are_listed_with_the_reason() -> None:
     weak = found[("Southeast Toyota Distributors, LLC", "Toyota Motor Corporation")]
     assert weak["strength"] == "weak" and weak["reasons"] == [{"kind": "shared_rare_word", "code": "shared_rare_word", "params": {"word": "toyota"}, "ref": ""}]
     assert not any("Ford Motor Company" in k for k in found)  # "motor" is in too many names to be a reason
+
+
+def test_two_names_a_reviewer_calls_the_same_become_one_value_with_the_other_as_its_alias() -> None:
+    from estate.instances import merge_values
+
+    inst = {
+        "nodes": [{"id": "value:maker:Kia America, Inc.", "concept": "concept:value:maker", "label": "Kia America, Inc.", "rows": 144},
+                  {"id": "value:maker:Kia Motors America", "concept": "concept:value:maker", "label": "Kia Motors America", "rows": 12},
+                  {"id": "value:make:KIA", "concept": "concept:value:make", "label": "KIA", "rows": 300},
+                  {"id": "s.campaigns:C1", "concept": "concept:s.campaigns", "label": "C1", "key": "C1"},
+                  {"id": "s.campaigns:C2", "concept": "concept:s.campaigns", "label": "C2", "key": "C2"}],
+        "edges": [{"from": "value:maker:Kia America, Inc.", "to": "value:make:KIA", "kind": "broader", "relation": "roll_up:value:maker->value:make", "rows": 140},
+                  {"from": "value:maker:Kia Motors America", "to": "value:make:KIA", "kind": "broader", "relation": "roll_up:value:maker->value:make", "rows": 12},
+                  {"from": "s.campaigns:C1", "to": "value:maker:Kia America, Inc.", "kind": "refers_to", "relation": "r"},
+                  {"from": "s.campaigns:C2", "to": "value:maker:Kia Motors America", "kind": "refers_to", "relation": "r"}],
+        "review": [{"id": "same:maker:Kia America, Inc.~Kia Motors America", "kind": "possibly_same", "a": "value:maker:Kia America, Inc.", "b": "value:maker:Kia Motors America"}],
+        "meta": {"nodes": 5, "edges": 4, "nodes_per_concept": {"concept:value:maker": 2, "concept:value:make": 1, "concept:s.campaigns": 2}},
+    }
+    before = repr(inst)
+    out = merge_values(inst, [("value:maker:Kia Motors America", "value:maker:Kia America, Inc.")])
+    assert repr(inst) == before  # what was passed in is not changed
+    kept = next(n for n in out["nodes"] if n["id"] == "value:maker:Kia America, Inc.")
+    assert kept["rows"] == 156 and kept["aliases"] == ["Kia Motors America"]  # the name with more rows stays
+    assert not any(n["id"] == "value:maker:Kia Motors America" for n in out["nodes"])
+    assert [(e["from"], e["to"], e.get("rows")) for e in out["edges"] if e["kind"] == "broader"] == [("value:maker:Kia America, Inc.", "value:make:KIA", 152)]
+    assert {(e["from"], e["to"]) for e in out["edges"] if e["kind"] == "refers_to"} == {("s.campaigns:C1", "value:maker:Kia America, Inc."), ("s.campaigns:C2", "value:maker:Kia America, Inc.")}
+    assert out["meta"]["nodes"] == 4 and out["meta"]["edges"] == 3 and out["meta"]["nodes_per_concept"]["concept:value:maker"] == 1
+    assert out["meta"]["merged_values"] == [{"kept": "value:maker:Kia America, Inc.", "alias": "value:maker:Kia Motors America"}]
+    assert out["review"][0]["merged_into"] == "value:maker:Kia America, Inc."  # the item stays, and says what became of it

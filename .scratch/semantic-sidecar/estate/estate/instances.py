@@ -199,3 +199,47 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
                  "nodes_per_concept": dict(sorted(per_concept.items())), "queries": len(queries),
                  "labels": {c["id"]: c["label"] for c in model["concepts"]}},
     }
+
+
+def merge_values(instances: dict[str, Any], same: list[tuple[str, str]]) -> dict[str, Any]:
+    """Two names of a value set that a reviewer called the same become one value: the one
+    that more rows carry stays, the other is its alias, and what pointed at either points at
+    it. Edges that become the same edge are one, with their rows added. The pair's review
+    item stays and says what it was merged into. Returns new instances."""
+    nodes = {n["id"]: dict(n) for n in instances["nodes"]}
+    into: dict[str, str] = {}
+
+    def standing(nid: str) -> str:
+        while nid in into:
+            nid = into[nid]
+        return nid
+
+    merged = []
+    for a, b in same:
+        a, b = standing(a), standing(b)
+        if a == b or a not in nodes or b not in nodes or nodes[a]["concept"] != nodes[b]["concept"]:
+            continue
+        keep, alias = (a, b) if (nodes[a].get("rows") or 0, b) >= (nodes[b].get("rows") or 0, a) else (b, a)
+        gone = nodes.pop(alias)
+        nodes[keep]["rows"] = (nodes[keep].get("rows") or 0) + (gone.get("rows") or 0)
+        nodes[keep]["aliases"] = sorted({*nodes[keep].get("aliases", []), gone["label"], *gone.get("aliases", [])})
+        into[alias] = keep
+        merged.append({"kept": keep, "alias": alias})
+    if not merged:
+        return instances
+    edges: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for e in instances["edges"]:
+        moved = {**e, "from": standing(e["from"]), "to": standing(e["to"])}
+        if moved["from"] == moved["to"]:
+            continue
+        key = (moved["kind"], moved["from"], moved["to"], str(moved.get("via")), str(moved.get("relation")))
+        if key in edges and "rows" in moved:
+            edges[key] = {**edges[key], "rows": (edges[key].get("rows") or 0) + (moved.get("rows") or 0)}
+        else:
+            edges.setdefault(key, moved)
+    review = [{**r, "merged_into": standing(r["a"])} if standing(r["a"]) == standing(r["b"]) else r for r in instances["review"]]
+    per: dict[str, int] = {}
+    for n in nodes.values():
+        per[n["concept"]] = per.get(n["concept"], 0) + 1
+    return {**instances, "nodes": [nodes[n["id"]] for n in instances["nodes"] if n["id"] in nodes], "edges": [edges[k] for k in sorted(edges)], "review": review,
+            "meta": {**instances["meta"], "nodes": len(nodes), "edges": len(edges), "nodes_per_concept": dict(sorted(per.items())), "merged_values": merged}}

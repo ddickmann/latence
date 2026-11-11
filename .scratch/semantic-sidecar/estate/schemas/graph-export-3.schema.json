@@ -45,12 +45,14 @@
       "master",
       "records",
       "labels",
-      "labels_from",
       "target",
       "certified",
       "pairs",
       "linked",
-      "review_pairs"
+      "review_pairs",
+      "state",
+      "truth_stands_in",
+      "certified_on"
      ],
      "properties": {
       "seeded": {
@@ -72,7 +74,82 @@
         "accept_test",
         "reject_test",
         "total"
-       ]
+       ],
+       "additionalProperties": false,
+       "properties": {
+        "training": {
+         "type": "object",
+         "required": [
+          "reviewer",
+          "simulated",
+          "open"
+         ],
+         "additionalProperties": false,
+         "properties": {
+          "reviewer": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "simulated": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "open": {
+           "type": "integer",
+           "minimum": 0
+          }
+         }
+        },
+        "accept_test": {
+         "type": "object",
+         "required": [
+          "reviewer",
+          "simulated",
+          "open"
+         ],
+         "additionalProperties": false,
+         "properties": {
+          "reviewer": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "simulated": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "open": {
+           "type": "integer",
+           "minimum": 0
+          }
+         }
+        },
+        "reject_test": {
+         "type": "object",
+         "required": [
+          "reviewer",
+          "simulated",
+          "open"
+         ],
+         "additionalProperties": false,
+         "properties": {
+          "reviewer": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "simulated": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "open": {
+           "type": "integer",
+           "minimum": 0
+          }
+         }
+        },
+        "total": {
+         "type": "integer"
+        }
+       }
       },
       "checked_against_seed": {
        "type": "object",
@@ -83,11 +160,24 @@
         "share_found"
        ]
       },
-      "labels_from": {
+      "state": {
        "enum": [
-        "seed_truth",
-        "reviewer"
+        "certified",
+        "not_certified",
+        "awaiting_training",
+        "awaiting_tests"
        ]
+      },
+      "certified_on": {
+       "enum": [
+        "reviewer",
+        "mixed",
+        "simulated",
+        null
+       ]
+      },
+      "truth_stands_in": {
+       "type": "boolean"
       }
      }
     }
@@ -154,6 +244,9 @@
       "items": {
        "$ref": "#/$defs/statement"
       }
+     },
+     "decided_by": {
+      "type": "string"
      }
     }
    }
@@ -517,6 +610,159 @@
      "type": "array",
      "items": {
       "type": "string"
+     }
+    }
+   }
+  },
+  "label_requests": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "training": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "required": [
+       "id",
+       "kind",
+       "a",
+       "b",
+       "evidence",
+       "label",
+       "by",
+       "claim"
+      ],
+      "properties": {
+       "id": {
+        "type": "string",
+        "pattern": "^same:"
+       },
+       "kind": {
+        "const": "possibly_same"
+       },
+       "label": {
+        "enum": [
+         "same",
+         "different",
+         null
+        ]
+       },
+       "by": {
+        "enum": [
+         "reviewer",
+         "simulated",
+         null
+        ]
+       },
+       "claim": {
+        "$ref": "#/$defs/claim"
+       },
+       "evidence": {
+        "type": "array",
+        "items": {
+         "$ref": "#/$defs/statement"
+        }
+       },
+       "p": false
+      }
+     }
+    },
+    "accept_test": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "required": [
+       "id",
+       "kind",
+       "a",
+       "b",
+       "evidence",
+       "label",
+       "by",
+       "claim"
+      ],
+      "properties": {
+       "id": {
+        "type": "string",
+        "pattern": "^same:"
+       },
+       "kind": {
+        "const": "possibly_same"
+       },
+       "label": {
+        "enum": [
+         "same",
+         "different",
+         null
+        ]
+       },
+       "by": {
+        "enum": [
+         "reviewer",
+         "simulated",
+         null
+        ]
+       },
+       "claim": {
+        "$ref": "#/$defs/claim"
+       },
+       "evidence": {
+        "type": "array",
+        "items": {
+         "$ref": "#/$defs/statement"
+        }
+       },
+       "p": false
+      }
+     }
+    },
+    "reject_test": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "required": [
+       "id",
+       "kind",
+       "a",
+       "b",
+       "evidence",
+       "label",
+       "by",
+       "claim"
+      ],
+      "properties": {
+       "id": {
+        "type": "string",
+        "pattern": "^same:"
+       },
+       "kind": {
+        "const": "possibly_same"
+       },
+       "label": {
+        "enum": [
+         "same",
+         "different",
+         null
+        ]
+       },
+       "by": {
+        "enum": [
+         "reviewer",
+         "simulated",
+         null
+        ]
+       },
+       "claim": {
+        "$ref": "#/$defs/claim"
+       },
+       "evidence": {
+        "type": "array",
+        "items": {
+         "$ref": "#/$defs/statement"
+        }
+       },
+       "p": false
+      }
      }
     }
    }

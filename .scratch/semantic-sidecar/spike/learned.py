@@ -108,11 +108,24 @@ def certify(score: np.ndarray, y: np.ndarray, used: np.ndarray, n_accept: int, n
     lies at or above the floor and the reject line at or below it. The floor is even odds: a
     pair the scorer itself rates below that is never accepted, however much room the accepted
     set as a whole would leave, and one it rates above is never rejected."""
+    ta, tr, above, below = draw_tests(score, used, n_accept, n_reject, rng, floor)
+    return certify_drawn(score, y, ta, tr, above, below, floor=floor, target=target, delta=delta, reject_target=reject_target)
+
+
+def draw_tests(score: np.ndarray, used: np.ndarray, n_accept: int, n_reject: int, rng: np.random.Generator,
+               floor: float = 0.5) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The two test samples, drawn from the scores alone: no label is read. A reviewer is asked
+    for exactly these pairs, and the lines are tested once they are answered. Returns the
+    accept sample, the reject sample, and the free pairs above and below the floor."""
     free = np.ones(len(score), dtype=bool)
     free[used] = False
     above, below = np.where(free & (score >= floor))[0], np.where(free & (score < floor))[0]
-    ta = rng.permutation(above)[:n_accept]
-    tr = rng.permutation(below)[:n_reject]
+    return rng.permutation(above)[:n_accept], rng.permutation(below)[:n_reject], above, below
+
+
+def certify_drawn(score: np.ndarray, y: np.ndarray, ta: np.ndarray, tr: np.ndarray, above: np.ndarray, below: np.ndarray, *,
+                  floor: float = 0.5, target: float = 0.95, delta: float = 0.05, reject_target: float = 0.99) -> Certified:
+    """The lines, tested on samples that were drawn before (``y`` is read only there)."""
     # The first line tried has a fifth of the test labels behind it. On 100 labelled pairs three
     # wrong ones fail the step, and in a fixed sequence a failed first step ends the test.
     start = max(100, len(ta) // 5)

@@ -13,7 +13,7 @@ from estate.export import build_export
 from estate.induce import induce
 from estate.instances import build_instances
 from estate.reader_duckdb import DuckDBReader
-from estate.resolution import merge, write_records
+from estate.resolution import merge, pair_answers, write_records
 
 from .conftest import OPTIONS
 
@@ -46,8 +46,14 @@ def _answer() -> dict:
     ev = [{"kind": "name", "code": "name.same_core", "params": {}, "ref": ""}, {"kind": "town", "code": "town.same", "params": {}, "ref": ""},
           {"kind": "source", "code": "source.two", "params": {"a": "dealer master", "b": "second source"}, "ref": ""}]
     return {
-        "format": "resolution/2", "records": 140, "sources": {"dealer master": 40, "second source": 100}, "candidate_pairs": 900,
-        "labels": {"training": 10, "accept_test": 14, "reject_test": 6, "total": 30, "from": "the truth column of the input"},
+        "format": "resolution/3", "state": "certified", "records": 140, "sources": {"dealer master": 40, "second source": 100}, "candidate_pairs": 900,
+        "labels": {"training": {"reviewer": 2, "simulated": 8, "open": 0}, "accept_test": {"reviewer": 0, "simulated": 14, "open": 0},
+                   "reject_test": {"reviewer": 0, "simulated": 6, "open": 0}, "total": 30},
+        "truth_stands_in": True, "certified_on": "mixed",
+        "requests": {"training": [{"id": "same:shop.dealers:D1~shop.parts:P1", "a": "shop.dealers:D1", "b": "shop.parts:P1", "evidence": ev, "label": "same", "by": "reviewer"},
+                                  {"id": "same:shop.dealers:D2~shop.parts:P5", "a": "shop.dealers:D2", "b": "shop.parts:P5", "evidence": ev, "label": None, "by": None},
+                                  {"id": "same:shop.dealers:D99~shop.parts:P1", "a": "shop.dealers:D99", "b": "shop.parts:P1", "evidence": ev, "label": "different", "by": "simulated"}],
+                     "accept_test": [], "reject_test": []},
         "lines": {"accept_at": 0.6, "reject_below": 0.2, "target": 0.95, "delta": 0.05}, "certified": True,
         "duplicate_free": {"sources": ["dealer master"], "pairs_ruled_out": 3}, "counts": {"accept": 3, "review": 2, "reject": 895},
         "clusters": {"shop.dealers:D1": "shop.dealers:D1", "shop.parts:P1": "shop.dealers:D1", "shop.parts:P2": "shop.dealers:D1",
@@ -86,7 +92,9 @@ def test_the_engines_answer_becomes_links_review_items_and_a_summary(reader: Duc
     r = out["meta"]["resolution"]
     assert r["seeded"] is True and r["certified"] is True and r["linked"] == 3 and r["clusters_with_two_master_records"] == 1  # D3 and D4 in one cluster: no link is drawn
     assert r["checked_against_seed"] == {"linked": 3, "linked_right": 2, "belong_to_a_master_record": 5, "share_right": 0.6667, "share_found": 0.4}
-    assert r["labels"]["total"] == 30 and r["labels_from"] == "seed_truth"
+    assert r["labels"]["total"] == 30 and r["labels"]["training"] == {"reviewer": 2, "simulated": 8, "open": 0} and r["certified_on"] == "mixed" and r["state"] == "certified"
+    # The pairs the engine asks a reviewer for travel with the export; one names a record this export does not hold and is left out.
+    assert [(q["id"], q["label"], q["by"]) for q in out["label_requests"]["training"]] == [("same:shop.dealers:D1~shop.parts:P1", "same", "reviewer"), ("same:shop.dealers:D2~shop.parts:P5", None, None)]
     assert out["meta"]["edges"] == len(out["edges"]) and out["meta"]["review_items"] == len(out["review"])
 
 
@@ -107,9 +115,36 @@ def test_the_export_with_links_matches_its_schema(reader: DuckDBReader) -> None:
 def test_an_answer_in_another_format_or_with_a_statement_the_table_does_not_know_is_refused(reader: DuckDBReader) -> None:
     model, inst = _instances(reader)
     concept_of = {c["object_name"]: c["id"] for c in model["concepts"] if c.get("object_name")}
-    with pytest.raises(ValueError, match="resolution/2"):
-        merge(inst, {**_answer(), "format": "resolution/1"}, LINK, None, concept_of, seeded=True)
+    with pytest.raises(ValueError, match="resolution/3"):
+        merge(inst, {**_answer(), "format": "resolution/2"}, LINK, None, concept_of, seeded=True)
     odd = _answer()
     odd["accepted"][0] = {**odd["accepted"][0], "evidence": [{"kind": "name", "code": "name.rhymes", "params": {}, "ref": ""}]}
     with pytest.raises(KeyError, match="name.rhymes"):
         merge(inst, odd, LINK, None, concept_of, seeded=True)
+
+
+def test_a_reviewers_answer_on_a_pair_decides_it_whatever_the_engine_made_of_it(reader: DuckDBReader) -> None:
+    model, inst = _instances(reader)
+    concept_of = {c["object_name"]: c["id"] for c in model["concepts"] if c.get("object_name")}
+    answers = [{"a": "shop.dealers:D1", "b": "shop.parts:P2", "same": False, "by": "reviewer-1"},   # the engine linked them
+               {"a": "shop.dealers:D2", "b": "shop.parts:P4", "same": True, "by": "reviewer-1"},    # the engine left the pair for a person
+               {"a": "shop.dealers:D1", "b": "shop.parts:P3", "same": True, "by": "reviewer-1"}]    # the engine linked P3 to D2
+    out = merge(inst, _answer(), LINK, {"P1": "D1", "P2": "D7", "P3": "D2", "P4": "D2", "P5": "D3"}, concept_of, seeded=True, answers=answers)
+    links = {e["from"]: (e["to"], e.get("decided_by")) for e in out["edges"] if e["kind"] == "same_as"}
+    assert links == {"shop.parts:P1": ("shop.dealers:D1", None), "shop.parts:P4": ("shop.dealers:D2", "reviewer-1"), "shop.parts:P3": ("shop.dealers:D1", "reviewer-1")}
+    assert "shop.parts:P2" not in links  # a person said different: the machine's link is gone
+    r = out["meta"]["resolution"]
+    assert r["decided_by_a_person"] == {"linked": 2, "links_taken_away": 1} and r["linked"] == 3
+    assert not any(item["a"] == "shop.dealers:D2" and item["b"] == "shop.parts:P4" for item in out["review"])  # answered: no longer waiting
+
+
+def test_answers_on_pairs_of_records_are_read_from_the_decisions_and_pairs_of_names_are_not() -> None:
+    decisions = {
+        "same:shop.dealers:D1~shop.parts:P2": {"verdict": "rejected", "by": "reviewer-1"},
+        "same:shop.dealers:D2~shop.parts:P4": {"verdict": "approved", "by": "reviewer-2"},
+        "same:make:ALFA~Alfa Works": {"verdict": "approved", "by": "reviewer-1"},
+        "concept:shop.dealers": {"verdict": "approved", "by": "reviewer-1"},
+    }
+    assert pair_answers(decisions, ["shop.dealers", "shop.parts"]) == [
+        {"a": "shop.dealers:D1", "b": "shop.parts:P2", "same": False, "by": "reviewer-1"},
+        {"a": "shop.dealers:D2", "b": "shop.parts:P4", "same": True, "by": "reviewer-2"}]

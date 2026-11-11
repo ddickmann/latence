@@ -21,11 +21,11 @@ import yaml
 from .classes import TOP, HostedClassModel, RecordedClassModel, describe, prompt_of, propose_classes
 from .export import build_export
 from .induce import induce
-from .instances import build_instances
+from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .reader_duckdb import DuckDBReader
 from .score import score
-from .resolution import merge, run_resolver, write_records
+from .resolution import merge, pair_answers, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
 from .turtle import to_turtle
@@ -86,15 +86,25 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     if link and resolver is not None:
         truth_file = out / "seed_truth.json"
         truth = json.loads(truth_file.read_text(encoding="utf-8"))["truth"] if truth_file.exists() else None
-        if truth is None:
-            raise SystemExit("linking needs labelled pairs: no seed truth in the output folder, and labels from the review screen are not read yet")
+        # Whether the truth of a seeded source may stand in for a reviewer's labels is the
+        # estate's to say. Without a truth nothing can stand in, and every label is a person's.
+        stands_in = bool(link["labels"].get("truth_stands_in", True)) and truth is not None
+        answers = pair_answers(decisions.by, [spec["object"] for spec in link["records"]])
         write_records(reader, link["records"], truth, out / "records.parquet")
         answer = run_resolver(resolver, out / "records.parquet", out / "resolution.json", link["labels"]["fit"], link["labels"]["test"],
-                              tuple(link.get("duplicate_free", ())))
+                              tuple(link.get("duplicate_free", ())), answers, stands_in)
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
-        instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]))
-        resolution_note = "linked"
-    instances = {**instances, "review": [decisions.marked("possibly_same", item) for item in instances["review"]]}
+        instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]), answers=answers)
+        resolution_note = "linked" if answer["certified"] else answer["state"]
+    if link and resolver is not None:
+        for said in answers:  # every answer on a pair of records was applied, whether the pair is still listed or not
+            decisions.verdict("possibly_same", {"id": f"same:{said['a']}~{said['b']}", "a": said["a"], "b": said["b"]})
+    # Names of a value set a reviewer called the same are one value from here on.
+    same_names = [(item["a"], item["b"]) for item in instances["review"]
+                  if item["a"].startswith("value:") and (v := decisions.verdict("possibly_same", item)) and v["verdict"] == "approved"]
+    instances = merge_values(instances, same_names)
+    instances = {**instances, "review": [decisions.marked("possibly_same", item) for item in instances["review"]],
+                 "label_requests": {name: [decisions.marked("possibly_same", item) for item in sample] for name, sample in instances.get("label_requests", {}).items()}}
     layer = {**layer, "meta": {**layer["meta"], "decisions": decisions.summary()}}
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
                           language=cfg.get("language", "en"))

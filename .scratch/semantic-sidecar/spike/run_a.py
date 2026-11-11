@@ -39,7 +39,7 @@ from er import (
     pairwise_and_bcubed,
     wilson_lower,
 )
-from learned import certify, draw_training, fit_score
+from learned import certify_drawn, draw_tests, draw_training, fit_score
 from pairfeat import ORG_PATTERN, PERSON_PATTERN, master_features, org_features, pattern_strata, person_features
 from rescore import ORG_TEXT_COLS, PERSON_TEXT_COLS, record_text, rescue_curve, rescue_region, stage_two, uncertain_region
 
@@ -521,6 +521,8 @@ def run(
     duplicate_free: tuple[str, ...] = (),
     passes: dict[str, list[str]] | None = None,
     link_only: bool = False,
+    labels: dict[tuple[str, str], int] | None = None,
+    truth_stands_in: bool = True,
 ) -> dict[str, Any]:
     """``rescore`` names the pair scorers ("rerank", "decide", "glide") applied to the pairs the
     first stage leaves uncertain; ``scorers`` injects ready objects (tests use fakes).
@@ -601,38 +603,77 @@ def run(
     cal_idx, ltt_idx = order[:n_cal], order[n_cal : n_cal + n_ltt]
     del order
     learned_info: dict[str, Any] | None = None
+    # What the labelled samples read. By default the truth column stands in for a reviewer.
+    # ``labels`` are a reviewer's own answers (pair of ids -> 1 the same, 0 different): they
+    # win. Where the truth may not stand in, a pair without an answer is open (-1), and
+    # nothing is fitted or certified on open labels.
+    y_lab = y.astype(np.int8)
+    label_from = np.full(n_pairs, 2, dtype=np.int8)  # 0 open, 1 a reviewer, 2 the truth column
+    if not truth_stands_in:
+        y_lab, label_from = np.full(n_pairs, -1, dtype=np.int8), np.zeros(n_pairs, dtype=np.int8)
+    if labels:
+        y_lab = y_lab.copy()
+        where = {pair: k for k, pair in enumerate(zip(ids[left].tolist(), ids[right].tolist()))}
+        for (a, b), same in labels.items():
+            k = where.get((a, b), where.get((b, a)))
+            if k is not None:
+                y_lab[k], label_from[k] = int(bool(same)), 1
+    sample = np.zeros(n_pairs, dtype=np.int8)  # 1 to fit, 2 accept test, 3 reject test
+    state = "certified"
     if learned:
         t = time.time()
         X, names = (org_features if kind == "org" else person_features)(by_record, left, right, p_raw)
         strata = pattern_strata(X, names, ORG_PATTERN if kind == "org" else PERSON_PATTERN)
         cal_idx, weights = draw_training(strata, n_cal, rng)
-        # Where a pair stands among its records' other candidates (``pairfeat.rank_features``)
-        # is not used: between two registers without duplicates it changed nothing, and on an
-        # estate with several records per organisation it cost precision (0.924 against 0.951
-        # above even odds at 10^6 records, 2026-11-11), since a record there has several right partners.
-        p = fit_score(X, y, cal_idx, weights)
-        if dup_codes:
-            # A second fit that also sees where each pair stands among a record's candidates
-            # in a source without duplicates, read off the first fit's scores.
-            p[veto] = 0.0
-            M, master_names = master_features(left, right, p, source_codes, dup_codes)
-            p = fit_score(np.column_stack([X, M]), y, cal_idx, weights)
-            names = [*names, *master_names]
-            del M
-        del X
-        p[veto] = 0.0
+        sample[cal_idx] = 1
         n_accept = (2 * n_ltt) // 3
-        cert = certify(p, y, cal_idx, n_accept, n_ltt - n_accept, rng, delta=delta, reject_target=reject_target)
-        ltt_idx = np.concatenate([cert.accept_test, cert.reject_test])
-        bands = Bands(cert.accept_at, cert.reject_below, 0.95, delta, int(len(ltt_idx)), cert.trace["accept"], cert.trace["reject"])
+        none = np.array([], dtype=np.int64)
+        ta, tr, traces = none, none, {"accept": [], "reject": []}
+        accept_at: float | None = None
+        reject_below: float | None = None
+        floor = 0.5
+        if (y_lab[cal_idx] < 0).any():
+            # Round one: the pairs to learn from are asked for. Nothing is fitted, so nothing
+            # is accepted; the first stage's score only orders what is shown.
+            state = "awaiting_training"
+            p = p_raw.copy()
+            p[veto] = 0.0
+        else:
+            # Where a pair stands among its records' other candidates (``pairfeat.rank_features``)
+            # is not used: between two registers without duplicates it changed nothing, and on an
+            # estate with several records per organisation it cost precision (0.924 against 0.951
+            # above even odds at 10^6 records, 2026-11-11), since a record there has several right partners.
+            p = fit_score(X, y_lab, cal_idx, weights)
+            if dup_codes:
+                # A second fit that also sees where each pair stands among a record's candidates
+                # in a source without duplicates, read off the first fit's scores.
+                p[veto] = 0.0
+                M, master_names = master_features(left, right, p, source_codes, dup_codes)
+                p = fit_score(np.column_stack([X, M]), y_lab, cal_idx, weights)
+                names = [*names, *master_names]
+                del M
+            p[veto] = 0.0
+            # The two test samples are drawn from the scores before any of their labels is read.
+            ta, tr, above, below = draw_tests(p, cal_idx, n_accept, n_ltt - n_accept, rng, floor)
+            sample[ta], sample[tr] = 2, 3
+            if (y_lab[ta] < 0).any() or (y_lab[tr] < 0).any():
+                state = "awaiting_tests"  # round two: a line is tested only on a full sample
+            else:
+                cert = certify_drawn(p, y_lab, ta, tr, above, below, floor=floor, delta=delta, reject_target=reject_target)
+                accept_at, reject_below, traces = cert.accept_at, cert.reject_below, cert.trace
+                state = "certified" if accept_at is not None else "not_certified"
+        del X
+        ltt_idx = np.concatenate([ta, tr])
+        bands = Bands(accept_at, reject_below, 0.95, delta, int(len(ltt_idx)), traces["accept"], traces["reject"])
         learned_info = {
             "features": names,
             "strata": int(strata.max()) + 1,
-            "floor": cert.floor,
-            "labels_used": {"training": int(len(cal_idx)), "accept_test": int(len(cert.accept_test)), "reject_test": int(len(cert.reject_test))},
-            "training_matches": int(y[cal_idx].sum()),
-            "accept_trace": cert.trace["accept"],
-            "reject_trace": cert.trace["reject"],
+            "floor": floor,
+            "state": state,
+            "labels_used": {"training": int(len(cal_idx)), "accept_test": int(len(ta)), "reject_test": int(len(tr))},
+            "training_matches": int((y_lab[cal_idx] == 1).sum()),
+            "accept_trace": traces["accept"],
+            "reject_trace": traces["reject"],
         }
         del strata
         timings["learned"] = time.time() - t
@@ -832,6 +873,7 @@ def run(
             l=cand.l.to_numpy().astype(str), r=cand.r.to_numpy().astype(str),
             p_raw=p_raw, p=p, band=band.astype(str), veto=veto,
             ids=ids.astype(str),
+            sample=sample, label=y_lab, label_from=label_from,
             machine=ids[labels_machine].astype(str),
             expert=ids[labels_expert].astype(str),
             accept_at=np.array([np.nan if bands.accept_at is None else bands.accept_at]),

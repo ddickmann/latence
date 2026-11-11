@@ -85,4 +85,5 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
         "nodes": [] if instances is None else instances["nodes"],
         "edges": [] if instances is None else instances["edges"],
         "review": [] if instances is None else _claimed("possibly_same", instances["review"]),
+        "label_requests": {name: _claimed("possibly_same", sample) for name, sample in ((instances or {}).get("label_requests") or {}).items()},
     }
