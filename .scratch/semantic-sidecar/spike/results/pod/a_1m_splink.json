@@ -1,0 +1,134 @@
+{
+  "dataset": "estate",
+  "path": "data/estate_1m.parquet",
+  "records": 989658,
+  "gold_clusters": 412500,
+  "seed": 7,
+  "blocking": {
+    "name_core": {
+      "pairs": 15887314,
+      "pair_completeness": 0.6537161078285193,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.96
+    },
+    "first_tok+city": {
+      "pairs": 14503441,
+      "pair_completeness": 0.6682186021270325,
+      "keys_skipped_over_cap": 0,
+      "secs": 1.0
+    },
+    "first_meta+pc_out": {
+      "pairs": 843368,
+      "pair_completeness": 0.5858931568020341,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.44
+    },
+    "reg_id": {
+      "pairs": 286239,
+      "pair_completeness": 0.30954750260196606,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.24
+    },
+    "acronym": {
+      "pairs": 65923,
+      "pair_completeness": 0.010006557933304839,
+      "keys_skipped_over_cap": 264,
+      "secs": 0.13
+    },
+    "rare_token": {
+      "pairs": 91892,
+      "pair_completeness": 0.0001990218565150294,
+      "keys_skipped_over_cap": 0,
+      "secs": 0.19
+    },
+    "_union": {
+      "pairs": 29512442,
+      "pair_completeness": 0.8984129366381837,
+      "reduction_ratio": 0.9999397349804575,
+      "gold_pairs": 919497
+    }
+  },
+  "labels_used": {
+    "calibration": 2000,
+    "ltt": 3000
+  },
+  "bands": {
+    "accept_at": null,
+    "reject_below": 0.720000000001,
+    "target": 0.95,
+    "reject_target": 0.99,
+    "delta": 0.05,
+    "second_stage": null,
+    "share": {
+      "accept": 0.0,
+      "review": 0.020639328998935433,
+      "reject": 0.9793606710010646
+    },
+    "counts": {
+      "accept": 0,
+      "review": 609117,
+      "reject": 28903325
+    },
+    "auto_accept_precision_realised": NaN,
+    "auto_accept_precision_wilson_lower": 0.0,
+    "auto_reject_true_match_rate": 0.007602239534724811,
+    "auto_resolved_share": 0.9793606710010646,
+    "vetoed_pairs": 9266245
+  },
+  "review_effort": {
+    "review_pairs": 609117,
+    "review_groups": 263278,
+    "expert_minutes_at_20s_per_group": 87759.33333333333
+  },
+  "clustering": {
+    "machine_only": {
+      "pairwise_precision": 1.0,
+      "pairwise_recall": 0.0,
+      "pairwise_f1": 0.0,
+      "bcubed_precision": 1.0,
+      "bcubed_recall": 0.4168106558023075,
+      "bcubed_f1": 0.5883787704381389,
+      "predicted_clusters": 989658,
+      "gold_clusters": 412500,
+      "merges": 0,
+      "blocked_merges": 0,
+      "blocked_by_linkage": 0
+    },
+    "machine_plus_expert": {
+      "pairwise_precision": 1.0,
+      "pairwise_recall": 0.7134487660101121,
+      "pairwise_f1": 0.8327634653137934,
+      "bcubed_precision": 1.0,
+      "bcubed_recall": 0.8289074272795922,
+      "bcubed_f1": 0.9064509388674202,
+      "predicted_clusters": 553376,
+      "gold_clusters": 412500,
+      "merges": 436282,
+      "blocked_merges": 1831,
+      "blocked_by_linkage": 0
+    },
+    "plain_closure_splink_p95": {
+      "pairwise_precision": 0.8831171391396917,
+      "pairwise_recall": 0.6333473627428909,
+      "pairwise_f1": 0.737663045027186,
+      "bcubed_precision": 0.9687876419024452,
+      "bcubed_recall": 0.7817805747035845,
+      "bcubed_f1": 0.8652954535192208,
+      "predicted_clusters": 579497,
+      "gold_clusters": 412500
+    },
+    "latence_cascade_baseline": "skipped: 989658 records > baseline_max 0"
+  },
+  "timings_s": {
+    "normalise": 19.39,
+    "block": 6.95,
+    "score_splink": 17.07,
+    "cluster": 6.68,
+    "total": 91.5
+  },
+  "peak_rss_mb": 5199.0,
+  "hardware": {
+    "cpus": 48,
+    "gpu": "NVIDIA RTX PRO 4000 Blackwell"
+  }
+}

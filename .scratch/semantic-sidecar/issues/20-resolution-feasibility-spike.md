@@ -93,3 +93,29 @@ Status stays `open`: the go/no-go needs the model arms, which need the GPU machi
   (non-synthetic) estate at this size.
 
 Details and result files: [`../spike/NEXT.md`](../spike/NEXT.md).
+
+## Progress (2026-11-11): the model arms have run; report and recommendation
+
+Status stays `open` until the owner decides. The report is
+[`../spike/REPORT.md`](../spike/REPORT.md); it recommends **go**.
+
+- **Machine:** a rented pod with one 24 GB GPU (owner, 2026-11-11; replaces the L40S plan).
+  GLiDE starts with its smallest variant and goes up only if needed (owner, same day); only
+  0.4B has run.
+- **Precision bar:** met in every arm. Structured, 10⁵ records: 0.986 to 0.990. Structured,
+  10⁶: 0.9955 with 7,500 labels, the second 2,500 drawn from the undecided pairs. Text: 0.959
+  to 0.965.
+- **Recall guard (≥ 60% machine only):** 0.757 with the matcher alone, 0.894 with GLiDE 0.4B
+  (10⁵); 0.710 at 10⁶.
+- **Review work at 10⁵:** 23,607 pairs with the matcher alone, 10,390 with GLiDE 0.4B, 8,962
+  with the reranker as well (36.7, 17.3 and 14.4 expert minutes per 1,000 records).
+- **Public person dataset (50k):** precision 0.971 with the matcher alone; neither model moves
+  a pair out of its review band (21.7%). The models' gain is shown on synthetic data only.
+- **Decide against GLiDE:** GLiDE 0.4B wins every comparison; zero-shot Decide carries almost
+  no weight.
+- **Acronyms** (owner's priority, 2026-11-11): a resolver over thread, definition, alias-column
+  and letter evidence links 82% of acronym mentions correctly on a synthetic set written for
+  it (0.1% before), 97% when the full name is in the same thread, 42% with context only.
+- **Two defects found and fixed** in the spike code, each with a test that failed first.
+- **Still open for the decision:** a time and cost budget for 10⁶ records; no real estate or
+  real text; no entity-linking benchmark (licence checks pending); no Spark run.

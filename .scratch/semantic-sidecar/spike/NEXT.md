@@ -1,8 +1,10 @@
-# Ticket 20 spike: where it stands and what runs next (on the GPU pod)
+# Ticket 20 spike: where it stands and what is left
 
-Status on 2026-11-08. The model arms run on a Runpod pod: 1× L40S 48 GB, at least 64 GB system RAM,
-about 150 GB volume, a PyTorch/CUDA image (owner, 2026-11-08; replaces the M3 plan). Everything
-so far ran on a 4-CPU Linux box without a GPU. Read this file, then
+Status on 2026-11-11. **The model arms have run; the results and the recommendation are in
+[`REPORT.md`](REPORT.md).** They ran on a rented pod with one 24 GB GPU (RTX PRO 4000
+Blackwell, 48 CPU threads, 125 GB RAM; owner, 2026-11-11; replaces the L40S plan). This file
+keeps the setup, the earlier CPU-only results and the list of what is left. Read the report
+first, then
 [`../issues/20-resolution-feasibility-spike.md`](../issues/20-resolution-feasibility-spike.md) and
 [`../design/resolution-at-scale.md`](../design/resolution-at-scale.md).
 
@@ -11,7 +13,7 @@ so far ran on a 4-CPU Linux box without a GPU. Read this file, then
 | Role | Model (Hugging Face id unless noted) | Runtime |
 |---|---|---|
 | English NER and relation extraction | `knowledgator/gliner-relex-large-v1.0` | PyTorch, CUDA |
-| Same-entity / type / relation decisions | `fastino/GLiNER2.5-Decide` **vs** `fastino/GLiDE-*` (9B or smaller), head to head | CUDA (vLLM optional for GLiDE) |
+| Same-entity / type / relation decisions | `fastino/GLiNER2.5-Decide` **vs** `fastino/GLiDE-*`, head to head, smallest first (owner, 2026-11-11). Measured: GLiDE 0.4B wins every comparison; larger variants not run | CUDA; GLiDE in its own environment |
 | Candidate retrieval (blocking ANN and linking retriever) | `google/embeddinggemma-2`, 256-d Matryoshka, together with char-ngram TF-IDF | CUDA |
 | Pairwise reranking | `Qwen/Qwen3-Reranker-0.6B`, zero-shot **vs** LoRA fine-tuned | CUDA |
 | Structured matching backbone | Splink 5 on DuckDB (Spark later) | CPU |
@@ -20,8 +22,8 @@ so far ran on a 4-CPU Linux box without a GPU. Read this file, then
 | Graph completion (not this ticket) | `mgalkin/ultra_50g` **vs** Flock (github `jw9730/flock`) | CUDA (torch-scatter) |
 | German phase (later) | `gliner-relex-multi-v1.0`, `fastino/gliner2.5-multi-v1`, `fastino/GLiNER2.5-multi-Decide` | CUDA |
 
-The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6) are dropped.
-`run_b.py` still references them and has to be rebuilt (step 4).
+The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6) are dropped;
+`run_b.py` is rebuilt on the agreed set.
 
 **Why this set:**
 - **Licences:** Fastino Labs is a partner, and the owner arranges the licence once the spike shows the approach works. GLiDE's community licence therefore does not exclude it. Record the partner-agreement exception to ADR-0012 when the agreement exists.
@@ -29,7 +31,7 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
 - **Splink stays the backbone.** It scales to warehouse size, explains each score field by field and needs no labels. Only the pairs it leaves uncertain are re-scored by the neural models.
 - **The generative model is hosted** and sits behind the provider-neutral `TextLLM` protocol in `llm.py`, so a deployment can route calls through its own tenant. **The spike sends only synthetic or public data.** Sending client data needs an explicit egress decision per deployment. Still to check: whether Databricks model serving offers these models.
 
-## Results so far (4-CPU Linux, Part A only)
+## Earlier results (4-CPU Linux, no GPU, structured side only)
 
 | Run | Records | Auto-accept precision (realised) | Pairwise F1, machine only | Pairwise F1, with expert | Plain closure F1 | Notes |
 |---|---|---|---|---|---|---|
@@ -72,26 +74,35 @@ The 2021–2023 models first downloaded (bge-small, bge-reranker-base, MiniLM-L6
     against true pairs, not against rejected pairs. Neither is built.
   - **Result files:** `results/estate_1m.json` (5,000 labels), `results/estate_1m_labels_50k.json`,
     `results/estate_1m_labels_150k.json`.
-- **Part B (text)** has only a lexical baseline: top-1 accuracy 0.784, 0% on acronyms, and LTT abstained.
+- **The text side** had only a lexical baseline then: top-1 accuracy 0.784, 0% on acronyms, and LTT abstained. The model arms are in `REPORT.md`.
 
 ## Pod setup
 
 ```bash
 git clone -b claude/blissful-maxwell-bpln7a https://github.com/ddickmann/latence.git
 cd latence/.scratch/semantic-sidecar/spike
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cu128   # match the image's CUDA
+python3 -m venv --system-site-packages .venv && source .venv/bin/activate   # keeps the image's CUDA torch
 pip install splink duckdb pandas pyarrow scikit-learn scipy jellyfish transformers \
   sentence-transformers torchvision pillow gliner "gliner2[local]" peft accelerate anthropic pytest psutil
-export ANTHROPIC_API_KEY=...           # set in the shell; never commit it
-PYTHONHASHSEED=0 python -m pytest -q -p no:cacheprovider .   # 23 pass, no network, no model
+PYTHONHASHSEED=0 python -m pytest -q -p no:cacheprovider .   # no network, no model
+export HF_HOME=/workspace/hf
+python pin_models.py --glide 0.4B      # downloads every model, writes results/models.json (not tracked)
 python smoke_models.py                 # loads each model once; proves the code path, not quality
-hf download fastino/GLiDE-9B --local-dir models/GLiDE-9B && pip install -r models/GLiDE-9B/requirements.txt
-python smoke_models.py glide           # GLiDE ships its own `glide` package and pinned requirements
+
+# GLiDE pins its own torch and transformers: a second environment, used only for the glide arms
+python3 -m venv .venv-glide && source .venv-glide/bin/activate
+pip install -r models/GLiDE-0.4B/requirements.txt
+pip install splink duckdb pandas pyarrow scikit-learn scipy jellyfish psutil pytest
+pip install -c <(printf 'torch==2.14.0\ntransformers==5.17.0\n') sentence-transformers torchvision
+python smoke_models.py glide
 ```
 
-GLiDE pins its own torch and transformers versions. If they clash with the rest, give GLiDE its
-own venv and run only the `glide` arms from it.
+- **In the GLiDE environment the embedder does not load** (its pinned transformers does not
+  know the architecture), so GLiDE text arms run without `--embed`.
+- **The hosted model's key** (`ANTHROPIC_API_KEY`) is set in the shell and never committed. It
+  was not set on the 2026-11-11 run, so no review-item explanations were generated.
+- **A pod's `/workspace` may sit on the container disk.** Then everything is lost when the pod
+  stops: copy `out/*.json` off the pod before stopping it.
 
 `data/`, `out/` and `models/` are git-ignored. Regenerate the data:
 
@@ -100,7 +111,8 @@ python generate.py --entities 4000   --seed 11 --out data/estate_4k.parquet
 python generate.py --entities 33000  --seed 13 --out data/estate_100k.parquet
 python generate.py --entities 330000 --seed 17 --out data/estate_1m.parquet
 python generate_text.py --out data/text_2k
-python -c "from splink import splink_datasets as s; s.historical_50k.to_parquet('data/historical_50k.parquet')"
+python generate_text.py --entities 2000 --threads 1200 --seed 29 --out data/text_threads   # the acronym set
+python -c "import pyarrow.parquet as pq; from splink import splink_datasets as s; pq.write_table(s.historical_50k, 'data/historical_50k.parquet')"
 ```
 
 `run_scale.sh` runs all of Part A in sequence. Its 1M step now also runs on a 15 GB machine.
@@ -136,67 +148,41 @@ workbench shows the suggestion with its conditions and that record.
 
 All four small models load and run through `models.py` on a CPU: EmbeddingGemma 2 (256-d,
 unit norm; it needs `torchvision` and `pillow` even for text), Qwen3-Reranker-0.6B, GLiNER-Relex
-(entities with character offsets, and relations) and GLiNER2.5-Decide. GLiDE has not been
-loaded anywhere yet.
+(entities with character offsets, and relations) and GLiNER2.5-Decide. GLiDE was first loaded
+on the pod (2026-11-11).
 
 One thing to watch when the real arms run: on three hand-written record pairs, zero-shot
 GLiNER2.5-Decide gave nearly the same P(yes) for a clear match and a clear non-match, and its
 answer flipped with the wording of the labels. Three examples prove nothing, and Decide is only
-a feature of the calibrated score. If the measured arm confirms it, the options are the GLiDE
-arm and fine-tuning Decide (its model card documents that).
+a feature of the calibrated score. **The measured arms confirmed it** (2026-11-11): zero-shot
+Decide carries almost no weight on records. GLiDE 0.4B does the job; fine-tuning Decide (its
+model card documents that) is the other option and has not been tried.
 
-## Next steps, in order
+## What is left
 
-0. **Check the GPU:** `python -c "import torch; print(torch.cuda.get_device_name(0))"`.
-1. **Pin the models.** Download every model in the table and write each one's id, revision hash and licence to `results/models.json`.
-2. **Part A at scale on the pod:**
-   - Rerun 100k, then 1M, with `run_a.py`.
-   - Report wall time, peak RSS and pairs per second.
-3. **Part A, uncertain pairs** (code: `rescore.py`, wired into `run_a.py --rescore`):
-   - The pairs between the first-stage reject and accept bands are written out as text and
-     scored by the named scorers. `[splink_logit, <scorers>]` feed a logistic calibrator, then
-     Learn-then-Test on a labelled sample of the uncertain region, then the constrained clusterer.
-   - Each stage runs at δ/2, so the combined accepted set keeps the 0.95 claim at δ = 0.05.
-   - Arms to run at 100k (and at 1M once it fits):
-     ```bash
-     python run_a.py --dataset estate --path data/estate_100k.parquet --baseline-max 0 --out out/a_100k_splink.json
-     python run_a.py ... --rescore rerank        --out out/a_100k_rerank.json
-     python run_a.py ... --rescore decide        --out out/a_100k_decide.json
-     python run_a.py ... --rescore glide         --out out/a_100k_glide.json
-     python run_a.py ... --rescore rerank,decide --out out/a_100k_rerank_decide.json
-     python run_a.py ... --rescore rerank,glide  --out out/a_100k_rerank_glide.json
-     ```
-   - **Not written yet:** the LoRA fine-tune of the reranker on a disjoint labelled split. It
-     ships only if it clears 0.95 where zero-shot does not.
-4. **Part B** (`run_b.py` is rebuilt on the agreed models):
-   - Arms, each adding one thing to the one before:
-     ```bash
-     python run_b.py --data data/text_2k --scorer lexical                          --out out/b_lexical.json
-     python run_b.py --data data/text_2k --scorer rerank                           --out out/b_rerank.json
-     python run_b.py --data data/text_2k --scorer rerank --embed                   --out out/b_rerank_embed.json
-     python run_b.py --data data/text_2k --scorer rerank --embed --decide decide   --out out/b_decide.json
-     python run_b.py --data data/text_2k --scorer rerank --embed --decide glide    --out out/b_glide.json
-     python run_b.py --data data/text_2k --scorer rerank --embed --mentions relex  --out out/b_end_to_end.json
-     ```
-   - `--mentions relex` extracts mentions from the raw documents with GLiNER-Relex and reports
-     extraction precision and recall against the span gold; linking then works on the extracted
-     surfaces.
-   - **Not done yet:** one permissively licensed English entity-linking benchmark (check the
-     licence before use).
-5. **Review items:** `llm.explain_review_item` (fast tier) explains a sample of review-band pairs, synthetic data only. These are the inputs for ticket 16. Spot-check them; they gate nothing.
-6. **`REPORT.md`:**
-   - B-cubed and pairwise P/R/F1;
-   - LTT auto-accept precision with δ and the Wilson lower bound;
-   - review rate and expert minutes per 1,000 records (reported, not gated);
-   - throughput at 10⁵ and 10⁶ records;
-   - the cascade baseline;
-   - every model with its revision and licence note.
-7. **Close out:**
-   - Resolve ticket 20 as go or no-go and update `../map.md`.
-   - Record the model set in tickets 13 and 15.
-   - Commit with neutral messages and no attribution trailers, then push to `claude/blissful-maxwell-bpln7a` (PR #6).
+Done on 2026-11-11 and reported in `REPORT.md`: the models are pinned, the structured arms ran
+at 10⁵ and 10⁶ and on the public person dataset, the text arms ran on both text sets, and
+acronyms have a resolver (`aliases.py`, `run_b.py --aliases`).
+
+Open, in the order they matter for the decision:
+
+1. **The owner's go or no-go** on ticket 20, and a time and cost budget for 10⁶ records.
+2. **One permissively licensed English entity-linking benchmark.** Candidates and their
+   licence questions are in the report; none is cleared.
+3. **A real estate and real text,** even a small hand-labelled slice. Everything so far is
+   synthetic except one public person dataset.
+4. **A second stage without a model** (labels drawn from the undecided pairs, no scorer), and
+   **a model pass just below the reject line** at 10⁶, where the missed matches are.
+5. **The reviewer's alias loop:** a reviewer's choice for a bare acronym becomes a stored
+   alias with its scope. Acronyms that are not organisations ("VP") need the extractor's
+   typing measured.
+6. **Larger GLiDE variants** (0.8B, 2B) only if the review band has to shrink further;
+   **fine-tuning** only if a real estate misses the bar zero-shot.
+7. **Review-item explanations** from the hosted fast tier (`llm.explain_review_item`), for
+   ticket 16. They gate nothing.
+8. **Close out:** record the model set in tickets 13 and 15.
 
 **Go bar:**
 - realised auto-accept precision ≥ 0.95 under Learn-then-Test (δ = 0.05), with its confidence stated;
-- 10⁶ records within a time and cost budget agreed once the 100k timing on the pod is known;
+- 10⁶ records within a time and cost budget the owner sets;
 - no expert-capacity bar during development.

@@ -63,6 +63,9 @@ ontology layer** from two input modalities:
 - **Resolution is the critical path** (owner, 2026-11-08). No contract or harvester build starts
   before *the resolution feasibility spike* reports go or no-go. The candidate design is
   [design/resolution-at-scale.md](design/resolution-at-scale.md).
+  - **The spike's report recommends go** (2026-11-11, [spike/REPORT.md](spike/REPORT.md)): the
+    precision bar and the recall guard are met on synthetic data and one public dataset. The
+    owner's decision is pending, so the ticket stays open.
 - **The machine prepares and the expert decides** (owner, 2026-11-08). AI prepares, resolves and
   processes as much as possible, and calibrated bands decide what it may accept alone. The
   expert gets a very convenient workbench to resolve the review band and to QA everything

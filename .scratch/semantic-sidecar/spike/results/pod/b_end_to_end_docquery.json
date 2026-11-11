@@ -1,0 +1,122 @@
+{
+  "data": "data/text_2k",
+  "arm": {
+    "mentions": "relex",
+    "embedder": true,
+    "scorer": "rerank",
+    "decide": "none"
+  },
+  "anchors": 2125,
+  "mentions": 4085,
+  "nil_mentions": 609,
+  "extraction": {
+    "extracted_spans": 4832,
+    "gold_mentions": 4106,
+    "matched": 4085,
+    "precision": 0.8454056291390728,
+    "recall": 0.9948855333658061,
+    "docs_per_s": 104.29515361905803
+  },
+  "candidates_per_mention": 8.856548347613218,
+  "retrieval_recall_in_kb": 0.9321058688147296,
+  "top1_accuracy_in_kb": 0.6907364787111623,
+  "labels_used": {
+    "calibration": 800,
+    "ltt": 1500
+  },
+  "features": {
+    "top1_score": 0.9204079246993253,
+    "margin": 0.7200869789924897,
+    "top1_lexical": 3.1338153624610423
+  },
+  "bands": {
+    "accept_at": 0.86,
+    "reject_below": null,
+    "share": {
+      "accept": 0.4937576499388005,
+      "review": 0.5062423500611996,
+      "reject": 0.0
+    },
+    "auto_link_precision_realised": 0.9623202776400595,
+    "auto_link_precision_wilson_lower": 0.953092624909438,
+    "rejected_but_linkable_rate": NaN
+  },
+  "by_variant": {
+    "abbreviated": {
+      "n": 412,
+      "top1_accuracy": 0.8009708737864077,
+      "auto_linked_share": 0.6019417475728155
+    },
+    "acronym": {
+      "n": 272,
+      "top1_accuracy": 0.03308823529411765,
+      "auto_linked_share": 0.0
+    },
+    "canonical": {
+      "n": 1077,
+      "top1_accuracy": 0.8189415041782729,
+      "auto_linked_share": 0.7641597028783659
+    },
+    "lower_case": {
+      "n": 178,
+      "top1_accuracy": 0.7921348314606742,
+      "auto_linked_share": 0.7191011235955056
+    },
+    "no_legal_form": {
+      "n": 730,
+      "top1_accuracy": 0.7287671232876712,
+      "auto_linked_share": 0.678082191780822
+    },
+    "stem_only": {
+      "n": 350,
+      "top1_accuracy": 0.4828571428571429,
+      "auto_linked_share": 0.16
+    },
+    "typo": {
+      "n": 457,
+      "top1_accuracy": 0.7396061269146609,
+      "auto_linked_share": 0.4726477024070022
+    }
+  },
+  "assignment": {
+    "machine_only": {
+      "pairwise_precision": 0.9108409321175278,
+      "pairwise_recall": 0.27542892156862747,
+      "pairwise_f1": 0.42295930369324863,
+      "bcubed_precision": 0.9868421052631579,
+      "bcubed_recall": 0.6382129742962056,
+      "bcubed_f1": 0.7751311854998845,
+      "predicted_clusters": 3378,
+      "gold_clusters": 2051,
+      "nil_precision": NaN,
+      "nil_recall": 0.0
+    },
+    "machine_plus_expert": {
+      "pairwise_precision": 0.950533462657614,
+      "pairwise_recall": 0.9007352941176471,
+      "pairwise_f1": 0.924964605946201,
+      "bcubed_precision": 0.978952614093373,
+      "bcubed_recall": 0.9500821821996853,
+      "bcubed_f1": 0.9643013569845632,
+      "predicted_clusters": 2165,
+      "gold_clusters": 2051,
+      "nil_precision": 1.0,
+      "nil_recall": 0.916256157635468
+    }
+  },
+  "review_items": 2068,
+  "throughput": {
+    "scored_pairs": 36179,
+    "pairs_per_s": 396.1199295530388
+  },
+  "timings_s": {
+    "extract": 28.76,
+    "retrieve": 8.45,
+    "score": 91.33,
+    "total": 128.6
+  },
+  "hardware": {
+    "cpus": 48,
+    "gpu": "NVIDIA RTX PRO 4000 Blackwell"
+  }
+}
