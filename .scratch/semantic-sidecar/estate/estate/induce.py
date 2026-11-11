@@ -35,15 +35,30 @@ class Element:
     body: dict[str, Any] = field(default_factory=dict)
 
 
+# Plurals the rules below get wrong, and words that end in "s" and are one thing.
+SINGULAR = {"statuses": "status", "buses": "bus", "analyses": "analysis", "series": "series", "data": "data", "news": "news"}
+
+
 def singular(word: str) -> str:
-    if word.endswith("ies"):
+    """One of what a table name names. English table names only: "cases" is a case, "addresses"
+    an address. A word the rules get wrong is given a label in the estate file."""
+    if word in SINGULAR:
+        return SINGULAR[word]
+    if word.endswith("ies") and len(word) > 4:
         return word[:-3] + "y"
-    if word.endswith("ses") or word.endswith("xes"):
+    if word.endswith("zzes"):
+        return word[:-3]
+    if re.search(r"(ss|x|ch|sh)es$", word):
         return word[:-2]
-    return word[:-1] if word.endswith("s") and not word.endswith("ss") else word
+    if word.endswith(("ss", "us", "is")) or not word.endswith("s"):
+        return word
+    return word[:-1]
 
 
-def label_of(name: str) -> str:
+def label_of(name: str, labels: dict[str, str] | None = None) -> str:
+    """A readable label from a catalog name; ``labels`` holds the ones the estate states."""
+    if labels and name in labels:
+        return labels[name]
     words = name.split("_")
     words[-1] = singular(words[-1])
     text = " ".join(words)
@@ -112,13 +127,15 @@ class Profiler:
         return self.distinct(obj, (a,)) == self.distinct(obj, (a, b))
 
 
-def _owner_of(col: str, objects: list[CatalogObject]) -> str | None:
-    """The object a column is named after: ``owner_id`` belongs to ``owners``."""
+def _owners_of(col: str, objects: list[CatalogObject]) -> set[str]:
+    """The objects a column is named after: ``owner_id`` belongs to ``owners``. Where two layers
+    hold a table of that name, it is named after both."""
+    out = set()
     for o in objects:
         stem = singular(o.name)
         if col in (f"{stem}_id", f"{stem}_ref", f"{stem}_key", f"{stem}_number", f"{stem}_no"):
-            return o.full_name
-    return None
+            out.add(o.full_name)
+    return out
 
 
 def _key_of(obj: CatalogObject, prof: Profiler, join_targets: set[str], objects: list[CatalogObject],
@@ -133,9 +150,9 @@ def _key_of(obj: CatalogObject, prof: Profiler, join_targets: set[str], objects:
         if col in join_targets and prof.unique(obj, (col,)):
             return (col,), "join_target"
     for col in usable:
-        if _owner_of(col, objects) == obj.full_name and prof.unique(obj, (col,)):
+        if obj.full_name in _owners_of(col, objects) and prof.unique(obj, (col,)):
             return (col,), "own_name"
-    free = [c for c in usable if _owner_of(c, objects) in (None, obj.full_name)]
+    free = [c for c in usable if not (owners := _owners_of(c, objects)) or obj.full_name in owners]
     for col in free:
         if prof.unique(obj, (col,)):
             return (col,), "unique"
@@ -164,6 +181,7 @@ def induce(
     ignore_columns: tuple[str, ...] = (),
     derived_schemas: tuple[str, ...] = (),
     without_personal_columns: tuple[str, ...] = (),
+    labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The induced schema level as plain data: ``concepts``, ``relations``, ``measures`` and
     ``meta``. ``verified_joins`` are (child object, parent object) pairs a host has verified.
@@ -209,7 +227,7 @@ def induce(
         comment = o.comment or next((v.comment for v in view_of.get(o.full_name, []) if v.comment), "")
         personal_key = any((c := o.column(k)) is not None and c.sensitive for k in keys.get(o.full_name, ()))
         concepts[o.full_name] = Element(
-            id=f"concept:{o.full_name}", label=label_of(o.name),
+            id=f"concept:{o.full_name}", label=(labels or {}).get(o.full_name) or label_of(o.name, labels),
             status="declared" if view_of.get(o.full_name) else "proposed", signals=sig,
             body={"object": o.id, "object_name": o.full_name, "rows": o.rows, "definition": comment,
                   "key": list(keys.get(o.full_name, ())), "kind": "derived" if o.schema in derived else "entity",
@@ -220,7 +238,7 @@ def induce(
     relations: dict[tuple[str, tuple[str, ...], str], Element] = {}
 
     def add_relation(child: CatalogObject, c_cols: tuple[str, ...], parent: CatalogObject, p_cols: tuple[str, ...],
-                     status: str, signal: dict[str, Any]) -> None:
+                     status: str, signal: dict[str, Any], partial_key: bool = False) -> None:
         rid = (child.full_name, c_cols, parent.full_name)
         if rid in relations:
             relations[rid].signals.append(signal)
@@ -239,7 +257,8 @@ def induce(
             id=f"relation:{child.full_name}.{'+'.join(c_cols)}->{parent.full_name}",
             label=f"{label_of(child.name)} → {label_of(parent.name)}", status=status, signals=[signal],
             body={"from": f"concept:{child.full_name}", "to": f"concept:{parent.full_name}", "columns": list(c_cols),
-                  "to_columns": list(p_cols), "cardinality": "many_to_one", "support": support},
+                  "to_columns": list(p_cols), "cardinality": "many_to_many" if partial_key else "many_to_one", "support": support,
+                  **({"partial_key": True} if partial_key else {})},
         )
 
     dropped: list[dict[str, Any]] = []
@@ -273,6 +292,15 @@ def induce(
             elif all(child.column(k) is not None for k in key) and prof.usable(child, key):
                 add_relation(child, key, parent, key, "proposed",
                              say("name_and_inclusion.key", child.id, child=child.name, columns=list(key), parent=parent.name))
+            else:
+                # The child carries one column of the parent's key, and that column is named
+                # after the parent (campaign_id in a table of completions per campaign). It
+                # refers to the parent's rows that share the value, not to one row.
+                for k in key:
+                    if parent_name in _owners_of(k, objects) and k not in ignore and prof.usable(child, (k,)):
+                        add_relation(child, (k,), parent, (k,), "proposed",
+                                     say("name_and_inclusion.part_of_key", child.id, child=child.name, column=k, parent=parent.name, key=list(key)),
+                                     partial_key=True)
 
     stated_only = []
     for child_name, parent_name in verified_joins or []:
@@ -377,6 +405,18 @@ def induce(
 
     def out(e: Element) -> dict[str, Any]:
         return {"id": e.id, "label": e.label, "status": e.status, "signals": list(e.signals), **e.body}
+
+    # Two concepts never carry one label: where they would (the same table name in two layers),
+    # each says its layer. A relation is labelled by the two concepts it joins.
+    seen: dict[str, int] = {}
+    for c in [*concepts.values(), *value_sets.values()]:
+        seen[c.label] = seen.get(c.label, 0) + 1
+    for name, c in concepts.items():
+        if seen[c.label] > 1:
+            c.label = f"{c.label} ({by_name[name].schema})"
+    shown_as = {c.id: c.label for c in [*concepts.values(), *value_sets.values()]}
+    for r in relations.values():
+        r.label = f"{shown_as[r.body['from']]} → {shown_as[r.body['to']]}"
 
     all_concepts = [out(c) for _, c in sorted(concepts.items())] + [out(c) for _, c in sorted(value_sets.items())]
     return {

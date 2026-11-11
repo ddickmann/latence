@@ -4,6 +4,12 @@ name: vehicles
 title: Vehicle and warranty estate
 schema_prefix: nhtsa_
 schemas: [clean, internal, marts, partner]  # `partner` exists only in the mirror with the seed
+# Labels the rule for a table name gets wrong (it reads the last word as an English plural and
+# knows no abbreviations). Keyed on the table's name.
+labels:
+  mfr_communications: Manufacturer communication
+# The language the catalog's comments are written in.
+language: en
 # Objects computed from the others. Where the catalog records lineage this is read from it.
 derived_schemas: [marts]
 # Load and lineage columns: they carry no meaning and are never keys or references.

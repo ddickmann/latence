@@ -127,6 +127,8 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
 
     structure = export.get("structure") or {}
     for p in structure.get("part_of", []):
+        if p["kind"] != "part_of":
+            continue  # a concept that links two things is a part of neither
         w.lines.append(f"{w.iri(p['from'])} rdfs:subClassOf [ a owl:Restriction ; owl:onProperty v:partOf ; owl:someValuesFrom {w.iri(p['to'])} ] .\n")
         w.add(w.iri(p["id"]), [("a", "owl:NamedIndividual"), ("rdfs:label", _lit(f"{p['from']} is part of {p['to']}")), ("v:reviewStatus", _lit(_status(p)))])
     for r in structure.get("roll_ups", []):

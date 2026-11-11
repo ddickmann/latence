@@ -40,6 +40,8 @@ CODES: dict[str, tuple[tuple[str, ...], str]] = {
     "metric_view_join": (("view", "on"), "the metric view {view} joins on {on}"),
     "name_and_inclusion.column": (("child", "column", "parent", "key"), "{child}.{column} is named like the key {parent}.{key} and its values are found there"),
     "name_and_inclusion.key": (("child", "columns", "parent"), "{child} carries ({columns}), the key of {parent}, and its values are found there"),
+    "name_and_inclusion.part_of_key": (("child", "column", "parent", "key"),
+                                       "{child}.{column} is named after {parent} and is one column of its key ({key}); its values are found there"),
     "verified_join": ((), "verified by the host's layer job"),
     # --- value sets ------------------------------------------------------------------------
     "shared_column.value_set": (("column", "objects", "values"), "the column {column} appears in {objects} objects with at most {values} distinct values"),
@@ -55,7 +57,10 @@ CODES: dict[str, tuple[tuple[str, ...], str]] = {
     "refers_to_a_level.some": (("filled", "rows", "concept", "level"),
                                "{filled} of {rows} rows of {concept} carry a {level}, which is a level of a hierarchy; the others sit under none"),
     "key_contains_key": (("concept", "key", "whole", "columns"), "the key of {concept} ({key}) contains the key of {whole} ({columns})"),
+    "key_contains_part_of_key": (("concept", "key", "whole", "columns"), "the key of {concept} ({key}) contains {columns}, one column of the key of {whole}"),
     "same_key": (("base", "key"), "a derived object with the key of {base} ({key})"),
+    "names_an_entity": (("value_set", "entity", "keys", "values"),
+                        "{value_set} has {values} values over the {keys} rows of {entity}: it names a single {entity}, it does not group them"),
     # --- the class tree --------------------------------------------------------------------
     "language_model.class": (("model", "parent"), "proposed by {model} as a class between concepts and {parent}"),
     "language_model.placed": (("model",), "placed by {model}"),

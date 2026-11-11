@@ -77,3 +77,17 @@ def test_the_base_address_has_to_be_an_absolute_iri(reader: DuckDBReader) -> Non
     with pytest.raises(ValueError, match="absolute IRI"):
         to_turtle(_export(reader), "estate/toy")
     assert Path(__file__).exists()
+
+
+def test_a_concept_that_links_two_things_is_written_as_a_part_of_neither(reader: DuckDBReader) -> None:
+    export = _export(reader)
+    step = {"signals": [], "status": "proposed", "claim": "0" * 16}
+    export["structure"]["part_of"] = [
+        {**step, "id": "part_of:a", "from": "concept:shop.claims", "to": "concept:shop.dealers", "kind": "part_of"},
+        {**step, "id": "part_of:b", "from": "concept:shop.visits", "to": "concept:shop.dealers", "kind": "links"},
+        {**step, "id": "part_of:c", "from": "concept:shop.visits", "to": "concept:shop.parts", "kind": "links"},
+    ]
+    g = rdflib.Graph().parse(data=to_turtle(export, BASE), format="turtle")
+    labels = {str(o): s for s, o in g.subject_objects(RDFS.label)}
+    restricted = {s for s, o in g.subject_objects(RDFS.subClassOf) if (o, OWL.onProperty, V.partOf) in g}
+    assert restricted == {labels["Claim"]}

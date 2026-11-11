@@ -95,13 +95,16 @@ def test_part_of_comes_from_keys_and_a_derived_object_describes_its_entity(shop:
     assert [(d["from"], d["to"]) for d in st["describes"]] == [("concept:m.order_profile", "concept:s.orders")]
 
 
-def test_every_value_gets_the_value_above_it_and_a_contested_one_says_so(shop: DuckDBReader) -> None:
+def test_every_value_gets_the_value_above_it_and_one_under_two_values_gets_none(shop: DuckDBReader) -> None:
     st = build_structure(shop, _model())
     known = {f"value:town:T{k}" for k in range(60)} | {f"value:region:R{k}" for k in range(6)} | {f"value:brand_name:N{k}" for k in range(11)} | {f"value:brand:B{k}" for k in (0, 1, 2, 3, 9)}
     edges = broader_edges(shop, st, known)
     up = {e["from"]: e for e in edges}
     assert up["value:town:T7"]["to"] == "value:region:R1" and "contested" not in up["value:town:T7"]
-    assert up["value:brand_name:N7"]["to"] == "value:brand:B3" and up["value:brand_name:N7"]["contested"] is True  # mostly B3, sometimes B9
+    assert "value:brand_name:N7" not in up  # mostly B3, sometimes B9: the data does not say, so no edge is drawn
+    step = next(r for r in st["roll_ups"] if r["id"] == "roll_up:value:brand_name->value:brand")
+    assert step["breaking"] == [{"value": "N7", "parents": ["B3", "B9"]}]  # the step names the value that breaks it (it does so in both objects)
+    assert "breaking" not in next(r for r in st["roll_ups"] if r["id"] == "roll_up:value:town->value:region")
     assert sum(e["from"].startswith("value:town:") for e in edges) == 60
     assert all(e["from"] in known and e["to"] in known and e["kind"] == "broader" for e in edges)
 

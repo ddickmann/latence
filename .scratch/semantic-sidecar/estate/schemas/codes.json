@@ -78,6 +78,15 @@
    ],
    "en": "the key of {concept} ({key}) contains the key of {whole} ({columns})"
   },
+  "key_contains_part_of_key": {
+   "params": [
+    "concept",
+    "key",
+    "whole",
+    "columns"
+   ],
+   "en": "the key of {concept} ({key}) contains {columns}, one column of the key of {whole}"
+  },
   "language_model.class": {
    "params": [
     "model",
@@ -160,6 +169,24 @@
     "parent"
    ],
    "en": "{child} carries ({columns}), the key of {parent}, and its values are found there"
+  },
+  "name_and_inclusion.part_of_key": {
+   "params": [
+    "child",
+    "column",
+    "parent",
+    "key"
+   ],
+   "en": "{child}.{column} is named after {parent} and is one column of its key ({key}); its values are found there"
+  },
+  "names_an_entity": {
+   "params": [
+    "value_set",
+    "entity",
+    "keys",
+    "values"
+   ],
+   "en": "{value_set} has {values} values over the {keys} rows of {entity}: it names a single {entity}, it does not group them"
   },
   "postcode.different": {
    "params": [],

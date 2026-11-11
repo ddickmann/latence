@@ -210,10 +210,11 @@
   "structure": {
    "type": "object",
    "required": [
-    "roll_ups",
+    "describes",
     "equivalent",
+    "not_proposed",
     "part_of",
-    "describes"
+    "roll_ups"
    ],
    "additionalProperties": false,
    "properties": {
@@ -242,6 +243,29 @@
        },
        "claim": {
         "$ref": "#/$defs/claim"
+       },
+       "breaking": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "value",
+          "parents"
+         ],
+         "additionalProperties": false,
+         "properties": {
+          "value": {
+           "type": "string"
+          },
+          "parents": {
+           "type": "array",
+           "minItems": 2,
+           "items": {
+            "type": "string"
+           }
+          }
+         }
+        }
        }
       }
      }
@@ -300,6 +324,12 @@
        },
        "claim": {
         "$ref": "#/$defs/claim"
+       },
+       "kind": {
+        "enum": [
+         "part_of",
+         "links"
+        ]
        }
       }
      }
@@ -329,6 +359,37 @@
        },
        "claim": {
         "$ref": "#/$defs/claim"
+       }
+      }
+     }
+    },
+    "not_proposed": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "required": [
+       "id",
+       "concept",
+       "signals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "id": {
+        "type": "string",
+        "pattern": "^not_proposed:"
+       },
+       "concept": {
+        "type": "string"
+       },
+       "entity": {
+        "type": "string"
+       },
+       "signals": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+         "$ref": "#/$defs/signal"
+        }
        }
       }
      }
@@ -611,6 +672,15 @@
     },
     "claim": {
      "$ref": "#/$defs/claim"
+    },
+    "partial_key": {
+     "const": true
+    },
+    "cardinality": {
+     "enum": [
+      "many_to_one",
+      "many_to_many"
+     ]
     }
    }
   },

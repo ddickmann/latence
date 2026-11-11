@@ -55,7 +55,7 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     names = {o.full_name for o in reader.objects()}
     joins = read_verified(verified, names) if verified else []
     shown = tuple(cfg.get("without_personal_columns", ()))
-    model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())), shown)
+    model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())), shown, labels=cfg.get("labels"))
     seeded = set(cfg.get("seeded_objects", ()))
     for c in model["concepts"]:
         if c.get("object_name") in seeded:
@@ -67,7 +67,8 @@ def build(config: Path, duckdb_path: Path, views: Path | None, verified: Path | 
     new = append(out / "assertions.jsonl", assertions_of(model))
     layer = replay(model, read_decisions(out / "decisions.jsonl"))
     instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown,
-                                also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None)
+                                also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None,
+                                label_columns=cfg.get("label_columns"))
     structure = build_structure(reader, layer, tuple(cfg.get("personal_objects", ())))
     if hosted_model and not cfg.get("classes", {}).get("hosted_model"):
         raise SystemExit("this estate does not allow its names to be sent to a hosted model (classes.hosted_model in the estate file)")

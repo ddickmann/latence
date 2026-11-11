@@ -32,6 +32,7 @@ from .induce import SUPPORT_FLOOR, _q
 from .reader import CatalogObject, Reader
 
 MIN_OBJECTS = 2  # a roll-up seen in one object only may be an accident of that object
+MIN_ROWS_FOR_A_NAME = 10  # fewer rows say nothing about whether a column groups them
 
 
 def _value_sets(model: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -61,15 +62,60 @@ def _breaks(reader: Reader, o: CatalogObject, a: str, b: str) -> tuple[int, int]
     return int(n), int(bad)
 
 
+MAX_BREAKING_NAMED = 20
+
+
+def _breaking(reader: Reader, objects: list[CatalogObject], a: str, b: str) -> list[dict[str, Any]]:
+    """The values of a that go with more than one value of b, each with the values it goes
+    with, most frequent first."""
+    parts = [f"SELECT CAST({_q(a)} AS VARCHAR) x, CAST({_q(b)} AS VARCHAR) y FROM {reader.quote(o)} WHERE {_q(a)} IS NOT NULL AND {_q(b)} IS NOT NULL" for o in objects]
+    rows = reader.query(f"SELECT x, y, count(*) FROM ({' UNION ALL '.join(parts)}) t GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2")
+    parents: dict[str, list[str]] = {}
+    for x, y, _n in rows:
+        parents.setdefault(x, []).append(y)
+    return [{"value": x, "parents": ys} for x, ys in sorted(parents.items()) if len(ys) > 1][:MAX_BREAKING_NAMED]
+
+
+def entity_names(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = ()) -> dict[str, list[dict[str, Any]]]:
+    """Value sets that are the name of an entity and not a way to group it.
+
+    The induction takes a column for a value set when several objects share it and its values
+    repeat somewhere. A title does that too: it repeats in every table that reports on the
+    thing it names. In the table of the thing itself it does not: there, most rows have a
+    value of their own. So a value set with more than half as many values as rows in the table
+    of an entity with a single key is that entity's name. Nothing rolls up from a name."""
+    objects = {o.full_name: o for o in reader.objects()}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for col, v in sorted(_value_sets(model).items()):
+        for c in model["concepts"]:
+            name = str(c.get("object_name"))
+            o = objects.get(name)
+            if o is None or c["kind"] not in ("entity", "fact") or len(c.get("key") or []) != 1 or name in personal_objects or name not in v["objects"]:
+                continue
+            column = o.column(col)
+            if column is None or column.sensitive:
+                continue
+            rows, values = reader.query(f"SELECT count({_q(col)}), count(DISTINCT {_q(col)}) FROM {reader.quote(o)}")[0]
+            if rows >= MIN_ROWS_FOR_A_NAME and 2 * values > rows:
+                out.setdefault(col, []).append({"entity": c["id"], "object": name, "keys": int(rows), "values": int(values)})
+    return out
+
+
 def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = ()) -> dict[str, Any]:
     objects = {o.full_name: o for o in reader.objects()}
     vs = _value_sets(model)
     personal = set(personal_objects)
     concepts = {c["id"]: c for c in model["concepts"]}
+    names = entity_names(reader, model, personal_objects)
+    not_proposed = [{"id": f"not_proposed:value:{col}", "concept": vs[col]["id"], "entity": e["entity"],
+                     "signals": [say("names_an_entity", e["entity"], value_set=vs[col]["label"], entity=concepts[e["entity"]]["label"], keys=e["keys"], values=e["values"])]}
+                    for col, found in sorted(names.items()) for e in found[:1]]
 
     # ---- which value set determines which, and how cleanly ----------------------------------
     checked: dict[tuple[str, str], dict[str, Any]] = {}
     for a, b in itertools.permutations(sorted(vs), 2):
+        if a in names or b in names:
+            continue  # a name is no level
         both = _carried(reader, objects, vs, a, b, personal)
         if len(both) < MIN_OBJECTS:
             continue
@@ -102,6 +148,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
                   say("functional_dependency.most", objects=len(s["objects"]), holding=s["values_checked"] - s["values_breaking"], checked=s["values_checked"], a=a, b=b))
         roll_ups.append({"id": f"roll_up:value:{a}->value:{b}", "from": vs[a]["id"], "to": vs[b]["id"], "kind": "roll_up", "status": "proposed",
                          "label": f"{vs[a]['label']} → {vs[b]['label']}", "support": s,
+                         **({} if clean else {"breaking": _breaking(reader, [objects[n] for n in s["objects"]], a, b)}),
                          "signals": [signal]})
     # Master data below the value set it refers to: the last level of a hierarchy.
     refers = [r for r in model["relations"] if r["to"].startswith("concept:value:") and not r["from"].startswith("concept:value:")]
@@ -113,7 +160,7 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         if c is None or c["kind"] != "entity" or len(c.get("key") or []) != 1 or c.get("object_name") in personal:
             continue
         levels = {x for step in steps for x in step}
-        finest = [a for a in cols if a in levels and a not in lesser and not any((x, a) in steps for x in cols)]  # no finer level on this entity
+        finest = [a for a in cols if a in levels and a not in lesser and a not in names and not any((x, a) in steps for x in cols)]  # no finer level on this entity
         o = objects.get(str(c.get("object_name")))
         for a in sorted(finest):
             support = None
@@ -133,12 +180,16 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
         key = set(c.get("key") or [])
         if len(key) < 2 or c["kind"] == "derived":
             continue
+        # A reference to one column of a whole's key counts too: it is a second thing the rows
+        # are about, so the concept links two things and is a part of neither.
         wholes = [r for r in model["relations"] if r["from"] == c["id"] and set(r["columns"]) <= key
-                  and concepts.get(r["to"], {}).get("kind") in ("entity", "fact") and set(concepts[r["to"]].get("key") or []) == set(r.get("to_columns") or r["columns"])]
+                  and concepts.get(r["to"], {}).get("kind") in ("entity", "fact")
+                  and (r.get("partial_key") or set(concepts[r["to"]].get("key") or []) == set(r.get("to_columns") or r["columns"]))]
         for r in sorted(wholes, key=lambda r: r["to"]):
+            code = "key_contains_part_of_key" if r.get("partial_key") else "key_contains_key"
             part_of.append({"id": f"part_of:{c['id'].removeprefix('concept:')}->{r['to'].removeprefix('concept:')}", "from": c["id"], "to": r["to"],
                             "kind": "part_of" if len(wholes) == 1 else "links", "status": "proposed", "relation": r["id"],
-                            "signals": [say("key_contains_key", concept=c["label"], key=list(c["key"]), whole=concepts[r["to"]]["label"], columns=list(r["columns"]))]})
+                            "signals": [say(code, concept=c["label"], key=list(c["key"]), whole=concepts[r["to"]]["label"], columns=list(r["columns"]))]})
 
     # ---- the same thing at another layer -----------------------------------------------------
     by_key: dict[tuple[str, ...], list[dict[str, Any]]] = {}
@@ -155,13 +206,14 @@ def build_structure(reader: Reader, model: dict[str, Any], personal_objects: tup
                               "kind": "describes", "status": "proposed",
                               "signals": [say("same_key", base=base[0]["label"], key=list(key))]})
 
-    return {"roll_ups": roll_ups, "equivalent": equivalent, "part_of": part_of, "describes": describes,
+    return {"roll_ups": roll_ups, "equivalent": equivalent, "part_of": part_of, "describes": describes, "not_proposed": not_proposed,
             "_steps": {f"{a}->{b}": s["objects"] for (a, b), s in steps.items()}}
 
 
 def broader_edges(reader: Reader, structure: dict[str, Any], known: set[str]) -> list[dict[str, Any]]:
-    """For every roll-up between two value sets: which value sits under which. Counted over
-    the objects that carry both; where a value has two parents, the more frequent one."""
+    """For every roll-up between two value sets: which value sits under which, counted over the
+    objects that carry both. A value the data puts under two values gets no edge: the step names
+    it among its breaking values, and a person says where it belongs."""
     objects = {o.full_name: o for o in reader.objects()}
     out = []
     for step, names in sorted(structure["_steps"].items()):
@@ -174,12 +226,10 @@ def broader_edges(reader: Reader, structure: dict[str, Any], known: set[str]) ->
             seen[x] = seen.get(x, 0) + 1
         done: set[str] = set()
         for x, y, n in rows:
-            if x in done:
+            if x in done or seen[x] > 1:
                 continue
             done.add(x)
             edge = {"from": f"value:{a}:{x}", "to": f"value:{b}:{y}", "kind": "broader", "relation": f"roll_up:value:{a}->value:{b}", "rows": int(n)}
-            if seen[x] > 1:
-                edge["contested"] = True
             if edge["from"] in known and edge["to"] in known:
                 out.append(edge)
     return out

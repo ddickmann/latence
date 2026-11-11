@@ -39,12 +39,16 @@ GENERIC = {"motor", "motors", "group", "holdings", "international", "global", "s
            "usa", "us", "north", "south", "east", "west", "europe", "operations", "manufacturing", "engineering", "distributors"}
 
 
-def _label_column(obj: CatalogObject, key: str) -> str:
+def _label_columns(obj: CatalogObject, key: str, stated: list[str] | None) -> list[str]:
+    """The columns a row is labelled by: those the estate states, else the first column that
+    usually holds a name, else the key."""
+    if stated:
+        return stated
     for want in NAME_COLUMNS:
         col = obj.column(want)
         if col is not None and not col.sensitive:
-            return want
-    return key
+            return [want]
+    return [key]
 
 
 def _core(name: str) -> tuple[list[str], list[str]]:
@@ -88,7 +92,7 @@ def possibly_same(values: list[tuple[str, int]]) -> list[dict[str, Any]]:
 
 def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tuple[str, ...] = (),
                     resolve: tuple[str, ...] = (), without_personal_columns: tuple[str, ...] = (),
-                    also: dict[str, str] | None = None) -> dict[str, Any]:
+                    also: dict[str, str] | None = None, label_columns: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Nodes, edges and review items for an induced model. ``personal_objects`` never give
     nodes. Neither does any object with a sensitive column, unless it is named in
     ``without_personal_columns``: then its rows are nodes and the sensitive columns stay
@@ -139,15 +143,17 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
             continue
         if len(key) != 1 or not obj.rows or obj.rows > MAX_ENTITY_ROWS or (c["id"] not in referred_to and name not in also):
             continue  # master data is what other objects refer to; a table nothing points at is a list of events
-        label_col = also.get(name) or _label_column(obj, key[0])
-        if obj.column(label_col) is None or obj.column(label_col).sensitive:  # type: ignore[union-attr]
-            raise ValueError(f"{name}.{label_col} is missing or personal and cannot label a row")
+        label_cols = [also[name]] if name in also else _label_columns(obj, key[0], (label_columns or {}).get(name))
+        for label_col in label_cols:
+            if obj.column(label_col) is None or obj.column(label_col).sensitive:  # type: ignore[union-attr]
+                raise ValueError(f"{name}.{label_col} is missing or personal and cannot label a row")
         refs = [col for col in value_cols if obj.column(col) is not None and not obj.column(col).sensitive]  # type: ignore[union-attr]
-        select = ", ".join(f"CAST({_q(x)} AS VARCHAR)" for x in [key[0], label_col, *refs])
+        select = ", ".join(f"CAST({_q(x)} AS VARCHAR)" for x in [key[0], *label_cols, *refs])
         for row in run(f"SELECT {select} FROM {reader.quote(obj)} ORDER BY 1"):
             nid = f"{name}:{row[0]}"
-            nodes.append({"id": nid, "concept": c["id"], "label": str(row[1]) if row[1] is not None else str(row[0]), "key": str(row[0])})
-            for col, v in zip(refs, row[2:]):
+            said = [str(x) for x in row[1:1 + len(label_cols)] if x is not None]
+            nodes.append({"id": nid, "concept": c["id"], "label": " · ".join(said) if said else str(row[0]), "key": str(row[0])})
+            for col, v in zip(refs, row[1 + len(label_cols):]):
                 if v is not None:
                     edges.append({"from": nid, "to": f"value:{col}:{v}", "relation": f"relation:{name}.{col}->value:{col}", "kind": "refers_to"})
         node_objects[name] = (obj, key[0])
@@ -191,5 +197,5 @@ def build_instances(reader: Reader, model: dict[str, Any], personal_objects: tup
         "review": review,
         "meta": {"nodes": len(nodes), "edges": len(edges), "review_items": len(review), "certified": False,
                  "nodes_per_concept": dict(sorted(per_concept.items())), "queries": len(queries),
-                 "labels": {c["id"]: label_of(c["id"].split(".")[-1].split(":")[-1]) for c in model["concepts"]}},
+                 "labels": {c["id"]: c["label"] for c in model["concepts"]}},
     }
