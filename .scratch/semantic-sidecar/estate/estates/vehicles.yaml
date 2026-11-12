@@ -67,6 +67,14 @@ classes:
   # to have cost. Read on 2026-11-11 from third-party price listings; the provider's own price
   # page could not be opened from where this was written. Reasoning tokens are output tokens.
   prices: {input_per_1m: 0.10, output_per_1m: 0.50, read_on: "2026-11-11", source: third-party listings}
+# What a host's semantic layer may be handed in a proposal file (`python -m estate propose`),
+# from approved decisions only and never from the seeded source.
+# `names`: the master lists whose rows carry a name a question may use. A list that is not
+# named here gives no names, whatever a reviewer approved.
+# `spellings_on` (optional, by column): the object a value set's decided spellings are stated
+# on, where it should not be the one that holds the most values of the set.
+propose:
+  names: [internal.dealers]
 # The address under which the Turtle export names its elements. Identifiers below it are opaque.
 export:
   base_iri: "https://example.invalid/estate/vehicles/"

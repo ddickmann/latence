@@ -3,10 +3,13 @@
   python -m estate build --config estates/vehicles.yaml --duckdb <mirror.duckdb> \\
          --metric-views <views.txt> [--verified <host catalog.yaml>] --out out/vehicles
   python -m estate export --out out/vehicles --ui-dir <host ui>/public/data/ontology
+  python -m estate propose --config estates/vehicles.yaml --out out/vehicles
 
 ``build`` appends to ``assertions.jsonl`` in the output folder, reads ``decisions.jsonl``
 there if a person has written one, and writes ``ontology.json`` (graph-export/3).
 ``export`` copies the files a screen reads into the host's static folder.
+``propose`` writes, from the approved decisions of that folder, the proposal file a host's
+semantic layer may take up (``proposal.yaml``).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
+from .proposal import in_layer, proposal, read_receipts, to_yaml
 from .reader import Reader
 from .reader_databricks import DatabricksReader
 from .reader_duckdb import DuckDBReader
@@ -51,9 +55,13 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 
 def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: Path | None, out: Path,
           resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
-          client: object | None = None, usage: tuple[Path, ...] = (), catalog: str | None = None) -> dict[str, object]:
+          client: object | None = None, usage: tuple[Path, ...] = (), catalog: str | None = None,
+          receipts: tuple[Path, ...] = ()) -> dict[str, object]:
     """The estate is read from a DuckDB mirror (``duckdb_path``) or from Unity Catalog
-    (``catalog``; host, warehouse and credentials from the environment). ``hosted_model`` lets
+    (``catalog``; host, warehouse and credentials from the environment). ``receipts`` are what
+    a host wrote when it placed a proposal file: an approved element they name says in the
+    export since which release of the host's library it is in the semantic layer; without
+    one no element says so. ``hosted_model`` lets
     a hosted language model propose classes, if the estate allows it. The call is made only
     when what would be sent has changed, and only if its worst case stays under ``max_usd``.
     ``client`` stands in for the provider's client in tests."""
@@ -148,6 +156,7 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
     layer = {**layer, "meta": {**layer["meta"], "decisions": decisions.summary()}}
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
                           language=cfg.get("language", "en"))
+    export, taken_up = in_layer(export, read_receipts(receipts))
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
@@ -155,7 +164,26 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
             "structure": {k: len(v) for k, v in export["structure"].items()},
             "classes": {"voices": classes["voices"], "placed": len(classes["subclass_of"]), "contested": sum(s["contested"] for s in classes["subclass_of"]),
                         "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"]), "hosted_call": call_note},
-            "resolution": instances["meta"].get("resolution") or resolution_note}
+            "resolution": instances["meta"].get("resolution") or resolution_note,
+            **({"in_layer": taken_up} if receipts else {})}
+
+
+def propose(config: Path, out: Path, file: Path | None = None,
+            decided_on: str | None = None) -> dict[str, Any]:
+    """Write the proposal file of a build folder: from ``ontology.json`` (what the elements
+    state now) and ``decisions.jsonl`` (what a person approved), to ``proposal.yaml`` there or
+    to ``file``. ``decided_on`` is the day for the decisions that state none. Returns what was
+    written and what was not, each with the reason."""
+    cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+    said = cfg.get("propose") or {}
+    if not (out / "ontology.json").exists():
+        raise SystemExit(f"no build in {out}: run `build` first, then `propose`")
+    export = json.loads((out / "ontology.json").read_text(encoding="utf-8"))
+    document, report = proposal(export, read_decisions(out / "decisions.jsonl"),
+                                tuple(said.get("names", ())), said.get("spellings_on"), decided_on)
+    target = file or out / "proposal.yaml"
+    target.write_text(to_yaml(document, cfg["name"]), encoding="utf-8")
+    return {"file": str(target), **report}
 
 
 def compare(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +250,9 @@ def main() -> None:
     b.add_argument("--hosted-model", action="store_true", help="let a hosted language model propose classes and definitions from names (the estate file must allow it)")
     b.add_argument("--class-answer", type=Path, help="a recorded answer to classes_prompt.json, in place of a call to a hosted model")
     b.add_argument("--usage", type=Path, action="append", default=[], help="a log of answered questions (usage/1); repeat for more")
+    b.add_argument("--receipt", type=Path, action="append", default=[],
+                   help="what a host wrote when it placed a proposal file (layer-receipt/1); "
+                        "repeat for more, oldest first")
     b.add_argument("--max-usd", type=float, default=0.25, help="the most one call to the hosted model may cost in the worst case; a call that could cost more is not made")
     sd = sub.add_parser("seed")
     sd.add_argument("--config", type=Path, required=True)
@@ -238,6 +269,16 @@ def main() -> None:
     e = sub.add_parser("export")
     e.add_argument("--out", type=Path, required=True)
     e.add_argument("--ui-dir", type=Path, required=True)
+    pr = sub.add_parser("propose", help="the proposal file for a host's semantic layer, from "
+                                        "the approved decisions of a build")
+    pr.add_argument("--config", type=Path, required=True)
+    pr.add_argument("--out", type=Path, required=True,
+                    help="the build folder that holds ontology.json and decisions.jsonl")
+    pr.add_argument("--file", type=Path,
+                    help="where to write the file (default: proposal.yaml in the build folder)")
+    pr.add_argument("--decided-on",
+                    help="the day (YYYY-MM-DD) of the approved decisions that state none; "
+                         "without it such a decision is not written")
     a = ap.parse_args()
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
@@ -247,8 +288,12 @@ def main() -> None:
         result = score(json.loads((a.out / "ontology.json").read_text(encoding="utf-8")), yaml.safe_load(a.gold.read_text(encoding="utf-8")))
         (a.out / "score.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=1, ensure_ascii=False))
+    elif a.cmd == "propose":
+        report = propose(a.config, a.out, a.file, a.decided_on)
+        print(json.dumps(report, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
-        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage), catalog=a.catalog), indent=1))
+        print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage), catalog=a.catalog,
+                               receipts=tuple(a.receipt)), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:

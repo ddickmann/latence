@@ -4,6 +4,9 @@ State on 2026-11-11, after tickets 26 to 33 (the ontology stream of the map). Tw
 one branch name in both: `claude/blissful-maxwell-bpln7a`. The engine side is in this
 repository (draft pull request 6); the page is in the host's repository (draft pull request 5).
 
+Added on 2026-11-12 (ticket 40): the proposal file for the host's semantic layer, block 8 and
+the section *The proposal file for the host's semantic layer*.
+
 ## The owner's run, in order
 
 Every block can be pasted as it is after the two paths in block 1 are set. Blocks 1 to 5 need
@@ -38,7 +41,7 @@ uv run metis-dev usage export \
 cd $LATENCE/.scratch/semantic-sidecar/estate
 python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
 python3.12 -m venv ../spike/.venv && ../spike/.venv/bin/pip install -q -r ../spike/requirements-link.txt
-PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 114 pass
+PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 124 pass
 ```
 
 **4. The seeded second source, the build, the export**
@@ -99,12 +102,32 @@ Report back the output of `compare`, or the first error with the statement id it
 seeded second source is not in the catalog unless `out/vehicles/seeded_accounts.sql` was
 loaded, so the catalog's build links no records; that difference is expected.
 
+**8. The proposal file for the host's semantic layer** (ticket 40; after decisions were made)
+
+```bash
+cd $LATENCE/.scratch/semantic-sidecar/estate
+.venv/bin/python -m estate propose --config estates/vehicles.yaml --out out/vehicles \
+    --decided-on <YYYY-MM-DD>                # the day of the decisions that state none
+cd $METIS
+uv run metis-dev propose estate-semantics --apply --release <version> --receipt /tmp/receipt.json \
+    --glossary $LATENCE/.scratch/semantic-sidecar/estate/out/vehicles/proposal.yaml
+```
+
+Read what `estate propose` prints before the second command: every entry written, and every
+approved decision that was not, with the reason. The host's tool prints one line per entry:
+placed, already there, or refused and why. Then rerun the build of block 4 with
+`--receipt /tmp/receipt.json` added, and its export: the page says on those elements since
+which version of the library they are in the semantic layer.
+
+The host's change of its library is reviewed and released as the host's handbook says; this
+side only writes the file and reads the receipt.
+
 ## What was verified, and where
 
 | Step | On the machine that built it (Linux, no container, no Databricks) | Still to do on the owner's machine |
 |---|---|---|
 | Estate mirror, metric views, usage log from the host's fixtures | done | blocks 2 |
-| Engine tests (`estate/tests`, 114) and matcher tests (`spike`, 155) | pass | block 3 (the engine's) |
+| Engine tests (`estate/tests`, 124) and matcher tests (`spike`, 155) | pass | block 3 (the engine's) |
 | The matcher in a clean environment from `spike/requirements-link.txt` | the same resolution file byte for byte | block 3 |
 | `estate build` on the mirror with the seeded source, the kept model answer and the usage log | done, twice, byte-identical | block 4 |
 | One live call of the class voice on the small hosted model | done once (ticket 31), USD 0.0035 | not needed; the answer is kept as a file |
@@ -116,6 +139,8 @@ loaded, so the catalog's build links no records; that difference is expected.
 | The host's landing tier and full gate | **not run** | run |
 | The page next to TalkToData and TalkToDashboards on the Databricks world | **not run** | run |
 | Reading the estate from Unity Catalog | **against a stand-in server only** | block 7 |
+| The proposal file (ticket 40), from the two manufacturer pairs and the dealer list, with decisions written for the trial | placed by the host's tool in a throwaway checkout of the host's final state of 12 Nov: onto the library before the host's own change the result is byte for byte the host's release 1.1.0; onto 1.1.0 all three entries are already there; an entry on an object the layer does not read is refused by name | block 8, with decisions a person made |
+| The receipt read back into the export (`in_layer`) | done on a fresh build of the vehicle estate **without the record linker** | block 8 |
 | The seeded table in a catalog (`out/vehicles/seeded_accounts.sql`) | **written, never run against a catalog** | read it, then run it |
 | The score against a list a person checked | **draft list only; its numbers do not count** | block 6 |
 
@@ -131,6 +156,49 @@ placements, pairs of names), press *Download decisions*, and put the file at
   returns. A rejected placement falls to the other voice's class, or to none.
 - Each decision carries what the element stated when it was made. If the next build states
   something else under the same id, the decision is not applied and is listed as stale.
+
+## The proposal file for the host's semantic layer
+
+The one way anything a review approved reaches the host's semantic layer (ADR-0070).
+`estate propose` writes `out/vehicles/proposal.yaml`; its shape is
+`schemas/proposal-file.schema.json`, written from the host's description of what its tool reads.
+
+- **What is in it.** For every approved pair of names of a value set: the value kept and its
+  other spelling, stated on a catalog object and column (`spellings`). For every approved
+  master list that the estate file names under `propose.names` (here the dealers): each
+  record's key with its name (`names`). Every entry carries the element's id, its claim, and
+  the decision: approved, by whom, on which day.
+- **The dealers need a line written by hand.** The page offers no decision on a stated
+  concept. Append to `out/vehicles/decisions.jsonl`:
+  `{"subject": "concept:internal.dealers", "verdict": "approved", "by": "<person id>", "claim": "<claim>", "at": "<YYYY-MM-DD>"}`,
+  with the claim the export states for it:
+  `.venv/bin/python -c "import json; print(next(c['claim'] for c in json.load(open('out/vehicles/ontology.json'))['concepts'] if c['id'] == 'concept:internal.dealers'))"`.
+- **The day.** A line the page downloads carries no day. Add `"at"` to the line, or give
+  `--decided-on` for all the lines without one. Without a day an entry is not written.
+- **What is never in it:** a rejected or undecided element; the seeded service accounts, any
+  pair that holds one, and any pair of values of a value set the seeded table carries; a link
+  between records, the machine's (certified here on simulated labels) and a person's alike;
+  a decision made on another statement than the build now makes (printed under `stale`); a
+  decision without a claim. An approved hierarchy step, relation or class is counted under
+  `not_carried`: the file has no entry for it.
+- **Which object a pair is stated on.** The one that holds the most values of the value set,
+  the first by name among equals (for the manufacturers: `clean.recall_campaigns`). If the
+  host refuses an entry because no dimension reads that column, name another object in the
+  estate file (`propose.spellings_on: {manufacturer: clean.recalls}`) and write the file again.
+- **What the host does with it.** `metis-dev propose <library> --glossary <file>` without
+  `--apply` (it then also wants `--sql`) lists each entry with the node it would change;
+  with `--apply` it writes the placed entries into the library, each with its origin, and
+  `--receipt` writes what was placed, what was already there and what was refused. The host
+  refuses on its own what is marked seeded or rests on simulated labels; this side never
+  writes such an entry.
+- **The receipt.** `estate build --receipt <file>` (repeat for more, oldest first) puts
+  `in_layer` (the library and its version) on an approved element the receipt lists as
+  *placed*, if the element still states what was placed. An element a receipt lists as
+  already there gets nothing from that receipt: it does not say since when. The host's
+  release 1.1.0 was placed from a file written by hand; its receipt names the same elements
+  and claims, so `--receipt $METIS/tools/synth/estates/decided/ontology.receipt.json`, given
+  first, is what says "since 1.1.0" for the two pairs and the dealers, once a person's
+  approvals of them are in `decisions.jsonl`.
 
 ## The seeded second source and the labels
 

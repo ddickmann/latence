@@ -296,6 +296,9 @@
      },
      "claim": {
       "$ref": "#/$defs/claim"
+     },
+     "in_layer": {
+      "$ref": "#/$defs/in_layer"
      }
     }
    }
@@ -872,6 +875,9 @@
     },
     "definition": {
      "$ref": "#/$defs/texts"
+    },
+    "in_layer": {
+     "$ref": "#/$defs/in_layer"
     }
    }
   },
@@ -1033,6 +1039,25 @@
   "claim": {
    "type": "string",
    "pattern": "^[0-9a-f]{16}$"
+  },
+  "in_layer": {
+   "description": "On an approved element: the release of a host's library that took it up, as a receipt of the host says (the library, and its version). Absent where no receipt says so.",
+   "type": "object",
+   "required": [
+    "library",
+    "version"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "library": {
+     "type": "string",
+     "minLength": 1
+    },
+    "version": {
+     "type": "string",
+     "minLength": 1
+    }
+   }
   }
  }
 }
