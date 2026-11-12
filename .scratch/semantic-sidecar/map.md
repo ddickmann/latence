@@ -120,7 +120,7 @@ which the owner updates the main machine and switches to Databricks.
 
 Every open ticket, once, with its state (an override of the format's default that open tickets are found by query).
 
-- [Build: the proposal file for the host, written from approved decisions](issues/40-proposal-file-for-the-host.md): new, before the demonstration: the host's ticket on the ontology feeding its semantic layer waits on it
+- [Build: the proposal file for the host, written from approved decisions](issues/40-proposal-file-for-the-host.md): built and tried against the host's tool at its final state of 12 Nov (the library it wrote is the host's own release, byte for byte); open: the host's ticket names the commit here, and a person's decisions go through it
 - [Build: classes and hierarchies are measured against a list a person checked](issues/29-hand-checked-list-and-score.md): built; waits for the owner to correct the hand-checked list
 - [Build: a reader for Unity Catalog, proven against a stand-in](issues/33-unity-catalog-reader.md): built and proven against a stand-in; waits for the owner's run on the real catalog
 - [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md): seven of nine checks met; the owner's decision is open
@@ -156,6 +156,7 @@ The owner answered on 12 Nov: every recommendation is agreed. Each decision is r
 | Declare ontology v1 once the list's score is recorded | [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md) | A signature |
 | Export the host's workspace credentials in one shell (read only) | [Task: get a Databricks sandbox for the engine](issues/09-databricks-sandbox-access.md) | One shell |
 | Run one build against the real catalog, as the first step of the switch to Databricks | [Build: a reader for Unity Catalog, proven against a stand-in](issues/33-unity-catalog-reader.md) | Two commands on the main machine |
+| Approve the two manufacturer pairs and the dealer list, write the proposal file and place it in the host | [Build: the proposal file for the host, written from approved decisions](issues/40-proposal-file-for-the-host.md) | Two decisions on the page, one line by hand, then block 8 of the handoff |
 
 **Decided, with nothing to do now:** the benchmark campaign's spend cap is decided when the campaign is next used; the resolution workbench is mounted in the host after v1, with the review-surface slice.
 
