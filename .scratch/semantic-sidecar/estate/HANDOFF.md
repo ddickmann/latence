@@ -206,8 +206,10 @@ Lineage, row filters and column masks are not read.
   data and not yet reviewed by anyone. Nothing is approved automatically.
 - Which tables are derived, and which columns are load columns, was **told** to the engine for
   this estate.
-- The file is served **without sign-in**; it holds synthetic and public data, and no value of
-  a personal column. An object with a personal column gives no rows at all, unless the estate
+- The file is served **to a signed-in session only** (Metis 213 S-2: anything under the
+  UI's `data/` needs a session, and the image build takes no export from the working tree).
+  Sign in before opening `/ontology`; a signed-out request gets a 401. The file holds
+  synthetic and public data, and no value of a personal column. An object with a personal column gives no rows at all, unless the estate
   file names it under `without_personal_columns` (here: the dealers, an organisation with a
   contact person); then its rows are exported without those columns. Counts of claims per
   dealer and part are exported; no claim row is.
