@@ -65,3 +65,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/02-sota-text-extra
   - a human-labelled DE/EN gold set (*evaluation and the acceptance bars*);
   - profile the linker before any end-to-end timing (*record the baseline*);
   - byte-identical replay of LLM outputs (*the destination and the domain model*).
+
+## From the map (moved 12 Nov)
+
+[The state of the art in text extraction](issues/02-sota-text-extraction.md) — the glinker linker (73%) and per-chunk LLM induction are the bottlenecks, not extraction. GLiNER-Relex leads zero-shot relation extraction, and the GLiNER bi-encoder removes the label-count ceiling. Fabricated relations are fixed by requiring offset-grounded triples plus an entailment check. Bake-off shortlist: Relex + bi-encoder, then with an LLM checker, then a small-LLM extractor, with GLiNER 2.5 as the control.

@@ -59,3 +59,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/06-landscape-and-p
   - PROV-O versus our own provenance contract, and the Ossie ontology working group (*ontology learning and standards*);
   - whether the UC Business Glossary is GA;
   - the Timbr, Neo4j and Stardog provenance claims (UNVERIFIED).
+
+## From the map (moved 12 Nov)
+
+[The landscape: who builds semantic and ontology layers](issues/06-landscape-and-positioning.md) — every rival traces answers, not semantic elements, and auto-drafting tools lose curation on rebuild. Positioning: a ledger of evidence and decisions that proposes into UC and exports open formats. Three demo claims: element-level trace and replay; curation that survives rebuilds; add-only proposals on UC.

@@ -101,3 +101,7 @@ a stage groups by counts like one it filters on; the command writes one line per
 **Host page:** the measures view says how many recorded questions were read and lists what was
 asked for and is not in the model; "Asked for" is one more signal on an element. 202 unit and
 route tests, the browser walk in both languages.
+
+## From the map (moved 12 Nov)
+
+Route table row: what people ask is a signal on the elements they use | AFK | **done**

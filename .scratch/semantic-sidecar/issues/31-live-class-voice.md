@@ -103,3 +103,7 @@ makes no call and gives the same file.
 **Host page:** a definition a model wrote names the model and says that no person has reviewed
 it, until the placement is approved; the German page reads the German definition. 201 unit and
 route tests, the browser walk in both languages.
+
+## From the map (moved 12 Nov)
+
+Route table row: the model's voice on classes runs live on a small hosted model | HITL | **done**

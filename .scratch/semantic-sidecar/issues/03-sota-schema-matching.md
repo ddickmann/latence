@@ -67,3 +67,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/03-sota-schema-mat
   - where candidate concepts come from (*the destination and the domain model*);
   - what to do with declared keys that fail checks;
   - sketch salts across metastores (*the boundary with Metis*).
+
+## From the map (moved 12 Nov)
+
+[The state of the art in schema matching](issues/03-sota-schema-matching.md) — cheap candidates first, then a model judges a short list, and rules drive precision. Metis already has the statistical core (exact key and inclusion checks, calibrated owner decisions). v1 adds five signals that send no values out: UC structure and declared keys, the lexicon, multilingual embeddings, column lineage and query-history mining. A model judge that sees metadata only is optional and gated by egress. Learned column-type models and any model that reads values are deferred.

@@ -3,6 +3,8 @@
 Type: decision
 Mode: HITL
 Status: open
+Decided by the owner (12 Nov): Is the ontology capability at v1; Yes once the list's score is
+recorded; the run on the real catalog moves to the switch
 Blocked by: 26, 27, 28, 29, 30, 31, 32, 33
 
 ## Question
@@ -60,3 +62,30 @@ Mentions from the estate's documents; classes from an outside vocabulary; SHACL 
 exports; a service route in the host; real packages in place of the prototype folder.
 
 ## Answer
+
+## From the map (moved 12 Nov)
+
+Route table row: **is the capability at v1 quality?** | HITL | seven of nine checks met; **the owner's decision is open**
+
+Route note: **What this route needs from the owner:** the hand-checked list corrected (29); the key through the secure form (31); one build against the real catalog (33); the look at v1 (34); the runner started (38).
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Do you declare ontology v1 reached?
+- **Why his:** the ticket is his gate ("the owner sees the page and decides").
+- **Options:**
+  - A. Yes now, with 29 and 33 as dated conditions.
+  - B. Yes once 29's score is recorded, with 33 moved to the switch.
+  - C. Wait for both.
+- **Facts:**
+  - Seven of nine checks are met; the two open ones are your own steps (34, table).
+  - On 11 Nov you said "they look fine" apart from the graph (added that evening) and that the
+    demonstration setup may start.
+  - The Answer section is empty.
+  - Total spend so far is at most USD 0.015 of the USD 25 limit.
+- **Recommendation:** B. The gate's purpose (unblocking the setup) is already served, and the
+  one check that measures quality should not be waived.
+- **Urgency:** before the demonstration. Blocks ticket 42 (the order of what v1 leaves out).
+- **Cost:** a signature after the hand-checked list is corrected.
+- **Decided by the owner (12 Nov):** Yes once the list's score is recorded; the run on the real
+  catalog moves to the switch.

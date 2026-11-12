@@ -48,3 +48,7 @@ Done on 2026-11-11.
 - **Toolchain:** Node 24.11.0 and `uv`, as before.
 - On the owner's machines Postgres 17 and pgvector come from the package manager, which ships
   a current pgvector; nothing of the above is needed there.
+
+## From the map (moved 12 Nov)
+
+Route table row: Postgres with pgvector on this machine | AFK | 34

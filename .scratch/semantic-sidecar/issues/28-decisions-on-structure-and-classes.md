@@ -100,3 +100,7 @@ tests, the browser walk in both languages.
 
 **Not done:** a value that breaks a step cannot yet be given its place by a decision; a
 decision on a pair of names does not merge the two values (ticket 30).
+
+## From the map (moved 12 Nov)
+
+Route table row: a decision on a hierarchy step or a class changes the layer | AFK | **done**

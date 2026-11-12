@@ -81,3 +81,7 @@ Built on 2026-11-11.
 - the labels of the six top classes are shown in English on the German page; their codes are
   in the file (`label_code`), the page's tree does not use them yet (ticket 28, page work);
 - a model's definition exists in English only (ticket 31).
+
+## From the map (moved 12 Nov)
+
+Route table row: the export speaks in codes, every proposal carries its claim (`graph-export/3`) | AFK | **done**

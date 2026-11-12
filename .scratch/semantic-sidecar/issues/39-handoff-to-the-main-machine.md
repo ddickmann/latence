@@ -3,6 +3,8 @@
 Type: task
 Mode: HITL
 Status: open
+Decided by the owner (12 Nov): Is the main machine's main branch ahead of `a6ed5cf0`; Run the
+three check commands now
 Blocked by: 38
 
 ## Question
@@ -61,3 +63,27 @@ written, except those that need Databricks, which are marked.
 ## Tests that prove it
 
 None. The document's commands are run once as written.
+
+## From the map (moved 12 Nov)
+
+Route table row: handoff and the switch to Databricks | HITL | 38
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Will you run the three check commands on the main machine now and say whether
+  its `main` is ahead of `a6ed5cf0`?
+- **Why his:** only that machine knows.
+- **Options:**
+  - A. Now.
+  - B. At handoff.
+- **Facts:**
+  - Two signs say the main machine may hold unpushed commits (39, "Not known from here").
+  - The commands were "given in chat" and are in no file.
+  - 39 counted 14 commits and 34 files. On 12 Nov the working branch was 63 commits ahead of
+    `a6ed5cf0`: 241 files, +22,441 / −339, 16 of them `metis-core` source files.
+- **Recommendation:** A. Every day adds commits to rebase, and the rebase must precede the
+  handoff document (39, steps 2 and 3).
+- **Urgency:** before the demonstration. This is the first thing: it blocks the merge, the
+  Databricks walks, and the decisions on the backend and on the build against the real catalog.
+- **Cost:** three commands on the main machine, and a push of one branch if ahead.
+- **Decided by the owner (12 Nov):** Run the three check commands now.

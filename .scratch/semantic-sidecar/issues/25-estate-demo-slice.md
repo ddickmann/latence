@@ -203,3 +203,7 @@ tickets of its own, in the map's *Route to ontology v1 and the local demonstrati
 - the reader for Unity Catalog: [33](33-unity-catalog-reader.md).
 
 Document mentions stay open and are not in v1 (owner, 2026-11-11).
+
+## From the map (moved 12 Nov)
+
+[ADR-0074 — A host shows the engine's export in a read-only screen of its own](../../docs/adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md) and [The Ontology page over the estate](issues/25-estate-demo-slice.md) (resolved; what is open continues in the route above) — the host writes the page in its own style and shares only the export's file format with the engine; read-only, off the answer path; a file first, a service route later; reviewer decisions travel back as a file. Cut A induces the schema level of the vehicle and warranty estate from its metric views and data statistics: 38 concepts, 86 relations with their support, 38 measures. Cut B added entities, counted fact edges, a seeded second source linked under a certified line, hierarchies the data proves, a class tree proposed by two voices and a Turtle export. Document mentions are open and not in v1.

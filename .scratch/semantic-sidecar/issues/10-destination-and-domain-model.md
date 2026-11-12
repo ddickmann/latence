@@ -71,3 +71,7 @@ Decided by the owner on 2026-11-09, one question at a time. Recorded as
 
 The glossary entries go into `CONTEXT.md` with the first slice that implements them, so the
 glossary never describes code that does not exist.
+
+## From the map (moved 12 Nov)
+
+[ADR-0069 — The semantic layer is a replay of an append-only ledger](../../docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md) and [Destination and domain model](issues/10-destination-and-domain-model.md) — two levels: Entities (the engine may accept merges in the calibrated band) and Concepts (classes, properties, measures; proposals a human approves). Assertions and Decisions are append-only and the layer is their replay. Bindings are keyed on UC ids, for Concepts and for Entity rows (the crosswalk). The engine never defines a table or metric; drafting new measures as proposals is in v1. Seven measurable Done checks.

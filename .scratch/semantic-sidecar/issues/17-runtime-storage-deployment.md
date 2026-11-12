@@ -58,3 +58,7 @@ Decided by the owner on 2026-11-10, one question at a time. Recorded as
 
 **Unverified.** Product facts about Databricks Apps and Lakebase could not be checked from this
 environment. *Get a Databricks sandbox* and the workbench prototype confirm them.
+
+## From the map (moved 12 Nov)
+
+[ADR-0072 — On Databricks the engine runs as jobs and keeps its state in Delta](../../docs/adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md) and [Runtime, storage and deployment](issues/17-runtime-storage-deployment.md) — the local Runner stays and a Databricks Jobs Runner is the production path; Airflow stays unchanged. The ledger, the results and the review state are Delta tables in UC. The review surface is one web app: an in-workspace app in production, local for standalone use. Neural models run on GPU job compute in the workspace. Review explanations come from the matcher's per-field evidence by default; hosted ones are opt-in. App and GPU-compute capabilities are still to be confirmed on a sandbox.

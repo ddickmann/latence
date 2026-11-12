@@ -104,3 +104,7 @@ both languages.
 **Not done:** the engine does not yet use a name it found as the label of the entity's rows
 (the list of usual name columns already covers "title" and "subject"); the singular rule is
 English only.
+
+## From the map (moved 12 Nov)
+
+Route table row: six defects in what the engine proposes on the vehicle estate | AFK | **done**

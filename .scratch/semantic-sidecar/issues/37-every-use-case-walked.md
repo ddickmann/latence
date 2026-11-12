@@ -74,3 +74,7 @@ holds the answer." although there is no table. It is the script's sentence, not 
 a real model does not write it.
 
 **Still to do here:** the acceptance run; the host's other Python tests that need Postgres.
+
+## From the map (moved 12 Nov)
+
+Route table row: every use case walked in a browser; defects fixed | AFK | 36

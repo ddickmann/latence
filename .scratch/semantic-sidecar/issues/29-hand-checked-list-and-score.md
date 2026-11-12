@@ -3,6 +3,8 @@
 Type: task
 Mode: HITL
 Status: open
+Decided by the owner (12 Nov): Will you correct the hand-checked list and sign it; Correct it
+now
 Blocked by: 27, 28
 
 ## Question
@@ -72,3 +74,30 @@ What they point at, if the owner lets the entries stand:
 
 **Open:** the owner corrects the list and sets `checked_by`; then the numbers are measured and
 recorded here, and the three findings above become tickets or are dropped.
+
+## From the map (moved 12 Nov)
+
+Route table row: classes and hierarchies scored against a list the owner checked | HITL | built; **waits for the owner to correct the list**
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Will you correct `estates/vehicles.gold.yaml` and sign `checked_by` before the
+  demonstration?
+- **Why his:** only a person's list makes the score count.
+- **Options:**
+  - A. Correct now.
+  - B. After the demonstration; say "not measured" on stage.
+  - C. Have a second person check it.
+- **Facts** (29, "State"):
+  - The draft holds 38 classes, 9 steps, 3 part-of, 2 links and 3 under `unsure`; `checked_by`
+    is empty.
+  - The draft's numbers "do not count": classes 0.89 / 1.00, steps 1.00 / 0.89, part-of 1.00 /
+    0.33.
+  - The demonstration notes say "How right the proposals are is not measured yet"
+    (`.scratch/semantic-sidecar/estate/HANDOFF.md`).
+- **Recommendation:** A. It is the only quality number the ontology chapter can have, and 34
+  rests on it.
+- **Urgency:** before the demonstration. Blocks 34's fourth check and three follow-up findings.
+- **Cost:** checking 52 entries and 3 unsure ones, then block 6 of the handoff (four commands).
+  No duration is stated.
+- **Decided by the owner (12 Nov):** Correct it now.

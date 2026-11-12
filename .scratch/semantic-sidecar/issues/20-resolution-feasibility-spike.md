@@ -185,3 +185,7 @@ of each pair replaces the first stage's calibration, with the same 5,000 labels 
 
 The 60% guard is now met on the real registers too. Details, what failed on the way and the
 limits: [`../spike/REPORT.md`](../spike/REPORT.md#a-scorer-fitted-on-the-reviewers-labels).
+
+## From the map (moved 12 Nov)
+
+[Prototype: resolution feasibility spike](issues/20-resolution-feasibility-spike.md) — **go** (owner, 2026-11-11). Auto-accept precision 0.986 to 0.990 at 10⁵ records, 0.9955 at 10⁶ and 0.96 on text; the machine alone finds 71% to 90% of true matches; 10⁶ records fit the 4-hour budget on one 24 GB GPU. Splink is the backbone, GLiDE 0.4B the decision model, the reranker second; zero-shot Decide is dropped. Labels drawn from the undecided pairs replace uniform labels. Shown on synthetic data and one public person dataset, where the models add nothing; real data follows. Report: [spike/REPORT.md](spike/REPORT.md). **Put right the same day:** on two real company registers the first run found 36.5% of the true links; a scorer fitted on the same number of reviewer labels finds 97% at 99.7% precision and beats every earlier arm on the other estates, on CPUs ([research note](research/24-company-record-linkage-methods.md)).

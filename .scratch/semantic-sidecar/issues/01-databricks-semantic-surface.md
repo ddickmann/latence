@@ -87,3 +87,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/01-databricks-sema
   - the Genie format adapter and profiling under row filters and masks (*the warehouse pipeline*);
   - proposals living in the engine's own store (*the review, certification and versioning lifecycle*);
   - the overlay key, `table_id` plus the field name (*the boundary with Metis*).
+
+## From the map (moved 12 Nov)
+
+[The Databricks semantic surface](issues/01-databricks-semantic-surface.md) — reading needs no system tables (REST, `information_schema` and `DESCRIBE AS JSON` cover structure, metric views, tags, keys and certification). Metric views are GA, and UC stores them normalised. Query history is admin-only, with text redacted by default. Genie Agent configuration is readable as JSON, but Genie Ontology has no export API. Write-back is plain SQL with no staging, so proposals live in our store. The overlay key is `table_id` plus the field name; whether it survives a rename is unverified. System tables are an optional harvester.

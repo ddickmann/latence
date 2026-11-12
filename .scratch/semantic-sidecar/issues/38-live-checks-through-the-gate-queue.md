@@ -3,6 +3,8 @@
 Type: task
 Mode: HITL
 Status: open
+Decided by the owner (12 Nov): Will you start the runner with both lanes; Start it; the checks
+run at low reasoning, as the model file sets
 Blocked by: 37
 
 ## Question
@@ -47,3 +49,30 @@ runner's clones read from the hosted repository.
 The owner named medium reasoning for the chat model; the host's file sets low, by the owner's
 decision of 2 November after medium ran drafts into the timeout. The checks run with the file
 as it is unless the owner says otherwise.
+
+## From the map (moved 12 Nov)
+
+Route table row: live checks on real models through the owner's runner | HITL | 37
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Will you start the runner with both lanes, and do the checks run at low or
+  medium reasoning?
+- **Why his:** his machine and guard key; the effort is his 2 Nov decision.
+- **Options:**
+  - A. Start it; low.
+  - B. Start it; medium.
+  - C. Skip the queue and rely on the local agent's rehearsal.
+- **Facts:**
+  - The file sets low: "medium made drafts slower and ran 3 of 9 into the timeout"
+    (`deploy/models/openai-talk-to-data-terra.yaml` (in the host's repository) line 34).
+  - A local agent already rehearsed on real models on 12 Nov (`local-agent-handoff-4.md`).
+  - What only the queue gives: the landing gate with the three name guards (not run anywhere
+    without the key), the UI lane, one stability run.
+  - 38 is blocked by 37, whose `acceptance.spec.ts` is "not yet run".
+- **Recommendation:** A. Low is what every recorded measurement since 2 Nov ran on, and the
+  name guards have not run on this branch at all.
+- **Urgency:** before the demonstration. Blocks 39 and the merge.
+- **Cost:** starting the runner; spend inside the USD 25 limit.
+- **Decided by the owner (12 Nov):** Start it; the checks run at low reasoning, as the model
+  file sets.

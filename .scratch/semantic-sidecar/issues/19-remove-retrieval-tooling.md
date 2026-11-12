@@ -73,3 +73,7 @@ the graph export writes, their columns, and that it does not redact entity names
 
 **Follow-up.** [What the retrieval removal left behind](23-retrieval-removal-leftovers.md)
 lists what this removal missed and the unrelated defects the page rewrite found.
+
+## From the map (moved 12 Nov)
+
+[Remove the retrieval tooling](issues/19-remove-retrieval-tooling.md) — done: four packages, the core retrieval modules, contracts and seams, three stacks and the retrieval benchmark lanes are gone (`SCHEMA_VERSION` 22, 30 packages). Kept pipelines give the same nodes and edges. The ten stale pages were rewritten and the secret-scan gate was made independent of the network on 2026-11-10. What the removal missed was closed in [What the retrieval removal left behind](issues/23-retrieval-removal-leftovers.md): the release gates, the purge, the benchmark leftovers (including the two datasets that only fed retrieval), the stale help texts, two run-time defects, `ROADMAP.md`, anatomy chapters 2 and 3, and the doc statements that had not been checked against code. What that pass found is in [Defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): eight of nine items are fixed (removed config keys are refused, two tuner and two campaign defects, dead benchmark scripts, two stale tests, an unsupported speed figure). Open: the compose and Helm commands have never been executed, and whether a spend cap in the benchmark campaign should be a hard stop.

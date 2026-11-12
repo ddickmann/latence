@@ -61,3 +61,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/04-sota-entity-res
   - LLM egress scope (*the text-path upgrade*, *the upgrade of the resolution engine*);
   - linking text to UC objects (*the boundary with Metis*, *the warehouse pipeline*);
   - byte-identical replay with a GPU scorer (*the destination and the domain model*).
+
+## From the map (moved 12 Nov)
+
+[The state of the art in entity resolution](issues/04-sota-entity-resolution.md) — embeddings retrieve, cross-encoders decide. Calibrated probabilities with Learn-then-Test give accept, review and reject bands, and an LLM is used only in the review band. Human must-links and cannot-links are stored on stable keys, replayed first and used as hard vetoes. Homonym splits are proposed. Deltas use a pair cache and stable ids by overlap. Splink (MIT) suits the warehouse side.

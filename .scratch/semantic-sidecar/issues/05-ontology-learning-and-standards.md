@@ -73,3 +73,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/05-ontology-learni
   - whether v1 needs a hierarchy at all (*the destination and the domain model*, *ontology induction and the output standards*);
   - the ConceptInducer / Taxonomy / AxiomInducer code that ADR-0005 calls preserved is **not in the tree**. It must be found before the P4 design doc is written; this is a task for *ontology induction and the output standards*.
   - Nine further open questions are listed in the report.
+
+## From the map (moved 12 Nov)
+
+[Ontology learning methods and the standards to emit](issues/05-ontology-learning-and-standards.md) — no method is good enough to auto-accept (taxonomy F1 about 0.5–0.6). Warehouse constraints and evidence outrank models. Standards: OWL 2 QL (querying over Databricks via Ontop), SHACL 1.1, SKOS DE/EN, PROV-O, SSSOM, and named graphs now with RDF 1.2 later. Opaque IRIs and content-hashed proposals. Ossie's ontology spec is an unreleased draft. P4 sketch: an OntologyProposal contract over ten stages. The preserved inducer code is not in the tree.

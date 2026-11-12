@@ -61,3 +61,7 @@ Built on 2026-11-11, in the host's repository (commit `6eba75d7`).
   Postgres.
 - **Done check:** `demo up --scripted-models` brought up all three worlds on this machine, and
   the browser walks of ticket 37 ran against them.
+
+## From the map (moved 12 Nov)
+
+Route table row: one command starts it, one page says how to give it | AFK | 35

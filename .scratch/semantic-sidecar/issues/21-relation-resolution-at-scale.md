@@ -68,3 +68,7 @@ Resolved 2026-11-08 by research (AFK). Full report: [research/21-relation-resolu
   - property definitions, functional flags and validity time belong to the ontology contract (*ontology induction and the output standards*);
   - the conflict queue and edge-level QA belong in the workbench (*the expert resolution workbench*);
   - a German relation gold set (*evaluation and the acceptance bars*).
+
+## From the map (moved 12 Nov)
+
+[Relation resolution and canonicalization at scale](issues/21-relation-resolution-at-scale.md) — today one edge is emitted per mention and the fuzzy label match is unsafe (`not_located_in` folds into `located_in`). The unit of work is the distinct (label, head class, tail class) triple. EDC-style definition retrieval plus a calibrated scorer, with domain and range as vetoes and unmapped relations as proposals. One aggregated edge per fact (Knowledge Vault fusion, functional properties). Contradictions go to review. Joint ER is bounded to two rounds. UC foreign keys and joins become schema-level properties.

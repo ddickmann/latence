@@ -73,3 +73,7 @@ most two rounds of joint resolution.
 **Handed to other tickets.** Where the in-workspace jobs, the neural re-scoring and the
 workbench run goes to *Runtime, storage and deployment*. The glossary formats to support in v1
 are chosen when the first glossary harvester is specified.
+
+## From the map (moved 12 Nov)
+
+[ADR-0071 — Warehouse metadata enters the Pipeline as Sources](../../docs/adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md) and [Warehouse pipeline shape](issues/12-warehouse-pipeline-shape.md) — v1 harvests UC metadata, metric views, REST lineage, Genie agent configuration and existing glossaries; query history is optional. Harvesters are Source kinds in the one Pipeline and meet text mentions in one resolution phase. Row values are matched inside the customer's workspace on listed master-data tables. Filters and masks are labelled and masked data is excluded. Signals come in three tiers; the hosted referee sees metadata only and is off by default.

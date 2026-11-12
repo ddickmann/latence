@@ -67,3 +67,7 @@ goes upstream as a proposal a human applies; Metis sees it only once it is in UC
 
 This satisfies Done check 4 (exactly one declared interface to Metis). Recorded as
 [ADR-0070](../../../docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md).
+
+## From the map (moved 12 Nov)
+
+[ADR-0070 — Metis consumes the engine through one proposal file](../../docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md) and [Boundary with Metis](issues/11-boundary-with-metis.md) — one Metis-specific seam: a reviewable proposal file in Metis's own proposal shape. The crosswalk and the ontology reach Metis through UC Delta tables. No shared code; with Metis present the engine reads its verified keys and joins as Assertions. One route per source for new measures. No importer plugin, live tool calls or interchange-file seam in v1.

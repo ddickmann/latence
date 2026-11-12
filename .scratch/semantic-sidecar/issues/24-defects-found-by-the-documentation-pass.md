@@ -3,6 +3,8 @@
 Type: task
 Mode: HITL
 Status: open
+Decided by the owner (12 Nov): Should the benchmark campaign's spend cap be a hard stop; Decide
+when the campaign is next used
 Blocked by:
 
 ## Question
@@ -156,3 +158,25 @@ tree before the fix and is green after it.
     query-time throughput as a gap. That tooling is removed.
   - `benchmark/enterprise-gold/build_gold.py` has not been run against an export of the current
     pipeline. Its input was produced by the removed `run_pipeline.py`.
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Should the benchmark campaign's S3 cap block the stage, or stay a call budget
+  that fails open?
+- **Why his:** a behaviour change on money.
+- **Options:**
+  - A. Hard stop.
+  - B. Keep as is (the wording is now truthful).
+  - C. Decide when the campaign is next used.
+- **Facts** (24, "Left for the owner", item 5):
+  - The cap becomes a per-dataset call budget; a chunk past it keeps the configured labels and
+    the run continues.
+  - Nothing meters actual spend during a run.
+  - The prompt and help were corrected.
+  - The campaign belongs to the pre-rescope product; the current route's limit is enforced per
+    call (`--max-usd`).
+- **Recommendation:** C. No current work runs the campaign, and a hard stop needs a rule for a
+  half-induced dataset.
+- **Urgency:** after v1. Blocks nothing.
+- **Cost:** none.
+- **Decided by the owner (12 Nov):** Decide when the campaign is next used.

@@ -43,3 +43,7 @@ Decided by the owner on 2026-11-10, one question at a time. Recorded as
 
 Cardinality and domain/range are constraints and follow answers 1 and 2: declared ones are
 taken from the warehouse, mined ones are proposed with their support.
+
+## From the map (moved 12 Nov)
+
+[ADR-0073 — The schema level is induced by voting signals, validated on data, and exported in W3C standards](../../docs/adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md) and [Ontology induction and the output standards](issues/14-ontology-induction-and-standards.md) — declared constraints, data statistics and names vote, with the hosted model as one voice. Every proposed constraint is run against the data before review, and weak ones are dropped. v1 exports OWL 2 QL, SHACL 1.1, SKOS, PROV-O and metric-view YAML. IRIs are opaque under a per-customer prefix; the private `lg:` vocabulary goes.

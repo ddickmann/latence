@@ -61,3 +61,7 @@ precision with its interval, recall, review rate, expert minutes), mapping, expo
 graph completion and evidence coverage. Each is a `QUALITY_SCHEMA_VERSION` change and lands
 with the slice that produces the numbers. This follows from the answers and was not asked
 separately.
+
+## From the map (moved 12 Nov)
+
+[Evaluation and the acceptance bars](issues/18-evaluation-and-acceptance.md) — three layers of gold: our own seeded synthetic data (where the hard bars are measured), a small expert-labelled realistic slice, and public benchmarks for comparability. Current Latence is the only gating baseline; the Metis effect is measured inside Metis and reported. Three hard bars: precision at least 0.95, the text path better than the baseline, and machine-only recall of at least 0.60 on the synthetic estate. Everything else is reported until the release candidate.

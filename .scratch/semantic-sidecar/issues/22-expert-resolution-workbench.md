@@ -3,6 +3,8 @@
 Type: prototype
 Mode: HITL
 Status: resolved
+Decided by the owner (12 Nov): Is the resolution workbench mounted in the host now; After v1,
+with the review-surface slice
 Blocked by:
 
 ## Question
@@ -109,3 +111,26 @@ will be harder. Still not covered: a language model's rationale, and rule propos
 **Checked on the second cut:** 38 unit and mount tests; 106 browser checks on the built pages
 at phone and desktop width in light and dark, including WCAG 2.2 AA rule scans. **Not
 checked:** a mount in a real host.
+
+## From the map (moved 12 Nov)
+
+[Prototype: the expert resolution workbench](issues/22-expert-resolution-workbench.md) — the owner settled the interaction model on a clickable prototype: a queue by cluster, evidence per field, one-key decisions on an append-only log, group merge and split that decide the open pairs and can be undone, and the graph as a tab beside the review. It is one component a Carbon host mounts; the mount in Metis waits for the owner's go.
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Do you give the go to mount the resolution workbench in Metis now?
+- **Why his:** "The mount itself waits for the owner's go".
+- **Options:**
+  - A. Now.
+  - B. After v1, with the review-surface slice.
+  - C. Never (the Ontology page covers it).
+- **Facts:**
+  - The interaction model was settled on 10 Nov; the workbench has never been mounted in a real
+    host (22, "Not checked").
+  - The demonstration already shows "Possibly the same" on the Ontology page (script, chapter
+    1, step 5).
+- **Recommendation:** B. The page covers the scene, and a first mount is new UI risk inside two
+  weeks.
+- **Urgency:** after v1. Blocks the review-surface slice.
+- **Cost:** none now.
+- **Decided by the owner (12 Nov):** After v1, with the review-surface slice.

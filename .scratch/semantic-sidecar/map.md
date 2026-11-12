@@ -73,10 +73,11 @@ ontology layer** from two input modalities:
     UC lacks and proposes changes upstream; it never shadows a UC definition.
   - **No silent over-merge.** An unknown link stays unknown.
   - **English first** (owner, 2026-11-08). v1 is built, measured and gated in English only.
-    German follows once English passes the go/no-go. The German items found in research
-    (02, 03, 05, 21: a German gold set, compound splitting, DE labels) wait in *Not yet
-    specified*. Designs stay language-neutral: labels carry a language tag, and nothing
-    hard-codes English, so German is an extension, not a rewrite.
+    German follows once English passes the go/no-go. The German items found in research (on
+    text extraction, schema matching, ontology learning and relation resolution: a German
+    gold set, compound splitting, DE labels) wait in *Not yet specified*. Designs stay
+    language-neutral: labels carry a language tag, and nothing hard-codes English, so German
+    is an extension, not a rewrite.
   - Sending samples to a model needs an explicit egress decision.
 - **Reference reads** (read, never copied):
   - Metis: tickets 94, 99, 140, 147, 203, 207 and 211 in `metis/.scratch/metis/issues/`, and
@@ -109,33 +110,54 @@ which the owner updates the main machine and switches to Databricks.
   first and listed for review.
 - Tests guard a behaviour someone relies on. No test is written to raise a count.
 
-**Ontology v1** (the gate is ticket 34; nothing below it starts before the owner has seen it):
+**Ontology v1.** Its gate is [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md). The tickets of this route are listed under "Open work" and, once closed, under "Decisions so far".
 
-| Ticket | What | Mode | Blocked by, or state |
-|---|---|---|---|
-| [26](issues/26-export-contract-codes-and-claims.md) | the export speaks in codes, every proposal carries its claim (`graph-export/3`) | AFK | **done** |
-| [27](issues/27-quality-fixes-on-the-estate.md) | six defects in what the engine proposes on the vehicle estate | AFK | **done** |
-| [28](issues/28-decisions-on-structure-and-classes.md) | a decision on a hierarchy step or a class changes the layer | AFK | **done** |
-| [29](issues/29-hand-checked-list-and-score.md) | classes and hierarchies scored against a list the owner checked | HITL | built; **waits for the owner to correct the list** |
-| [30](issues/30-label-loop.md) | the matcher asks for labels and takes them from a reviewer | AFK | **done** |
-| [31](issues/31-live-class-voice.md) | the model's voice on classes runs live on a small hosted model | HITL | **done** |
-| [32](issues/32-usage-signals.md) | what people ask is a signal on the elements they use | AFK | **done** |
-| [33](issues/33-unity-catalog-reader.md) | a reader for Unity Catalog, proven against a stand-in | HITL | built; **waits for the owner's run on the real catalog** |
-| [34](issues/34-ontology-v1-acceptance.md) | **is the capability at v1 quality?** | HITL | seven of nine checks met; **the owner's decision is open** |
+**The demonstration on the local backend** follows the gate: the local backend, the launcher and runbook, the browser walks, the live checks and the handoff.
 
-**The demonstration on the local backend:**
+**What this route needs from the owner:** the hand-checked list corrected; one build against the real catalog; the look at v1; the runner started. Each is a ticket under "Open work".
 
-| Ticket | What | Mode | Blocked by |
-|---|---|---|---|
-| [35](issues/35-local-backend-for-the-host.md) | Postgres with pgvector on this machine | AFK | 34 |
-| [36](issues/36-demo-launcher-and-runbook.md) | one command starts it, one page says how to give it | AFK | 35 |
-| [37](issues/37-every-use-case-walked.md) | every use case walked in a browser; defects fixed | AFK | 36 |
-| [38](issues/38-live-checks-through-the-gate-queue.md) | live checks on real models through the owner's runner | HITL | 37 |
-| [39](issues/39-handoff-to-the-main-machine.md) | handoff and the switch to Databricks | HITL | 38 |
+## Open work (12 Nov)
 
-**What this route needs from the owner:** the hand-checked list corrected (29); the key through
-the secure form (31); one build against the real catalog (33); the look at v1 (34); the runner
-started (38).
+Every open ticket, once, with its state (an override of the format's default that open tickets are found by query).
+
+- [Build: the proposal file for the host, written from approved decisions](issues/40-proposal-file-for-the-host.md): new, before the demonstration: the host's ticket on the ontology feeding its semantic layer waits on it
+- [Build: classes and hierarchies are measured against a list a person checked](issues/29-hand-checked-list-and-score.md): built; waits for the owner to correct the hand-checked list
+- [Build: a reader for Unity Catalog, proven against a stand-in](issues/33-unity-catalog-reader.md): built and proven against a stand-in; waits for the owner's run on the real catalog
+- [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md): seven of nine checks met; the owner's decision is open
+- [Build: every use case walked in a browser on the local backend](issues/37-every-use-case-walked.md): 28 browser specs pass; still to do: the acceptance run and the host's other tests that need Postgres
+- [Build: live checks on real models, through the owner's runner](issues/38-live-checks-through-the-gate-queue.md): open: the requests through the owner's runner (the landing gate with the guard checks, the user-interface lane, one stability run)
+- [Build: handoff to the main machine and the switch to Databricks](issues/39-handoff-to-the-main-machine.md): open: first the owner's three check commands on the main machine, then the handoff document
+- [Task: defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): open: a spend cap as a hard stop is the owner's to decide; the compose and Helm commands were not run; five defects found and not fixed
+- [Task: record the baseline: one text-path run and ULTRA's real link-prediction numbers](issues/08-baseline-measurement.md): open: the baseline of the text path and of link prediction is not recorded
+- [Task: get a Databricks sandbox for the engine](issues/09-databricks-sandbox-access.md): open
+- [Grilling: the upgrade of the resolution engine](issues/13-resolution-engine-upgrade.md): open grilling; the feasibility spike's input is recorded in it
+- [Grilling: the text-path upgrade](issues/15-text-path-upgrade.md): open grilling; blocked by the missing baseline
+- [Grilling: the review, certification and versioning lifecycle](issues/16-review-and-versioning-lifecycle.md): open grilling
+- [Build: the catalog reader reads lineage, row filters and column masks](issues/41-catalog-reader-lineage-filters-and-masks.md): new, after v1
+- [Build: what ontology v1 leaves out: document mentions, then SHACL and PROV-O exports](issues/42-what-ontology-v1-leaves-out.md): new, after v1
+
+## The owner's decisions (12 Nov)
+
+The owner answered on 12 Nov: every recommendation is agreed. Each decision is recorded in its ticket, with the brief behind it. The demonstration runs on Databricks; the host's main machine makes sure it works there.
+
+**Still open**
+
+| The question | Ticket | What it needs |
+|---|---|---|
+| In which order follows what v1 leaves out, and when do the grillings resume? | [Build: what ontology v1 leaves out: document mentions, then SHACL and PROV-O exports](issues/42-what-ontology-v1-leaves-out.md) | Taken up after the demonstration |
+
+**The owner's actions** (in the order that unblocks most)
+
+| The action | Ticket | What it costs him |
+|---|---|---|
+| Run the three check commands on the main machine; push its main branch if it is ahead | [Build: handoff to the main machine and the switch to Databricks](issues/39-handoff-to-the-main-machine.md) | Three commands, perhaps one push |
+| Start the runner with both lanes; the checks run at low reasoning | [Build: live checks on real models, through the owner's runner](issues/38-live-checks-through-the-gate-queue.md) | Starting the runner; spend inside the USD 25 limit |
+| Correct the hand-checked list and sign it | [Build: classes and hierarchies are measured against a list a person checked](issues/29-hand-checked-list-and-score.md) | 52 entries and 3 unsure ones, then four commands |
+| Declare ontology v1 once the list's score is recorded | [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md) | A signature |
+| Export the host's workspace credentials in one shell (read only) | [Task: get a Databricks sandbox for the engine](issues/09-databricks-sandbox-access.md) | One shell |
+| Run one build against the real catalog, as the first step of the switch to Databricks | [Build: a reader for Unity Catalog, proven against a stand-in](issues/33-unity-catalog-reader.md) | Two commands on the main machine |
+
+**Decided, with nothing to do now:** the benchmark campaign's spend cap is decided when the campaign is next used; the resolution workbench is mounted in the host after v1, with the review-surface slice.
 
 ## Decisions so far
 
@@ -143,24 +165,39 @@ started (38).
 
 - [ADR-0067 — Latence is re-scoped into a semantic-resolution and ontology engine, standalone and as a Metis sidecar](../../docs/adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md) — the direction above. Warehouse metadata is a new modality; the text path and Graph Completion stay.
 - [ADR-0068 — Query-time retrieval tooling is removed](../../docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) — retrieval, hyperedges and Context Enrichment go. Embedders stay as a resolution signal only.
-- [ADR-0069 — The semantic layer is a replay of an append-only ledger](../../docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md) and [Destination and domain model](issues/10-destination-and-domain-model.md) — two levels: Entities (the engine may accept merges in the calibrated band) and Concepts (classes, properties, measures; proposals a human approves). Assertions and Decisions are append-only and the layer is their replay. Bindings are keyed on UC ids, for Concepts and for Entity rows (the crosswalk). The engine never defines a table or metric; drafting new measures as proposals is in v1. Seven measurable Done checks.
-- [ADR-0070 — Metis consumes the engine through one proposal file](../../docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md) and [Boundary with Metis](issues/11-boundary-with-metis.md) — one Metis-specific seam: a reviewable proposal file in Metis's own proposal shape. The crosswalk and the ontology reach Metis through UC Delta tables. No shared code; with Metis present the engine reads its verified keys and joins as Assertions. One route per source for new measures. No importer plugin, live tool calls or interchange-file seam in v1.
-- [ADR-0071 — Warehouse metadata enters the Pipeline as Sources](../../docs/adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md) and [Warehouse pipeline shape](issues/12-warehouse-pipeline-shape.md) — v1 harvests UC metadata, metric views, REST lineage, Genie agent configuration and existing glossaries; query history is optional. Harvesters are Source kinds in the one Pipeline and meet text mentions in one resolution phase. Row values are matched inside the customer's workspace on listed master-data tables. Filters and masks are labelled and masked data is excluded. Signals come in three tiers; the hosted referee sees metadata only and is off by default.
-- [Evaluation and the acceptance bars](issues/18-evaluation-and-acceptance.md) — three layers of gold: our own seeded synthetic data (where the hard bars are measured), a small expert-labelled realistic slice, and public benchmarks for comparability. Current Latence is the only gating baseline; the Metis effect is measured inside Metis and reported. Three hard bars: precision at least 0.95, the text path better than the baseline, and machine-only recall of at least 0.60 on the synthetic estate. Everything else is reported until the release candidate.
-- [ADR-0072 — On Databricks the engine runs as jobs and keeps its state in Delta](../../docs/adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md) and [Runtime, storage and deployment](issues/17-runtime-storage-deployment.md) — the local Runner stays and a Databricks Jobs Runner is the production path; Airflow stays unchanged. The ledger, the results and the review state are Delta tables in UC. The review surface is one web app: an in-workspace app in production, local for standalone use. Neural models run on GPU job compute in the workspace. Review explanations come from the matcher's per-field evidence by default; hosted ones are opt-in. App and GPU-compute capabilities are still to be confirmed on a sandbox.
-- [ADR-0073 — The schema level is induced by voting signals, validated on data, and exported in W3C standards](../../docs/adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md) and [Ontology induction and the output standards](issues/14-ontology-induction-and-standards.md) — declared constraints, data statistics and names vote, with the hosted model as one voice. Every proposed constraint is run against the data before review, and weak ones are dropped. v1 exports OWL 2 QL, SHACL 1.1, SKOS, PROV-O and metric-view YAML. IRIs are opaque under a per-customer prefix; the private `lg:` vocabulary goes.
-- [Prototype: the expert resolution workbench](issues/22-expert-resolution-workbench.md) — the owner settled the interaction model on a clickable prototype: a queue by cluster, evidence per field, one-key decisions on an append-only log, group merge and split that decide the open pairs and can be undone, and the graph as a tab beside the review. It is one component a Carbon host mounts; the mount in Metis waits for the owner's go.
-- [Remove the retrieval tooling](issues/19-remove-retrieval-tooling.md) — done: four packages, the core retrieval modules, contracts and seams, three stacks and the retrieval benchmark lanes are gone (`SCHEMA_VERSION` 22, 30 packages). Kept pipelines give the same nodes and edges. The ten stale pages were rewritten and the secret-scan gate was made independent of the network on 2026-11-10. What the removal missed was closed in [What the retrieval removal left behind](issues/23-retrieval-removal-leftovers.md): the release gates, the purge, the benchmark leftovers (including the two datasets that only fed retrieval), the stale help texts, two run-time defects, `ROADMAP.md`, anatomy chapters 2 and 3, and the doc statements that had not been checked against code. What that pass found is in [Defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): eight of nine items are fixed (removed config keys are refused, two tuner and two campaign defects, dead benchmark scripts, two stale tests, an unsupported speed figure). Open: the compose and Helm commands have never been executed, and whether a spend cap in the benchmark campaign should be a hard stop.
-- [Prototype: resolution feasibility spike](issues/20-resolution-feasibility-spike.md) — **go** (owner, 2026-11-11). Auto-accept precision 0.986 to 0.990 at 10⁵ records, 0.9955 at 10⁶ and 0.96 on text; the machine alone finds 71% to 90% of true matches; 10⁶ records fit the 4-hour budget on one 24 GB GPU. Splink is the backbone, GLiDE 0.4B the decision model, the reranker second; zero-shot Decide is dropped. Labels drawn from the undecided pairs replace uniform labels. Shown on synthetic data and one public person dataset, where the models add nothing; real data follows. Report: [spike/REPORT.md](spike/REPORT.md). **Put right the same day:** on two real company registers the first run found 36.5% of the true links; a scorer fitted on the same number of reviewer labels finds 97% at 99.7% precision and beats every earlier arm on the other estates, on CPUs ([research note](research/24-company-record-linkage-methods.md)).
-- [ADR-0074 — A host shows the engine's export in a read-only screen of its own](../../docs/adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md) and [The Ontology page over the estate](issues/25-estate-demo-slice.md) (resolved; what is open continues in the route above) — the host writes the page in its own style and shares only the export's file format with the engine; read-only, off the answer path; a file first, a service route later; reviewer decisions travel back as a file. Cut A induces the schema level of the vehicle and warranty estate from its metric views and data statistics: 38 concepts, 86 relations with their support, 38 measures. Cut B added entities, counted fact edges, a seeded second source linked under a certified line, hierarchies the data proves, a class tree proposed by two voices and a Turtle export. Document mentions are open and not in v1.
+- [Destination and domain model](issues/10-destination-and-domain-model.md) — two levels: Entities (the engine may accept merges in the calibrated band) and Concepts
+  - Recorded as [ADR-0069 — The semantic layer is a replay of an append-only ledger](../../docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md).
+- [Boundary with Metis](issues/11-boundary-with-metis.md) — one Metis-specific seam: a reviewable proposal file in Metis's own proposal shape. The crosswalk and the ontology reach Metis through UC Delta tables. No shared code
+  - Recorded as [ADR-0070 — Metis consumes the engine through one proposal file](../../docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md).
+- [Warehouse pipeline shape](issues/12-warehouse-pipeline-shape.md) — v1 harvests UC metadata, metric views, REST lineage, Genie agent configuration and existing glossaries; query history is optional. Harvesters are Source kinds in the one Pipeline and meet text mentions in one resolution phase
+  - Recorded as [ADR-0071 — Warehouse metadata enters the Pipeline as Sources](../../docs/adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md).
+- [Evaluation and the acceptance bars](issues/18-evaluation-and-acceptance.md) — three layers of gold: our own seeded synthetic data (where the hard bars are measured), a small expert-labelled realistic slice, and public benchmarks for comparability. Current Latence is the only gating baseline
+- [Runtime, storage and deployment](issues/17-runtime-storage-deployment.md) — the local Runner stays and a Databricks Jobs Runner is the production path; Airflow stays unchanged. The ledger, the results and the review state are Delta tables in UC
+  - Recorded as [ADR-0072 — On Databricks the engine runs as jobs and keeps its state in Delta](../../docs/adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md).
+- [Ontology induction and the output standards](issues/14-ontology-induction-and-standards.md) — declared constraints, data statistics and names vote, with the hosted model as one voice. Every proposed constraint is run against the data before review, and weak ones are dropped
+  - Recorded as [ADR-0073 — The schema level is induced by voting signals, validated on data, and exported in W3C standards](../../docs/adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md).
+- [Prototype: the expert resolution workbench](issues/22-expert-resolution-workbench.md) — the owner settled the interaction model on a clickable prototype: a queue by cluster, evidence per field, one-key decisions on an append-only log, group merge and split that decide the open pairs and can be undone
+- [Remove the retrieval tooling](issues/19-remove-retrieval-tooling.md) — done: four packages, the core retrieval modules, contracts and seams, three stacks and the retrieval benchmark lanes are gone (`SCHEMA_VERSION` 22, 30 packages). Kept pipelines give the same nodes and edges
+- [Prototype: resolution feasibility spike](issues/20-resolution-feasibility-spike.md) — **go** (owner, 2026-11-11). Auto-accept precision 0.986 to 0.990 at 10⁵ records, 0.9955 at 10⁶ and 0.96 on text; the machine alone finds 71% to 90% of true matches
+- [The Ontology page over the estate](issues/25-estate-demo-slice.md) (resolved; what is open continues in the route above) — the host writes the page in its own style and shares only the export's file format with the engine; read-only, off the answer path; a file first, a service route later
+  - Recorded as [ADR-0074 — A host shows the engine's export in a read-only screen of its own](../../docs/adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md).
+- [Task: what the retrieval removal left behind](issues/23-retrieval-removal-leftovers.md) — what the removal missed is closed: the release gates, the purge, the benchmark leftovers, stale help texts, two run-time defects, `ROADMAP.md`, anatomy chapters 2 and 3
+- [Build: the export says what it means in codes, and every proposal carries its claim](issues/26-export-contract-codes-and-claims.md) — the export speaks in codes, and every proposal carries its claim (`graph-export/3`)
+- [Build: the defects the vehicle estate shows in what the engine proposes](issues/27-quality-fixes-on-the-estate.md) — six defects in what the engine proposes on the vehicle estate, each gone with its test
+- [Build: a reviewer's decision on a hierarchy step or a class changes the layer](issues/28-decisions-on-structure-and-classes.md) — a decision on a hierarchy step or a class changes the layer
+- [Build: the matcher asks for the labels it needs and takes them from a reviewer](issues/30-label-loop.md) — the matcher asks for labels and takes them from a reviewer
+- [Build: the model's voice on classes runs live on a small hosted model](issues/31-live-class-voice.md) — the model's voice on classes runs live on a small hosted model
+- [Build: what people ask is a signal on the elements they use](issues/32-usage-signals.md) — what people ask is a signal on the elements they use
+- [Build: the host's local backend runs on this machine](issues/35-local-backend-for-the-host.md) — Postgres with pgvector on this machine, for the host's local backend
+- [Build: one command starts the demonstration, one page says how to give it](issues/36-demo-launcher-and-runbook.md) — one command starts the demonstration, one page says how to give it
 - [Inventory the carve-out](issues/07-carve-out-inventory.md) — no kept package imports a dropped one. Retrieval reaches core through about five import sites plus protocols, hyperedge contracts (`SCHEMA_VERSION` 21), 19 test files and 6 stacks. `graph_features` goes with retrieval; the embedders stay as a resolution signal.
-- [The landscape: who builds semantic and ontology layers](issues/06-landscape-and-positioning.md) — every rival traces answers, not semantic elements, and auto-drafting tools lose curation on rebuild. Positioning: a ledger of evidence and decisions that proposes into UC and exports open formats. Three demo claims: element-level trace and replay; curation that survives rebuilds; add-only proposals on UC.
-- [The state of the art in text extraction](issues/02-sota-text-extraction.md) — the glinker linker (73%) and per-chunk LLM induction are the bottlenecks, not extraction. GLiNER-Relex leads zero-shot relation extraction, and the GLiNER bi-encoder removes the label-count ceiling. Fabricated relations are fixed by requiring offset-grounded triples plus an entailment check. Bake-off shortlist: Relex + bi-encoder, then with an LLM checker, then a small-LLM extractor, with GLiNER 2.5 as the control.
-- [The state of the art in entity resolution](issues/04-sota-entity-resolution.md) — embeddings retrieve, cross-encoders decide. Calibrated probabilities with Learn-then-Test give accept, review and reject bands, and an LLM is used only in the review band. Human must-links and cannot-links are stored on stable keys, replayed first and used as hard vetoes. Homonym splits are proposed. Deltas use a pair cache and stable ids by overlap. Splink (MIT) suits the warehouse side.
-- [The state of the art in schema matching](issues/03-sota-schema-matching.md) — cheap candidates first, then a model judges a short list, and rules drive precision. Metis already has the statistical core (exact key and inclusion checks, calibrated owner decisions). v1 adds five signals that send no values out: UC structure and declared keys, the lexicon, multilingual embeddings, column lineage and query-history mining. A model judge that sees metadata only is optional and gated by egress. Learned column-type models and any model that reads values are deferred.
-- [Ontology learning methods and the standards to emit](issues/05-ontology-learning-and-standards.md) — no method is good enough to auto-accept (taxonomy F1 about 0.5–0.6). Warehouse constraints and evidence outrank models. Standards: OWL 2 QL (querying over Databricks via Ontop), SHACL 1.1, SKOS DE/EN, PROV-O, SSSOM, and named graphs now with RDF 1.2 later. Opaque IRIs and content-hashed proposals. Ossie's ontology spec is an unreleased draft. P4 sketch: an OntologyProposal contract over ten stages. The preserved inducer code is not in the tree.
-- [The Databricks semantic surface](issues/01-databricks-semantic-surface.md) — reading needs no system tables (REST, `information_schema` and `DESCRIBE AS JSON` cover structure, metric views, tags, keys and certification). Metric views are GA, and UC stores them normalised. Query history is admin-only, with text redacted by default. Genie Agent configuration is readable as JSON, but Genie Ontology has no export API. Write-back is plain SQL with no staging, so proposals live in our store. The overlay key is `table_id` plus the field name; whether it survives a rename is unverified. System tables are an optional harvester.
-- [Relation resolution and canonicalization at scale](issues/21-relation-resolution-at-scale.md) — today one edge is emitted per mention and the fuzzy label match is unsafe (`not_located_in` folds into `located_in`). The unit of work is the distinct (label, head class, tail class) triple. EDC-style definition retrieval plus a calibrated scorer, with domain and range as vetoes and unmapped relations as proposals. One aggregated edge per fact (Knowledge Vault fusion, functional properties). Contradictions go to review. Joint ER is bounded to two rounds. UC foreign keys and joins become schema-level properties.
+- [The landscape: who builds semantic and ontology layers](issues/06-landscape-and-positioning.md) — every rival traces answers, not semantic elements, and auto-drafting tools lose curation on rebuild. Positioning: a ledger of evidence and decisions that proposes into UC and exports open formats
+- [The state of the art in text extraction](issues/02-sota-text-extraction.md) — the glinker linker (73%) and per-chunk LLM induction are the bottlenecks, not extraction. GLiNER-Relex leads zero-shot relation extraction, and the GLiNER bi-encoder removes the label-count ceiling
+- [The state of the art in entity resolution](issues/04-sota-entity-resolution.md) — embeddings retrieve, cross-encoders decide. Calibrated probabilities with Learn-then-Test give accept, review and reject bands, and an LLM is used only in the review band
+- [The state of the art in schema matching](issues/03-sota-schema-matching.md) — cheap candidates first, then a model judges a short list, and rules drive precision. Metis already has the statistical core (exact key and inclusion checks, calibrated owner decisions)
+- [Ontology learning methods and the standards to emit](issues/05-ontology-learning-and-standards.md) — no method is good enough to auto-accept (taxonomy F1 about 0.5–0.6). Warehouse constraints and evidence outrank models
+- [The Databricks semantic surface](issues/01-databricks-semantic-surface.md) — reading needs no system tables (REST, `information_schema` and `DESCRIBE AS JSON` cover structure, metric views, tags, keys and certification). Metric views are GA, and UC stores them normalised
+- [Relation resolution and canonicalization at scale](issues/21-relation-resolution-at-scale.md) — today one edge is emitted per mention and the fuzzy label match is unsafe (`not_located_in` folds into `located_in`). The unit of work is the distinct (label, head class, tail class) triple
 
 ## Not yet specified
 

@@ -3,6 +3,8 @@
 Type: task
 Mode: HITL
 Status: open (built; the owner's run on the real catalog is outstanding)
+Decided by the owner (12 Nov): When is the build against the real catalog run; At the switch to
+Databricks, as its first step
 Blocked by: 26
 
 ## Question
@@ -108,3 +110,28 @@ What to report back: whether the build ran; the output of `compare` (what only o
 and what differs); and the first error if there was one, with the statement id it names. The
 seeded second source is not in the catalog unless `seeded_accounts.sql` was loaded, so the
 catalog's build links no records; that difference is expected.
+
+## From the map (moved 12 Nov)
+
+Route table row: a reader for Unity Catalog, proven against a stand-in | HITL | built; **waits for the owner's run on the real catalog**
+
+## Decision brief for the owner (12 Nov)
+
+- **Question:** Do you run block 7 on the main machine now, or at the switch to Databricks?
+- **Why his:** only his machine reaches the workspace and holds the credentials.
+- **Options:**
+  - A. Now.
+  - B. At the switch (ticket 39).
+  - C. Not for the demonstration (the page stays on the mirror's build).
+- **Facts:**
+  - The reader is "proven against a stand-in server only"; the stand-in "does not prove the
+    warehouse's SQL" (`HANDOFF.md`).
+  - The run is two commands and reports back `compare`'s output (33, "The owner's run").
+  - Lineage, row filters and masks are not read (now ticket 41, after v1).
+- **Recommendation:** B, as the first step of the switch. It needs the same session as the
+  three check commands, and a failure only matters if the page is to be shown from Unity
+  Catalog.
+- **Urgency:** before the demonstration if the demonstration goes to Databricks. Blocks 34's
+  eighth check and 39.
+- **Cost:** two commands on the main machine, one build (about a minute on the mirror).
+- **Decided by the owner (12 Nov):** At the switch to Databricks, as its first step.

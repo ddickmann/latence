@@ -108,3 +108,7 @@ whose labels a line rests on. 200 unit and route tests, the browser walk in both
 **Limits.** Nobody labels 1,300 pairs in a demonstration: the page shows most labels as
 simulated and the loop on the pairs a person does answer. The label requests add about 0.7 MB
 to the export. Merging two names does not recount the support of the roll-ups above them.
+
+## From the map (moved 12 Nov)
+
+Route table row: the matcher asks for labels and takes them from a reviewer | AFK | **done**
