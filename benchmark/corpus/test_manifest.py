@@ -95,24 +95,52 @@ def test_the_manifest_declares_the_ooxml_limit_in_its_own_words() -> None:
     )
     manifest = build_manifest([source])
 
-    assert any("OOXML is UNTESTED AT VOLUME" in limit for limit in manifest["limits"])
-    assert any("SAM.gov" in limit for limit in manifest["limits"])
+    (limit,) = [x for x in manifest["limits"] if "OOXML is UNTESTED AT VOLUME" in x]
+    # The limit is stated per format with the measured count, next to the legacy count it must
+    # not be confused with (7000 .doc + 5700 .xls).
+    assert "docx (15)" in limit
+    assert "xlsx (0)" in limit
+    assert "pptx (0)" in limit
+    assert "12700 legacy OLE" in limit
 
 
-def test_no_ooxml_limit_is_claimed_when_ooxml_is_actually_present() -> None:
-    """Negative control: the limit must be driven by the measurement, not always emitted."""
+def _ooxml_limits(by_extension: dict[str, int]) -> list[str]:
     source = SourceManifest(
         name="Hypothetical",
         licence="CC0",
         publishable=True,
         root="/x",
-        file_count=5000,
+        file_count=sum(by_extension.values()),
         total_bytes=1,
-        by_extension={"docx": 3000, "xlsx": 2000},
+        by_extension=by_extension,
     )
-    manifest = build_manifest([source])
+    return [x for x in build_manifest([source])["limits"] if "UNTESTED AT VOLUME" in x]
 
-    assert not any("UNTESTED AT VOLUME" in limit for limit in manifest["limits"])
+
+def test_no_ooxml_limit_is_claimed_when_ooxml_is_actually_present() -> None:
+    """Negative control: the limit must be driven by the measurement, not always emitted."""
+    assert _ooxml_limits({"docx": 3000, "xlsx": 2000, "pptx": 1000}) == []
+
+
+def test_the_ooxml_limit_is_per_format_not_one_bucket() -> None:
+    """Plenty of .docx and .xlsx says nothing about .pptx, so .pptx alone is still named.
+
+    The three formats are different parts of the OOXML family, read by different code. A single
+    bucket would let 5,000 spreadsheets stand in for presentations the corpus does not hold.
+    """
+    (limit,) = _ooxml_limits({"docx": 3000, "xlsx": 2000})
+
+    assert "pptx (0)" in limit
+    assert "docx (" not in limit
+    assert "xlsx (" not in limit
+
+
+def test_a_format_counts_as_covered_from_one_thousand_files() -> None:
+    """The threshold the fetch script sizes its OOXML axes against (`ZENODO_OOXML`)."""
+    (limit,) = _ooxml_limits({"docx": 999, "xlsx": 1000, "pptx": 1000})
+    assert "docx (999)" in limit and "xlsx (" not in limit and "pptx (" not in limit
+    # Macro-enabled files count toward their format.
+    assert _ooxml_limits({"docx": 999, "docm": 1, "xlsx": 1000, "pptx": 1000}) == []
 
 
 def test_an_unpublishable_source_is_named_as_such() -> None:

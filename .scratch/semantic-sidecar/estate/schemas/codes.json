@@ -1,0 +1,384 @@
+{
+ "codes": {
+  "attribute_pattern.document": {
+   "params": [
+    "columns"
+   ],
+   "en": "it carries text columns ({columns}) and nothing refers to it"
+  },
+  "attribute_pattern.event": {
+   "params": [
+    "column",
+    "targets"
+   ],
+   "en": "it is dated ({column}) and points at {targets}"
+  },
+  "attribute_pattern.organisation": {
+   "params": [
+    "column"
+   ],
+   "en": "it carries a name that is not personal ({column}) with a place or a contact"
+  },
+  "attribute_pattern.person": {
+   "params": [
+    "columns"
+   ],
+   "en": "it carries personal columns that name a human ({columns})"
+  },
+  "attribute_pattern.place": {
+   "params": [
+    "column"
+   ],
+   "en": "the column is called {column}"
+  },
+  "attribute_pattern.product": {
+   "params": [
+    "sources"
+   ],
+   "en": "other concepts refer to it ({sources}) and its key names a thing"
+  },
+  "declared_key": {
+   "params": [
+    "columns"
+   ],
+   "en": "primary key ({columns})"
+  },
+  "different_parents": {
+   "params": [
+    "level",
+    "a",
+    "b"
+   ],
+   "en": "they belong to different values of {level} ({a}, {b})"
+  },
+  "functional_dependency.all": {
+   "params": [
+    "objects",
+    "a",
+    "b"
+   ],
+   "en": "in all {objects} objects that carry both, each {a} goes with exactly one {b}"
+  },
+  "functional_dependency.most": {
+   "params": [
+    "objects",
+    "holding",
+    "checked",
+    "a",
+    "b"
+   ],
+   "en": "over {objects} objects, {holding} of {checked} values of {a} go with exactly one {b}"
+  },
+  "key_contains_key": {
+   "params": [
+    "concept",
+    "key",
+    "whole",
+    "columns"
+   ],
+   "en": "the key of {concept} ({key}) contains the key of {whole} ({columns})"
+  },
+  "key_contains_part_of_key": {
+   "params": [
+    "concept",
+    "key",
+    "whole",
+    "columns"
+   ],
+   "en": "the key of {concept} ({key}) contains {columns}, one column of the key of {whole}"
+  },
+  "language_model.class": {
+   "params": [
+    "model",
+    "parent"
+   ],
+   "en": "proposed by {model} as a class between concepts and {parent}"
+  },
+  "language_model.declined": {
+   "params": [
+    "model"
+   ],
+   "en": "{model} found none of the classes fitting"
+  },
+  "language_model.placed": {
+   "params": [
+    "model"
+   ],
+   "en": "placed by {model}"
+  },
+  "legal_form.different": {
+   "params": [],
+   "en": "different legal forms"
+  },
+  "metric_view_dimension": {
+   "params": [
+    "label"
+   ],
+   "en": "named “{label}” as a dimension of a metric view"
+  },
+  "metric_view_join": {
+   "params": [
+    "view",
+    "on"
+   ],
+   "en": "the metric view {view} joins on {on}"
+  },
+  "metric_view_measure": {
+   "params": [
+    "view"
+   ],
+   "en": "a measure of the metric view {view}"
+  },
+  "metric_view_source": {
+   "params": [
+    "view"
+   ],
+   "en": "source of the metric view {view}"
+  },
+  "name.near": {
+   "params": [],
+   "en": "nearly the same name"
+  },
+  "name.same": {
+   "params": [],
+   "en": "the same name"
+  },
+  "name.same_core": {
+   "params": [],
+   "en": "the same name apart from the legal form"
+  },
+  "name.token_share": {
+   "params": [
+    "percent"
+   ],
+   "en": "the names share {percent}% of their distinctive words"
+  },
+  "name_and_inclusion.column": {
+   "params": [
+    "child",
+    "column",
+    "parent",
+    "key"
+   ],
+   "en": "{child}.{column} is named like the key {parent}.{key} and its values are found there"
+  },
+  "name_and_inclusion.key": {
+   "params": [
+    "child",
+    "columns",
+    "parent"
+   ],
+   "en": "{child} carries ({columns}), the key of {parent}, and its values are found there"
+  },
+  "name_and_inclusion.part_of_key": {
+   "params": [
+    "child",
+    "column",
+    "parent",
+    "key"
+   ],
+   "en": "{child}.{column} is named after {parent} and is one column of its key ({key}); its values are found there"
+  },
+  "names_an_entity": {
+   "params": [
+    "value_set",
+    "entity",
+    "keys",
+    "values"
+   ],
+   "en": "{value_set} has {values} values over the {keys} rows of {entity}: it names a single {entity}, it does not group them"
+  },
+  "postcode.different": {
+   "params": [],
+   "en": "different postcodes"
+  },
+  "postcode.same": {
+   "params": [],
+   "en": "the same postcode"
+  },
+  "referenced": {
+   "params": [
+    "relations"
+   ],
+   "en": "{relations} relations point here"
+  },
+  "refers_to_a_level.all": {
+   "params": [
+    "concept",
+    "level"
+   ],
+   "en": "each row of {concept} carries one {level}, which is a level of a hierarchy"
+  },
+  "refers_to_a_level.some": {
+   "params": [
+    "filled",
+    "rows",
+    "concept",
+    "level"
+   ],
+   "en": "{filled} of {rows} rows of {concept} carry a {level}, which is a level of a hierarchy; the others sit under none"
+  },
+  "same_grouping": {
+   "params": [
+    "objects",
+    "a",
+    "b"
+   ],
+   "en": "in all {objects} objects that carry both, each {a} goes with exactly one {b} and each {b} with exactly one {a}"
+  },
+  "same_key": {
+   "params": [
+    "base",
+    "key"
+   ],
+   "en": "a derived object with the key of {base} ({key})"
+  },
+  "same_parent": {
+   "params": [
+    "level",
+    "parent"
+   ],
+   "en": "both belong to the {level} {parent}"
+  },
+  "same_start": {
+   "params": [
+    "word"
+   ],
+   "en": "both names begin with “{word}”"
+  },
+  "shared_column.holds": {
+   "params": [
+    "object",
+    "column",
+    "values"
+   ],
+   "en": "{object}.{column} holds {values} of the shared values"
+  },
+  "shared_column.value_set": {
+   "params": [
+    "column",
+    "objects",
+    "values"
+   ],
+   "en": "the column {column} appears in {objects} objects with at most {values} distinct values"
+  },
+  "shared_rare_word": {
+   "params": [
+    "word"
+   ],
+   "en": "both names contain “{word}”"
+  },
+  "source.same": {
+   "params": [
+    "source"
+   ],
+   "en": "both from {source}"
+  },
+  "source.two": {
+   "params": [
+    "a",
+    "b"
+   ],
+   "en": "{a} and {b}"
+  },
+  "top_class.document.definition": {
+   "params": [],
+   "en": "A text someone wrote and filed: a bulletin, a report, a letter."
+  },
+  "top_class.document.label": {
+   "params": [],
+   "en": "Document"
+  },
+  "top_class.event.definition": {
+   "params": [],
+   "en": "Something that happened at a time and involves other things: a claim, a visit, a recall."
+  },
+  "top_class.event.label": {
+   "params": [],
+   "en": "Event"
+  },
+  "top_class.organisation.definition": {
+   "params": [],
+   "en": "A company, a public body or a unit of one that acts under a name."
+  },
+  "top_class.organisation.label": {
+   "params": [],
+   "en": "Organisation"
+  },
+  "top_class.person.definition": {
+   "params": [],
+   "en": "A human being. Records of persons are never shown."
+  },
+  "top_class.person.label": {
+   "params": [],
+   "en": "Person"
+  },
+  "top_class.place.definition": {
+   "params": [],
+   "en": "A location or an area: a town, a region, a market."
+  },
+  "top_class.place.label": {
+   "params": [],
+   "en": "Place"
+  },
+  "top_class.product.definition": {
+   "params": [],
+   "en": "A thing that is made, sold, owned or repaired, or a kind of such things."
+  },
+  "top_class.product.label": {
+   "params": [],
+   "en": "Product"
+  },
+  "town.different": {
+   "params": [],
+   "en": "different towns"
+  },
+  "town.missing": {
+   "params": [],
+   "en": "one record has no town"
+  },
+  "town.same": {
+   "params": [],
+   "en": "the same town"
+  },
+  "unique_key.combination": {
+   "params": [
+    "columns",
+    "rows"
+   ],
+   "en": "({columns}): a combination unique in the data, over {rows} rows"
+  },
+  "unique_key.join_target": {
+   "params": [
+    "columns",
+    "rows"
+   ],
+   "en": "({columns}): the target of a metric-view join, unique in the data, over {rows} rows"
+  },
+  "unique_key.own_name": {
+   "params": [
+    "columns",
+    "rows"
+   ],
+   "en": "({columns}): named after the object, unique in the data, over {rows} rows"
+  },
+  "unique_key.unique": {
+   "params": [
+    "columns",
+    "rows"
+   ],
+   "en": "({columns}): unique in the data, over {rows} rows"
+  },
+  "used_in_answers": {
+   "params": [
+    "answers",
+    "sources"
+   ],
+   "en": "used in {answers} answered questions ({sources})"
+  },
+  "verified_join": {
+   "params": [],
+   "en": "verified by the host's layer job"
+  }
+ }
+}

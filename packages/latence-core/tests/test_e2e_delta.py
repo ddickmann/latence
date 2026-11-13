@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from latence_core.contracts import DeletionMode, DisambiguationRecord, Record
+from latence_core.contracts import DeletionMode, DeltaKind, DisambiguationRecord, Record
 from latence_core.delta_runner import DeltaRunner
 from latence_core.pipeline import Pipeline
 from latence_core.state.corpus_store import CorpusStore
@@ -420,6 +420,91 @@ def test_purge_leaves_no_trace_in_prior_versions_or_source(tmp_path: Path) -> No
         )
     ]
     assert leaks == [], f"purged text survived in: {[str(p) for p in leaks]}"
+
+
+def test_purge_leaves_no_file_name_or_content_hash_in_the_version_history(tmp_path: Path) -> None:
+    # A file name can itself be personal data ("smith-dismissal.txt"), and the Corpus Version
+    # manifests carried it: every Version's delta lists its documents with file_name and
+    # content_hash, and a purge rewrote only the fingerprint and the record count. The CLI promised
+    # that nothing is retained while the name, the id and the hash of the purged document stayed in
+    # wal/v*/version.json. After a purge:
+    #   * the purged document's file name is in no file under the store;
+    #   * no Version lists it as a live document (ADDED / UPDATED / UNCHANGED), so its content hash
+    #     is gone with those entries;
+    #   * exactly the suppression tombstone remains: DELETED entries carrying the content-addressed
+    #     id and nothing else, which is what keeps a Source that still serves the file from
+    #     silently re-ingesting it;
+    #   * the co-resident document's entries are untouched.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    cs = CorpusStore(Storage.for_uri(store), store)
+    (docs / "smith-dismissal.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob is here.\n", encoding="utf-8")
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+    purged_id = _doc_id(docs / "smith-dismissal.txt")
+    keep_id = _doc_id(docs / "keep.txt")
+    v0_entries_before = {e.document_id: e for e in cs.read_version(0).delta.entries}
+    assert v0_entries_before[purged_id].file_name == "smith-dismissal.txt"  # the leak's source
+
+    DeltaRunner().purge(_pipeline(store, docs), run_id="pur", document_ids=[purged_id])
+
+    store_root = tmp_path / "store"
+    named = [
+        str(p.relative_to(store_root))
+        for p in store_root.rglob("*")
+        if p.is_file() and "smith-dismissal" in p.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert named == [], f"the purged document's file name survived in: {named}"
+
+    head = cs.head_version()
+    assert head is not None
+    tombstones = 0
+    for number in range(head + 1):
+        for entry in cs.read_version(number).delta.entries:
+            if entry.document_id != purged_id:
+                continue
+            assert entry.kind is DeltaKind.DELETED, (
+                f"Version {number} still lists the purged document as {entry.kind.value}"
+            )
+            assert entry.file_name == "" and entry.content_hash is None
+            tombstones += 1
+    assert tombstones >= 1, "the suppression tombstone is what keeps the purge durable"
+
+    # The co-resident document is still listed exactly as before, name and hash included.
+    assert {e.document_id: e for e in cs.read_version(0).delta.entries}[keep_id] == (
+        v0_entries_before[keep_id]
+    )
+    # ...and the purge is still durable: a later delta does not bring the document back.
+    (docs / "smith-dismissal.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="after")
+    assert all(purged_id not in _record_reach_ids(r) for r in cs.head_records())
+
+
+def test_purge_scrubs_the_manifest_an_abandoned_transaction_staged(tmp_path: Path) -> None:
+    # A crash mid-commit leaves a staged version.json beside the staged records.jsonl. It is never
+    # read back, but it is a file on disk that names the document, so a purge rewrites it too.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    cs = CorpusStore(Storage.for_uri(store), store)
+    (docs / "smith-dismissal.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob is here.\n", encoding="utf-8")
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+    purged_id = _doc_id(docs / "smith-dismissal.txt")
+
+    wal = cs._wal  # noqa: SLF001 — reproduces the crash residue the WAL recover() reports
+    abandoned_version = 99
+    wal.begin(abandoned_version)
+    wal.stage_text(abandoned_version, "version.json", cs.read_version(0).model_dump_json())
+    staged = tmp_path / "store" / "_latence" / "corpus" / "wal" / "v99" / "version.json"
+    assert "smith-dismissal" in staged.read_text(encoding="utf-8")  # residue present pre-purge
+
+    DeltaRunner().purge(_pipeline(store, docs), run_id="pur", document_ids=[purged_id])
+
+    text = staged.read_text(encoding="utf-8")
+    assert "smith-dismissal" not in text and purged_id not in text
+    assert "keep.txt" in text  # the co-resident document's listing is untouched
 
 
 def test_purge_neutralises_abandoned_wal_residue_end_to_end(tmp_path: Path) -> None:

@@ -31,7 +31,7 @@ LATENCE_RELEASE_CHECK=1 PYTHONHASHSEED=0 uv run pytest \
 
 ## Gate 1 — Measured end-to-end numbers
 
-**Blocked on:** a real GPU run per [`issues/e2e-extended/RUNBOOK.md`](issues/e2e-extended/RUNBOOK.md).
+**Blocked on:** a real GPU run of the protocol the results page states.
 
 Every `PENDING:` placeholder in [`docs/BENCHMARKS-E2E.md`](docs/BENCHMARKS-E2E.md) must be replaced
 with a measured value. Specifically:
@@ -39,12 +39,13 @@ with a measured value. Specifically:
 - [ ] **Pipeline throughput** — wall-clock and peak VRAM per stage, on stated hardware
 - [ ] **Device-honesty check** — the JIT left enabled, FlashInfer not forced, CUDA graphs captured,
       torch.compile active. Without this the throughput numbers were measured under a handicap.
-- [ ] **Retrieval per-signal + fused** — dense, SPLADE, BM25, graph, each alone and fused
-- [ ] **Hop-stratified results** — by hop count *and* shape, never pooled
-- [ ] **The question-set funnel** — enumerated → structural → G3 → G4 → human-audited
-- [ ] **The KG ablation** — with and without the graph leg
-- [ ] **Link prediction** — measured precision on our own held-out sample, and the end-to-end
-      retrieval delta
+- [ ] **Link prediction** — measured precision on our own held-out sample
+
+The protocol's retrieval rows (per-signal and fused results, hop-stratified results, the
+question-set funnel, the KG ablation and the link-prediction retrieval delta) were taken off that
+page when [ADR-0068](docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
+removed the retrieval tooling: they can no longer be run from this repository. They were
+placeholders; no measured value was dropped.
 
 **Do not fill a placeholder with a number from a different corpus, a different commit, or a
 different card.** Each table states its method and its hardware; a number that does not match its
@@ -56,25 +57,26 @@ stated method is worse than a missing one, because it looks checked.
       `tail` (a pipeline returns the last command's status and will report green on a red tree)
 - [x] `mypy --strict` passes on src **and** tests for every package
 - [x] The full suite passes with `PYTHONHASHSEED=0`
-- [ ] **The environment-gated lanes actually ran** — live Qdrant search, GPU providers, s3. These
-      skip locally. If they still skip on the pod, the environment is wrong; a skip is not a pass.
-- [ ] SPLADE proven as a **live retrieval signal** against a real Qdrant — a sparse-only query
-      returning documents a dense-only query does not
-- [ ] The graph leg proven to **retrieve**, not merely reorder — a gold document unreachable by
-      dense and sparse, recovered by traversal
+- [ ] **The environment-gated lanes actually ran** — GPU providers, s3. These skip locally. If
+      they still skip on the pod, the environment is wrong; a skip is not a pass.
+
+Two items left this gate with [ADR-0068](docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md):
+SPLADE proven as a live signal against a real vector store, and the graph retrieval path proven
+to retrieve. The retrieval tooling they tested is no longer in the tree, so neither can be met
+and neither is claimed. Gate 6 holds the claims that replace them.
 
 ## Gate 3 — Licence coherence
 
 - [ ] `LICENSE` is the intended licence, reproduced verbatim from its canonical source
 - [ ] `COMMERCIAL.md` states the licence's commercial position accurately (post-ADR-0063: granted
       outright, no agreement) and leaves no dangling inbound link
-- [x] **All 33 `packages/*/pyproject.toml`** declare the same SPDX identifier. Met, and it stays met
+- [x] **All 30 `packages/*/pyproject.toml`** declare the same SPDX identifier. Met, and it stays met
       without anyone re-reading this line: `test_public_release_gate.py`'s
       `test_release_the_licence_is_declared_consistently_across_every_package` fails the release
       check on any divergent package, and it has a negative control proving the check still fires.
       Verified by hand at the time of ticking —
-      `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `33
-      license = "Apache-2.0"` (re-verified after the ADR-0063 relicence back to Apache-2.0)
+      `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `30
+      license = "Apache-2.0"` (re-verified on 2026-11-10, after ADR-0068 removed four packages)
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [x] `CONTRIBUTING.md` states the CLA requirement
@@ -85,11 +87,6 @@ stated method is worse than a missing one, because it looks checked.
       Under PolyForm this was deferred because no combination was honest — PolyForm with
       `commercial_use=True` stated two contradictory things, and `commercial_use=False` would have
       gated the project's OWN corpus behind `--accept-non-commercial`.
-- [x] **`latence-splade`'s `license_code` resolved.** Same dissolution: its prose says "the package
-      code and the `transformers` library are Apache-2.0", and post-ADR-0063 both halves are true, so
-      the single-valued `ProviderProfile.license_code` has one correct value. Pinned by
-      `test_splade_embedder.py:309`. (Its *weights* — `naver/splade-v3`, CC-BY-NC-SA-4.0 — are
-      unaffected and stay behind `--accept-noncommercial-license`.)
 - [ ] **Legal review completed** — the LGPL interaction, any prior PyPI publication, and the
       contributor position (whether to keep `CLA.md` or move to a DCO, now that Apache-2.0's
       inbound=outbound removes the reason the CLA was written — ADR-0063). The licence *choice* no
@@ -115,15 +112,31 @@ stated method is worse than a missing one, because it looks checked.
 - [ ] No key, token, or credential in the tree — `detect-secrets` clean
 - [ ] Nothing derived from the corpus republishes third-party PII
 
+## Gate 6 — Resolution quality
+
+The engine's headline claim is what it resolves without a human
+([ADR-0069](docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md)).
+None of the three is measured for a release yet. A feasibility prototype has produced numbers on
+synthetic data; a prototype's numbers are not release evidence.
+
+- [ ] **Auto-accept precision** of at least 0.95, set by Learn-then-Test with its confidence
+      stated, on the warehouse side and on the text side
+- [ ] **Recall at that precision:** on the seeded synthetic estate the engine alone finds at
+      least 60% of the true matches, so the precision bar cannot be passed by accepting almost
+      nothing
+- [ ] **The text path beats the recorded baseline** on extraction F1, linking F1 and documents
+      per second, strictly and on the same corpus
+
 ---
 
 ## Why this file exists
 
-Two of the four capabilities most likely to be quoted from a README — SPLADE as a fused signal, and
-graph traversal as a retrieval leg — were, at the time this file was written, **structurally unable
-to work**: the sparse index was never built despite the query path existing, and the graph could only
-reorder a candidate pool it had not chosen. Both are now implemented; neither is yet *proven on real
-data*.
+When this file was first written, two of the capabilities most likely to be quoted from the
+README were structurally unable to work: a sparse index that was never built although its query
+path existed, and a graph step that could only reorder a candidate pool it had not chosen. Both
+were then implemented, never proven on real data, and finally removed with the retrieval tooling
+(ADR-0068).
 
-That gap is the thing this file is for. A framework is judged on the claims it cannot support, not
-the ones it can.
+The lesson outlived them. A capability that is designed is not a capability that works, and the
+claims now most likely to be quoted are the ones in Gate 6. A framework is judged on the claims
+it cannot support, not the ones it can.

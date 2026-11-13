@@ -1,0 +1,286 @@
+{
+ "answered_by": "gpt-6-luna over its API on 2026-11-11, given the request the build writes and nothing else",
+ "classes": [
+  {
+   "definition": "A row describes a manufacturer communication about vehicle service or safety, sometimes linked to a vehicle or model.",
+   "definition_de": "Eine Zeile beschreibt eine Herstellerkommunikation zu Service oder Fahrzeugsicherheit, gegebenenfalls mit Bezug zu einem Fahrzeug oder Modell.",
+   "name": "Vehicle safety communication",
+   "parent": "document"
+  }
+ ],
+ "concepts": [
+  {
+   "definition": "A row records a bulletin and its associated component information.",
+   "definition_de": "Eine Zeile erfasst ein Bulletin und die dazugehörigen Komponentenangaben.",
+   "id": "concept:clean.bulletin_components",
+   "parent": "document",
+   "reason": "The label Bulletin component and bulletin field identify a bulletin-related record; it refers to component and vehicle concepts."
+  },
+  {
+   "definition": "A row describes one manufacturer technical service bulletin for a vehicle.",
+   "definition_de": "Eine Zeile beschreibt ein technisches Servicebulletin eines Herstellers für ein Fahrzeug.",
+   "id": "concept:clean.bulletins",
+   "parent": "Vehicle safety communication",
+   "reason": "The comment explicitly says one row per manufacturer communication (technical service bulletin) and vehicle."
+  },
+  {
+   "definition": "A row records an NHTSA vehicle complaint, including reported failure details and any associated crash, fire, injuries, or deaths.",
+   "definition_de": "Eine Zeile erfasst eine NHTSA-Fahrzeugbeschwerde mit Angaben zum gemeldeten Versagen sowie gegebenenfalls Unfall, Brand, Verletzten oder Todesfällen.",
+   "id": "concept:clean.complaints",
+   "parent": "event",
+   "reason": "The comment says each row is an NHTSA vehicle complaint, and the dates and incident fields describe a reported occurrence."
+  },
+  {
+   "definition": "A row describes an investigation case, including its action kind, opening and closing dates, and summary.",
+   "definition_de": "Eine Zeile beschreibt einen Untersuchungsfall einschließlich Art der Maßnahme, Eröffnungs- und Abschlussdatum sowie Zusammenfassung.",
+   "id": "concept:clean.investigation_cases",
+   "parent": "event",
+   "reason": "The investigation-case label and opened/closed dates support a case treated as an event."
+  },
+  {
+   "definition": "A row records an NHTSA defect investigation for an affected make, model, and model year.",
+   "definition_de": "Eine Zeile erfasst eine NHTSA-Untersuchung eines Mangels für eine betroffene Marke, ein Modell und ein Modelljahr.",
+   "id": "concept:clean.investigations",
+   "parent": "event",
+   "reason": "The investigation label, opened/closed dates, and explicit one-row comment describe an investigation occurrence."
+  },
+  {
+   "definition": "A row represents a manufacturer communication associated with a make and model year.",
+   "definition_de": "Eine Zeile steht für eine Herstellerkommunikation mit Bezug zu einer Marke und einem Modelljahr.",
+   "id": "concept:clean.mfr_communications",
+   "parent": "Vehicle safety communication",
+   "reason": "The label names a manufacturer communication and the key includes a document and model year, while the concept refers to make and model."
+  },
+  {
+   "definition": "A row describes one NHTSA recall campaign, including its reported defect, consequences, remedy, and notification dates.",
+   "definition_de": "Eine Zeile beschreibt eine NHTSA-Rückrufaktion einschließlich gemeldetem Mangel, Folgen, Abhilfe und Benachrichtigungsdaten.",
+   "id": "concept:clean.recall_campaigns",
+   "parent": "event",
+   "reason": "The comment explicitly identifies one row per NHTSA recall campaign, and the dated fields describe the campaign's occurrence and progress."
+  },
+  {
+   "definition": "A row records a report for a recall campaign and period, with counts of involved, remedied, unreachable, or removed items.",
+   "definition_de": "Eine Zeile erfasst einen Bericht zu einer Rückrufaktion und einem Zeitraum mit Zahlen zu betroffenen, reparierten, nicht erreichbaren oder entfernten Einheiten.",
+   "id": "concept:clean.recall_reports",
+   "parent": "document",
+   "reason": "The label is Recall report, the key is campaign and period, and the submitted date and report counts support a filed report."
+  },
+  {
+   "definition": "A row records an NHTSA recall for an affected make, model, and model year, with defect and remedy details.",
+   "definition_de": "Eine Zeile erfasst einen NHTSA-Rückruf für eine betroffene Marke, ein Modell und ein Modelljahr mit Angaben zu Mangel und Abhilfe.",
+   "id": "concept:clean.recalls",
+   "parent": "event",
+   "reason": "The comment explicitly says one row per NHTSA recall campaign and affected vehicle specification; recall dates and details describe the recall event."
+  },
+  {
+   "definition": "A row represents a vehicle model and model year, with counts of related complaints, recalls, investigations, and bulletins.",
+   "definition_de": "Eine Zeile steht für ein Fahrzeugmodell und Modelljahr mit Zählwerten zu zugehörigen Beschwerden, Rückrufen, Untersuchungen und Bulletins.",
+   "id": "concept:clean.vehicles",
+   "parent": "product",
+   "reason": "The key is model and model year, and the concept refers to Make and Model; the counts are supporting summaries about vehicles."
+  },
+  {
+   "definition": "A row records the completion status of a campaign at a dealer as of a date.",
+   "definition_de": "Eine Zeile erfasst den Bearbeitungsstand einer Aktion bei einem Händler zu einem Stichtag.",
+   "id": "concept:internal.campaign_completion",
+   "parent": "event",
+   "reason": "The bilingual comment identifies campaign completion per dealer, and the completion counts, rates, and as-of date describe progress of an activity."
+  },
+  {
+   "definition": "A row describes a recall or service campaign for a model, including its production range and start date.",
+   "definition_de": "Eine Zeile beschreibt eine Rückruf- oder Serviceaktion für ein Modell einschließlich Produktionszeitraum und Startdatum.",
+   "id": "concept:internal.campaigns",
+   "parent": "event",
+   "reason": "The comment explicitly says recall and service campaigns per model, and issued_date marks the campaign start."
+  },
+  {
+   "definition": "A row records one line of a settled claim, such as an operation, time, quantity, or part amount.",
+   "definition_de": "Eine Zeile erfasst eine Position eines entschiedenen Antrags, etwa Arbeitsgang, Zeit, Menge oder Teilebetrag.",
+   "id": "concept:internal.claim_lines",
+   "parent": "event",
+   "reason": "The comment calls these lines of settled claims, the key includes claim_ref, and the relation says each line is part of a claim."
+  },
+  {
+   "definition": "A row records a settled warranty or related claim, including repair, decision, and payment details.",
+   "definition_de": "Eine Zeile erfasst einen entschiedenen Garantie- oder verwandten Antrag einschließlich Reparatur-, Entscheidungs- und Zahlungsangaben.",
+   "id": "concept:internal.claims",
+   "parent": "event",
+   "reason": "The comment explicitly identifies settled warranty claims, and repair_date, decided_date, outcome, and paid_amount describe a claim occurrence."
+  },
+  {
+   "definition": "A row represents a franchised dealer, with its company name, location, market, and contract details.",
+   "definition_de": "Eine Zeile steht für einen Vertragshändler mit Firmenname, Standort, Markt- und Vertragsangaben.",
+   "id": "concept:internal.dealers",
+   "parent": "organisation",
+   "reason": "The comment says franchised dealers and the name field is explicitly a company name."
+  },
+  {
+   "definition": "A row gives the standard labour time for an operation on a model.",
+   "definition_de": "Eine Zeile gibt die Vorgabezeit für einen Arbeitsgang an einem Modell an.",
+   "id": "concept:internal.labour_times",
+   "parent": "none",
+   "reason": "This is a standard-time reference pairing an operation and model, not one of the supplied top-class entity kinds."
+  },
+  {
+   "definition": "A row represents a vehicle keeper, with name and address details.",
+   "definition_de": "Eine Zeile steht für einen Fahrzeughalter mit Namens- und Adressangaben.",
+   "id": "concept:internal.owners",
+   "parent": "person",
+   "reason": "The label and comment identify vehicle keepers, and the fields are personal name and address details."
+  },
+  {
+   "definition": "A row represents a catalogue part, with its names, component group, revision, and list prices.",
+   "definition_de": "Eine Zeile steht für ein Katalogteil mit Bezeichnungen, Baugruppe, Revision und Listenpreisen.",
+   "id": "concept:internal.parts",
+   "parent": "product",
+   "reason": "The comment identifies a parts catalogue, and the fields describe parts and their prices."
+  },
+  {
+   "definition": "A row describes a vehicle in the field, including its model year, production month, and first registration.",
+   "definition_de": "Eine Zeile beschreibt ein Fahrzeug im Feld einschließlich Modelljahr, Produktionsmonat und Erstzulassung.",
+   "id": "concept:internal.vehicles",
+   "parent": "product",
+   "reason": "The comment says vehicles in the field, and VIN and vehicle lifecycle dates describe individual products."
+  },
+  {
+   "definition": "A row records a warranty contract for a vehicle, including basic and extended coverage terms.",
+   "definition_de": "Eine Zeile erfasst einen Garantievertrag für ein Fahrzeug einschließlich Bedingungen der Grund- und Anschlussgarantie.",
+   "id": "concept:internal.warranty_contracts",
+   "parent": "document",
+   "reason": "The label and comment identify warranty contracts per vehicle, and the fields state coverage limits and cancellation status."
+  },
+  {
+   "definition": "A row states warranty conditions for a make and market, such as coverage duration and distance limits.",
+   "definition_de": "Eine Zeile legt Garantiebedingungen für eine Marke und einen Markt fest, etwa Laufzeit und Laufleistungsgrenzen.",
+   "id": "concept:internal.warranty_terms",
+   "parent": "none",
+   "reason": "This is a set of warranty rules or terms rather than a supplied top-class entity kind."
+  },
+  {
+   "definition": "A row aggregates the number of bulletins by vehicle model, model year, and system.",
+   "definition_de": "Eine Zeile fasst die Anzahl der Bulletins nach Fahrzeugmodell, Modelljahr und System zusammen.",
+   "id": "concept:marts.bulletins_by_vehicle_system",
+   "parent": "none",
+   "reason": "The derived label, grouping key, and bulletins count show that this is an aggregate table, not an individual entity or event."
+  },
+  {
+   "definition": "A row describes a calendar day and its year, quarter, month, and working-day or holiday status.",
+   "definition_de": "Eine Zeile beschreibt einen Kalendertag mit Jahr, Quartal, Monat sowie Feiertags- und Arbeitstagsstatus.",
+   "id": "concept:marts.calendar",
+   "parent": "none",
+   "reason": "This derived table is a calendar reference, not one of the supplied top-class kinds."
+  },
+  {
+   "definition": "A row aggregates complaint counts and related incident measures by vehicle model, model year, and system.",
+   "definition_de": "Eine Zeile fasst Beschwerdezahlen und zugehörige Unfallkennzahlen nach Fahrzeugmodell, Modelljahr und System zusammen.",
+   "id": "concept:marts.complaints_by_vehicle_system",
+   "parent": "none",
+   "reason": "The derived label and grouping key, along with counts and summary dates, identify an aggregate table."
+  },
+  {
+   "definition": "A row aggregates investigation counts and opening-date bounds by system and action kind.",
+   "definition_de": "Eine Zeile fasst Untersuchungszahlen und Grenzen der Eröffnungsdaten nach System und Maßnahmenart zusammen.",
+   "id": "concept:marts.investigations_by_system",
+   "parent": "none",
+   "reason": "The derived label, grouping key, and count/date summary fields identify an aggregate table."
+  },
+  {
+   "definition": "A row summarizes the latest completion report for an NHTSA recall campaign.",
+   "definition_de": "Eine Zeile fasst den neuesten Abarbeitungsbericht zu einer NHTSA-Rückrufaktion zusammen.",
+   "id": "concept:marts.recall_completion",
+   "parent": "none",
+   "reason": "The comment explicitly describes one row per campaign with its latest completion report, making this a derived summary."
+  },
+  {
+   "definition": "A row aggregates recall counts, date bounds, and system information by vehicle model and model year.",
+   "definition_de": "Eine Zeile fasst Rückrufzahlen, Datumsgrenzen und Systemangaben nach Fahrzeugmodell und Modelljahr zusammen.",
+   "id": "concept:marts.recalls_by_vehicle",
+   "parent": "none",
+   "reason": "The derived label and key describe a vehicle-level aggregation, with recall counts and summary fields rather than individual recalls."
+  },
+  {
+   "definition": "A row summarizes counts of complaints, recalls, investigations, and bulletins for a vehicle model and model year.",
+   "definition_de": "Eine Zeile fasst die Anzahl von Beschwerden, Rückrufen, Untersuchungen und Bulletins für ein Fahrzeugmodell und Modelljahr zusammen.",
+   "id": "concept:marts.vehicle_profile",
+   "parent": "none",
+   "reason": "The derived label, vehicle key, and multiple count fields identify a summary profile rather than an individual vehicle."
+  },
+  {
+   "definition": "A row represents a partner-portal service account, with the workshop name, location, and opening date.",
+   "definition_de": "Eine Zeile steht für ein Servicekonto im Partnerportal mit Werkstattname, Standort und Eröffnungsdatum.",
+   "id": "concept:partner.service_accounts",
+   "parent": "organisation",
+   "reason": "The account name is explicitly a workshop name, indicating an organization; the catalog also notes this seeded sidecar data is not part of the estate."
+  },
+  {
+   "definition": "A value identifies an NHTSA component label formed from a system and its part.",
+   "definition_de": "Ein Wert bezeichnet eine NHTSA-Komponentenbezeichnung, die aus System und Teil besteht.",
+   "id": "concept:value:component",
+   "parent": "none",
+   "reason": "The comment describes a component label, and the reference rolls up to a component system; this is a classification value."
+  },
+  {
+   "definition": "A value identifies a dealer group associated with markets and distance units.",
+   "definition_de": "Ein Wert bezeichnet eine Händlergruppe, die Märkten und Entfernungseinheiten zugeordnet ist.",
+   "id": "concept:value:dealer_group",
+   "parent": "organisation",
+   "reason": "The label names a dealer group, which is an organization, and other organization and operational concepts refer to it."
+  },
+  {
+   "definition": "A value identifies the unit used to express distance.",
+   "definition_de": "Ein Wert bezeichnet die Einheit, in der eine Entfernung angegeben wird.",
+   "id": "concept:value:distance_unit",
+   "parent": "none",
+   "reason": "The label and its use by distance-bearing concepts identify a unit of measure, not a supplied top-class kind."
+  },
+  {
+   "definition": "A value classifies a campaign by its kind.",
+   "definition_de": "Ein Wert klassifiziert eine Aktion nach ihrer Art.",
+   "id": "concept:value:kind",
+   "parent": "none",
+   "reason": "The label and references show a campaign-kind classification, not an event or another top-class entity."
+  },
+  {
+   "definition": "A value identifies a vehicle make as recorded on vehicle records.",
+   "definition_de": "Ein Wert bezeichnet eine Fahrzeugmarke, wie sie in Fahrzeugdatensätzen geführt wird.",
+   "id": "concept:value:make",
+   "parent": "product",
+   "reason": "The comment defines it as a vehicle brand and distinguishes it from the manufacturer company; it is used to identify vehicle and product-related records."
+  },
+  {
+   "definition": "A value identifies the company named on an NHTSA recall or investigation.",
+   "definition_de": "Ein Wert bezeichnet das Unternehmen, das in einem NHTSA-Rückruf oder einer Untersuchung genannt wird.",
+   "id": "concept:value:manufacturer",
+   "parent": "organisation",
+   "reason": "The comment explicitly describes a company by its legal name, and the concept rolls up to Make."
+  },
+  {
+   "definition": "A value identifies a market used to group dealers, vehicles, warranty records, and claims.",
+   "definition_de": "Ein Wert bezeichnet einen Markt, nach dem Händler, Fahrzeuge, Garantieunterlagen und Anträge gruppiert werden.",
+   "id": "concept:value:market",
+   "parent": "place",
+   "reason": "The label is Market and it is associated with dealers and other geographically scoped operations, supporting a market area."
+  },
+  {
+   "definition": "A value identifies a vehicle model by name within its make.",
+   "definition_de": "Ein Wert bezeichnet ein Fahrzeugmodell anhand seines Namens innerhalb seiner Marke.",
+   "id": "concept:value:model",
+   "parent": "product",
+   "reason": "The comment explicitly defines a vehicle model and says models are distinguished by make and model."
+  },
+  {
+   "definition": "A value identifies a subject associated with an investigation case, investigation, or recall report.",
+   "definition_de": "Ein Wert bezeichnet ein Thema, das einem Untersuchungsfall, einer Untersuchung oder einem Rückrufbericht zugeordnet ist.",
+   "id": "concept:value:subject",
+   "parent": "none",
+   "reason": "The label and relations support a subject classification, but do not establish that it is a person, organization, product, event, place, or document."
+  },
+  {
+   "definition": "A value identifies an NHTSA component system under which a complaint, recall, or investigation is filed.",
+   "definition_de": "Ein Wert bezeichnet ein NHTSA-Komponentensystem, unter dem eine Beschwerde, ein Rückruf oder eine Untersuchung geführt wird.",
+   "id": "concept:value:system",
+   "parent": "none",
+   "reason": "The comment describes a component-system classification and distinguishes it from component and company grouping."
+  }
+ ]
+}

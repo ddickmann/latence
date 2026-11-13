@@ -7,7 +7,7 @@ it calls exactly ONE function, keyed by the native library its adapter owns:
   ``redaction.gliner_pii``, ``relation.gliner_relex``);
 * :func:`load_gliner2_model` — the ``gliner2`` framework (``fused_entity_relation.gliner2``,
   ``redaction.gliner2``);
-* :func:`load_transformers_model` — plain ``transformers`` models (the OCR VLMs, SPLADE);
+* :func:`load_transformers_model` — plain ``transformers`` models (the OCR VLMs);
 * :func:`load_sentence_transformer` — ``sentence-transformers`` checkpoints
   (``embedding.sentence_transformers``).
 
@@ -2055,16 +2055,11 @@ def load_transformers_model(
     the load spreads :func:`load_perf_kwargs` (bf16-on-GPU + ``sdpa``/FA2) into ``from_pretrained``
     through :func:`load_with_fa2_fallback` — a FA2 load that raises is retried once on ``sdpa``.
 
-    Two verified defects this closes:
+    The verified defect this closes: the OCR parsers (``parser.lighton``, ``parser.glm``) used a
+    bare ``model = model.to(device)``, so #191's "prove it landed or raise" did not cover every
+    model-placing Provider. They now get the same verified placement as everyone else.
 
-    * the OCR parsers (``parser.lighton``, ``parser.glm``) used a bare ``model = model.to(device)``,
-      so #191's "prove it landed or raise" covered 3 of the 5 model-placing Providers. They now get
-      the same verified placement as everyone else.
-    * ``sparse.splade`` got NOTHING from this seam: a bare ``AutoModelForMaskedLM.from_pretrained``
-      (fp32 on a GPU — the ~2× miss) and no placement at all. It is a registered learned Provider
-      running real transformer forwards; the AST guard's curated list simply never included it.
-
-    The JIT kill runs for this family too. A multilingual SPLADE / VLM backbone may or may not be
+    The JIT kill runs for this family too. A VLM backbone may or may not be
     DeBERTa-derived — but the neutralization is throughput-only and byte-identical, so applying it
     unconditionally costs nothing and removes "is this backbone mdeberta?" from the set of questions
     a Provider author has to answer correctly.

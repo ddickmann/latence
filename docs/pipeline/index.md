@@ -126,10 +126,7 @@ These extend the spine and are off by default:
   `inferred=True`, counted separately from asserted edges
   ([ADR-0037](../adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md)).
   Providers: `graph_completion.reference`, `graph_completion.ultra`.
-- **Context Enrichment** — projects the assembled KG back onto each chunk into the
-  *embedding input only* ([ADR-0039](../adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md)).
-  Provider: `context.kg_header`.
-- **Embedding** — opt-in RAG-corpus vectors; see [Embedders](../embedders.md).
+- **Embedding** — a nested resolution signal, not a Stage; see [Embedders](../embedders.md).
   Providers: `embedding.hashing`, `embedding.sentence_transformers`, `embedding.endpoint`.
 
 ## The run's output: the Quality Report

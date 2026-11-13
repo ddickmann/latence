@@ -1,4 +1,4 @@
-# Derived, reproducible from corpus/ + pipeline.yaml in ~30 s:
-#   PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/run_pipeline.py --fresh
+# The run store: derived output, never tracked. The script that wrote it, run_pipeline.py, was
+# removed on 2026-11-10 (see README.md).
 store/
 __pycache__/

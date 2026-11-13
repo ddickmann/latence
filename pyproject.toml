@@ -53,13 +53,9 @@ latence-embedder-st = { workspace = true }
 latence-disambig-embedding = { workspace = true }
 latence-disambig-glinker = { workspace = true }
 latence-runner-airflow = { workspace = true }
-latence-retrieval = { workspace = true }
 latence-source-sharepoint = { workspace = true }
 
 latence-benchmark = { workspace = true }
-latence-splade = { workspace = true }
-latence-muvera = { workspace = true }
-latence-sink-qdrant = { workspace = true }
 
 latence-console = { workspace = true }
 latence-demo = { workspace = true }
@@ -106,18 +102,6 @@ dependencies = [
     # latence-parser-pdfplumber and latence-demo it installs into the default dev env so its tests +
     # the conformance suite run offline/deterministically (a learned embedder is a one-line opt-in).
     "latence-disambig-embedding",
-    # The stateless query-time retrieval-quality tooling foundation (#159, ADR-0048/0049). Pure-
-    # Python core (only pydantic, no heavy dep, no torch) and a SEPARATE downstream library from the
-    # pipeline — it installs into the default dev env like latence-demo so its offline/deterministic
-    # tests run, and it registers the new 'latence.retrieval' entry-point group (kept OFF the
-    # 'latence.providers' Stage seam) so the conformance suite never sees a query-time component.
-    "latence-retrieval",
-    # The canonical, training-free MUVERA FDE FdeConverter (#163, ADR-0050). Data-oblivious and
-    # training-free ⇒ it ships NO model/weights and is pure-Python + dependency-free (numpy-free), so
-    # unlike the torch/transformers Provider packages it installs into the default dev env like
-    # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
-    # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
-    "latence-muvera",
     # The OPTIONAL Iceberg-table Export output's client (#184, ADR-0017). It is an EXTRA on the
     # published latence-core (`latence-core[iceberg]`), never a runtime dependency — but it IS
     # pinned into the dev env, deliberately: the #184 acceptance criterion is an end-to-end
@@ -135,15 +119,6 @@ dependencies = [
     # latence-demo: its offline tests run against the faithful Graph fake it ships, and the
     # conformance suite (C1-C6) exercises the REAL connector against that fake.
     "latence-source-sharepoint",
-
-    # The first first-party SINK: the one-shot Qdrant loader (#183, first slice of #156). Its whole
-    # mapping/idempotency/reconcile core is pure-Python over latence-core (already pinned) — the
-    # `qdrant-client` rides the OPTIONAL `[client]` extra and is imported lazily — so, like
-    # latence-demo and latence-retrieval, it installs into the default dev env and its
-    # offline/deterministic tests run against the shipped faithful `FakeQdrantClient`. It registers
-    # NO `latence.providers` entry point (a sink consumes the finished Export, it is not a Stage), so
-    # the conformance suite never sees it.
-    "latence-sink-qdrant",
 
     # The reproducible PUBLIC benchmark harness (#181). It is NOT a pipeline Provider — it
     # registers nothing under `latence.providers` — but it RUNS the real Stages through the real
@@ -209,18 +184,17 @@ line-length = 100
 target-version = "py311"
 src = ["packages"]
 # Frozen measurement-evidence scripts and one-off prototypes, retained VERBATIM because they
-# produced numbers that are cited (RFC proof, M6 official evals, calibration judgments,
-# residency prototypes). They are not shipped, not imported by any package, and restyling them
-# would churn recorded provenance for zero product value — so they are declared out of lint
-# scope rather than left as permanent red. Everything else in the repo (packages/, benchmark/s5,
-# benchmark/serving, the campaign library, scripts/) IS in scope and clean (ticket
-# wayfinder-enterprise-serving/04).
+# produced numbers that are cited (the RFC proof and its dogfood run, one pod probe). They are
+# not shipped, not imported by any package, and restyling them would churn recorded provenance
+# for zero product value — so they are declared out of lint scope rather than left as permanent
+# red. Everything else in the repo (packages/, the campaign library, scripts/) IS in scope and
+# clean (ticket wayfinder-enterprise-serving/04). The scripts of benchmark/official,
+# benchmark/official-data and benchmark/musique-subset were removed with the retrieval layer on
+# 2026-11-10, so those folders hold no Python and are no longer listed. benchmark/rfc lost its
+# retrieval scripts the same day (benchmark/rfc/README.md); the corpus builder and the chart
+# script that remain there are the frozen scripts this entry still covers.
 exclude = [
-    "benchmark/official",
-    "benchmark/official-data",
     "benchmark/rfc",
-    "benchmark/musique-subset",
-    "issues/wayfinder-hypergraph-coe/prototypes",
     "scripts/_pod_probe_gliner.py",
     "results/dogfood-rfc",
 ]
@@ -285,28 +259,6 @@ module = [
     # CPU-first dev env; latence_core.observability lazily imports them and the seam's tests use a
     # fake MetricSink + exercise the real no-op-when-absent degrade, so they are dynamically typed.
     "prometheus_client", "opentelemetry", "opentelemetry.*",
-    # OPTIONAL exact token counter for the query-time `pack` transform (latence-retrieval[pack],
-    # #167) — `tiktoken` (MIT) is isolated behind that extra (ADR-0016/0049), NOT in the CPU-first
-    # dev env; the TiktokenCounter lazily imports it and the pack tests drive the pure-Python
-    # heuristic + a faithful fake `tiktoken` module, so it is treated as dynamically typed here.
-    "tiktoken",
-    # OPTIONAL reference RetrievalBackend adapter for the query-time tooling (latence-retrieval
-    # [backend-qdrant], #173) — `qdrant-client` (Apache-2.0) is isolated behind that extra
-    # (ADR-0016/0049), NOT in the CPU-first dev env; the QdrantBackend lazily imports it and the
-    # backend tests drive a faithful fake `qdrant_client` module, so it is dynamically typed here.
-    "qdrant_client", "qdrant_client.*",
-    # OPTIONAL multi-hop graph `expand` engines for the query-time tooling (latence-retrieval
-    # [graph-duckdb] / [graph-networkx] / [graph-neo4j], #169) — `duckdb` (MIT), `networkx` (BSD),
-    # and the `neo4j` driver (Apache-2.0) are isolated behind those extras (ADR-0016/0049/0051), NOT
-    # in the CPU-first dev env; the GraphSource adapters lazily import them, offline tests drive the
-    # faithful `FakeGraphSource` + a faithful fake `neo4j` module (real DuckDB/networkx equivalence
-    # tests are gated on the dep), so they are treated as dynamically typed here.
-    "duckdb", "networkx", "neo4j",
-    # OPTIONAL MCP-protocol face for the query-time server (latence-retrieval[mcp], #174) — the `mcp`
-    # SDK (MIT) is isolated behind that extra (ADR-0016/0049/0052), NOT in the CPU-first dev env; the
-    # `build_mcp_server` / `run_stdio` binding lazily imports it and the offline tests drive the pure
-    # tool-call boundary + a faithful fake `mcp` module, so it is treated as dynamically typed here.
-    "mcp", "mcp.*",
 ]
 ignore_missing_imports = true
 
@@ -320,6 +272,11 @@ ignore_errors = true
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["packages"]
+# A watchdog, not a limit: when one test (set-up and tear-down included) runs longer than this
+# many seconds, pytest writes every thread's traceback to the log and lets the test go on. The
+# whole suite takes 20 to 40 minutes for some 4,400 tests, so a single test that is still
+# running after 15 minutes is stuck, and this is what names it.
+faulthandler_timeout = 900
 
 # Coverage is SURFACED in CI (job summary + artifact + a badge-ready number), never
 # hard-gated — a % threshold flakes as the heavy/endpoint Providers (whose real backends

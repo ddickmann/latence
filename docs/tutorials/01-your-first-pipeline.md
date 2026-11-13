@@ -2,13 +2,13 @@
 
 **What you will build.** A folder of four ordinary documents turned into an AI-ready corpus: chunked
 and PII-masked text with vectors, a knowledge graph whose entities are resolved across documents,
-BM25 term statistics, and a Quality Report that substantiates all of it. Then you will take the
-pipeline apart and see what each of the fourteen stages actually produced.
+and a Quality Report that substantiates all of it. Then you will take the
+pipeline apart and see what each of the thirteen stages actually produced.
 
 **Prerequisites.** A clone of the framework with `uv sync` run, and nothing else. This tutorial uses
-only the in-core reference Providers, so it needs **no network, no model downloads and no GPU**, and
-the whole run finishes in well under a second. That is deliberate: you should be able to see the
-shape of the system before you spend anything on it.
+only the CPU reference Providers, so it needs **no network, no model downloads and no GPU**, and
+the pipeline itself finishes in well under a second. That is deliberate: you should be able to see
+the shape of the system before you spend anything on it.
 
 **Time.** About 20 minutes, most of it reading output.
 
@@ -16,9 +16,11 @@ shape of the system before you spend anything on it.
 
 ## 1. Make a corpus
 
-Anywhere outside the repo:
+Anywhere outside the repo. Activate the clone's environment first: outside the clone, `uv run`
+only finds `latence` when that environment is the active one.
 
 ```bash
+source /path/to/latence/.venv/bin/activate
 mkdir -p first-pipeline/documents && cd first-pipeline
 ```
 
@@ -157,13 +159,6 @@ stages:
     depends_on: [disambiguate]
     config:
       corpus_id: first-pipeline
-      graph_features: {provider: graph_features.pagerank, config: {}}
-
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [redact, graph]
-    config: {max_neighbors_per_entity: 4, max_triples: 6}
 
   - name: export_kg
     capability: export
@@ -174,12 +169,10 @@ stages:
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [enrich]
+    depends_on: [redact]
     config:
       basename: records
-      context_columns: true
       embedder: {provider: embedding.hashing, config: {dimension: 256}}
-      bm25: {provider: tokenizer.regex, config: {}}
 ```
 
 Read it once from the top. Every stage is the same four things: a `name`, the **Capability** it
@@ -190,11 +183,11 @@ claim, and the thing Tutorial 4 makes you do yourself.
 Three details worth pausing on:
 
 * **`depends_on` is a DAG, not a list.** `redact` depends on `content_screen`, not on `entities` —
-  redaction and extraction are independent branches over the same chunk stream. `enrich` waits for
-  both `redact` and `graph`, which is what lets the exported corpus be masked *and* graph-enriched
-  at once.
-* **`graph_features` and `bm25` are nested `{provider, config}` blocks.** A Provider can resolve
-  another Provider through the same registry, so optional signals bolt on without a new stage.
+  redaction and extraction are independent branches over the same chunk stream. `export_corpus`
+  reads `redact`, which is what makes the exported corpus masked.
+* **`embedder` is a nested `{provider, config}` block.** A Provider can resolve
+  another Provider through the same registry, so the corpus export gets its vectors without a new
+  stage. Leave the block out and the export writes the same rows with no `embedding`.
 * **`storage_uri` is an fsspec URI.** `file://./latence-out` here; `s3://bucket/prefix` works
   unchanged, and nothing else in the file changes.
 
@@ -227,12 +220,22 @@ box and a GPU pod.
 uv run latence run latence.stack.yaml --run-id run-0001
 ```
 
-✓ **look for** — two log lines and then the Quality Report as JSON on stdout:
+✓ **look for** — these log lines on stderr (each prefixed with a timestamp), and the Quality
+Report as JSON on stdout:
 
 ```
-INFO latence loaded pipeline 'first-pipeline' with 14 stages
+INFO latence loaded pipeline 'first-pipeline' with 13 stages
+WARNING latence_core.runner A redaction Stage is wired but extract_on is 'unmasked': the exported corpus is masked while the knowledge graph is NOT. ...
 INFO latence run complete: 4 documents, contracts_complete=True
 ```
+
+The log ends with the same report rendered as markdown.
+
+The `WARNING` is expected, and it is accurate. This stack masks the corpus but extracts from the
+unmasked text, so the graph's entity names are the real ones. For a first run that is what you
+want: a graph whose people are all `[PERSON]` is a graph about nobody.
+[The knowledge-graph export](../anatomy/04-knowledge-graph-export.md#42-what-the-export-does-not-redact)
+explains the trade and the `extract_on: masked` setting that reverses it.
 
 `contracts_complete=True` is the assertion that matters. It means every record the run produced
 carries its full Provenance and Classification and has offsets that are in range and correctly
@@ -251,43 +254,43 @@ cat latence-out/_latence/runs/run-0001/quality-report.md
 # Quality Report — first-pipeline (run-0001)
 
 - documents: 4
-- duration: 0.133s
+- duration: 0.276s
 - contracts complete: PASS
   - provenance 23/23, classification 23/23, offsets aligned 23/23
 - provenance drift: clean (8 lookups, max 0 chars)
 
 ## Stages
-- source [source/source.local_folder]: 0 in -> 4 out, 0.008s
-- intake_screen [intake_screening/screening.intake_signature]: 4 in -> 4 out, 0.006s
-- parse [parse/parser.plaintext]: 4 in -> 4 out, 0.006s
-- chunk [chunk/chunk.markdown]: 4 in -> 4 out, 0.006s
-- content_screen [content_screening/screening.content_keyword]: 4 in -> 4 out, 0.007s
-- entities [entity_extraction/entity.gazetteer]: 4 in -> 19 out, 0.006s
-- redact [redaction/redaction.hybrid_rule]: 4 in -> 4 out, 0.010s
-- relations [relation_extraction/relation.pattern]: 23 in -> 9 out, 0.007s
-- profiling [profiling/profiling.statistical]: 23 in -> 5 out, 0.007s
-- disambiguate [disambiguation/disambiguation.cascade]: 28 in -> 14 out, 0.008s
-- graph [graph_assembly/graph.canonical]: 14 in -> 14 out, 0.010s
-- enrich [context_enrichment/context.kg_header]: 18 in -> 4 out, 0.010s
-- export_kg [export/export.knowledge_graph]: 14 in -> 14 out, 0.026s
-- export_corpus [export/export.jsonl_parquet]: 4 in -> 4 out, 0.016s
+- source [source/source.local_folder]: 0 in -> 4 out, 0.022s
+- intake_screen [intake_screening/screening.intake_signature]: 4 in -> 4 out, 0.017s
+- parse [parse/parser.plaintext]: 4 in -> 4 out, 0.017s
+- chunk [chunk/chunk.markdown]: 4 in -> 4 out, 0.017s
+- content_screen [content_screening/screening.content_keyword]: 4 in -> 4 out, 0.016s
+- entities [entity_extraction/entity.gazetteer]: 4 in -> 19 out, 0.016s
+- redact [redaction/redaction.hybrid_rule]: 4 in -> 4 out, 0.022s
+- relations [relation_extraction/relation.pattern]: 23 in -> 9 out, 0.017s
+- profiling [profiling/profiling.statistical]: 23 in -> 5 out, 0.019s
+- export_corpus [export/export.jsonl_parquet]: 4 in -> 4 out, 0.050s
+- disambiguate [disambiguation/disambiguation.cascade]: 28 in -> 14 out, 0.021s
+- graph [graph_assembly/graph.canonical]: 14 in -> 14 out, 0.019s
+- export_kg [export/export.knowledge_graph]: 14 in -> 14 out, 0.021s
 
-## Stage metrics present: Parse, Chunk, Screening, Entities, Relations, Redaction, Profiling, ...
-
-## Context enrichment
-- chunks enriched: 4, avg neighbors/chunk: 1.250, hub entities capped: 2
+## Stage metrics present: Parse, Chunk, Screening, Entities, Relations, Redaction, Profiling, Disambiguation, Graph
 ```
+
+The stages are listed in the order the Runner executed them, which is a valid order of the DAG
+and not the order of the file: `export_corpus` depends only on `redact`, so it ran before the
+graph was built.
 
 Those record counts are exact, not approximate. Every Provider in this stack declares itself
 deterministic, and the conformance suite fails any Provider that declares determinism it does not
 have — so a seeded run of this stack is byte-reproducible, and a different count means the input
 differs, not the machine.
 
-The interesting line is `disambiguate: 28 in -> 14 out`. Twenty-eight mention records went in and
-fourteen canonical records came out: the resolver collapsed "Acme", "Acme Corporation" and "Acme" in
-three different documents into one node. That collapse is the entire reason the graph is worth
-building, and it is why the pipeline does resolution *after* extraction rather than forcing one
-schema up front.
+The interesting line is `disambiguate: 28 in -> 14 out`. Twenty-eight records went in (19 entity
+mentions and 9 relations) and fourteen came out (5 canonical entities, and the 9 relations
+rewritten onto them): the resolver collapsed the seven mentions of Acme, found in three different
+documents, into one node. That collapse is the entire reason the graph is worth building, and it
+is why the pipeline does resolution *after* extraction rather than forcing one schema up front.
 
 ---
 
@@ -301,8 +304,8 @@ inspectable dataset the next stage reads.
 ls latence-out/_latence/runs/run-0001/checkpoints/
 ```
 
-✓ **look for** — one `.jsonl` per stage: `source`, `intake_screen`, `parse`, `chunk`,
-`content_screen`, `entities`, `relations`, `redact`, `profiling`, `disambiguate`, `graph`, `enrich`,
+✓ **look for** — one `.jsonl` per stage, thirteen in all: `source`, `intake_screen`, `parse`,
+`chunk`, `content_screen`, `entities`, `relations`, `redact`, `profiling`, `disambiguate`, `graph`,
 `export_kg`, `export_corpus`.
 
 Walk down them. (`python -m json.tool` is enough; `jq` is nicer.)
@@ -318,7 +321,7 @@ head -c 400 latence-out/_latence/runs/run-0001/checkpoints/parse.jsonl
 and a content-addressed `document_id` of the form `sha256:<64 hex>`. That id is how the document is
 identified for the rest of its life — including by `latence retract` and `latence purge`.
 
-### `chunk.jsonl` — retrieval-sized pieces that remember where they came from
+### `chunk.jsonl` — model-sized pieces that remember where they came from
 
 ✓ **look for** — each chunk carries `token_count`, an `offset_map`, and a `page_slice` listing
 exactly the document pages its `[char_start, char_end)` span overlaps. A chunk is *self-describing*:
@@ -359,8 +362,8 @@ ls latence-out/_latence/runs/run-0001/screening/ latence-out/_latence/runs/run-0
 ✓ **look for** — a `.jsonl` for each of the two screening checkpoints, and empty quarantine files.
 Nothing in this corpus is oversized, malformed or injection-bearing, so nothing was held back. Run
 `latence-demo` if you want to see them populated: its bundled corpus plants a zip bomb, an oversized
-file, a type-spoofed PDF and a prompt-injection payload, and the demo exits non-zero if any of them
-gets through.
+file, a type-spoofed PDF and a prompt-injection payload. The first three are quarantined, the
+fourth is flagged, and the demo exits non-zero if any of the four checks disagrees.
 
 ---
 
@@ -370,11 +373,11 @@ gets through.
 ls latence-out/_latence/runs/run-0001/export/
 ```
 
-✓ **look for** — eight files:
+✓ **look for** — six files:
 
 ```
-bm25-postings.parquet  graph-edges.parquet  graph.graphml  records.jsonl
-bm25-stats.json        graph-nodes.parquet  graph.ttl      records.parquet
+graph-edges.parquet  graph.graphml  records.jsonl
+graph-nodes.parquet  graph.ttl      records.parquet
 ```
 
 Two quick sanity checks before the next tutorial reads them properly.
@@ -420,27 +423,27 @@ and those placeholders present in the exported `content`, which matches the `red
 
 ```bash
 uv run python -c "
-import pyarrow.parquet as pq
+import json, pyarrow.parquet as pq
 t = pq.read_table('latence-out/_latence/runs/run-0001/export/graph-nodes.parquet')
 for r in t.to_pylist():
-    print(f\"{r['type']:7} {r['canonical_name']:14} centrality={r['centrality']:.4f}\")
+    p = json.loads(r['properties'])
+    print(f\"{r['type']:7} {r['canonical_name']:14} mentions={p['mention_count']} documents={p['document_count']}\")
 "
 ```
 
-✓ **look for** — exactly five nodes, and `Acme` the most central of them:
+✓ **look for** — exactly five nodes, and `Acme` the one with the most mentions:
 
 ```
-PERSON  Bob Reyes      centrality=0.1493
-ORG     Acme           centrality=0.3396
-ORG     Globex         centrality=0.2127
-PERSON  Carol Nguyen   centrality=0.1493
-PERSON  Alice Turner   centrality=0.1493
+PERSON  Bob Reyes      mentions=3 documents=2
+ORG     Acme           mentions=7 documents=3
+ORG     Globex         mentions=6 documents=3
+PERSON  Carol Nguyen   mentions=1 documents=1
+PERSON  Alice Turner   mentions=2 documents=2
 ```
 
-Five nodes from nineteen mentions across four documents. `Acme`, `Acme Corporation` and the bare
-`Acme` in `incident.md` are one node. The centrality column is PageRank over the assembled graph —
-it is not decoration, it is a signal the retrieval layer reads later to avoid being swamped by hub
-entities.
+Five nodes from nineteen mentions across four documents. The seven Acme mentions, from
+`handbook.md`, `contract.md` and `incident.md`, are one node; `properties` is a JSON column that
+records how many mentions and documents stand behind each node.
 
 !!! note "Five nodes is the ceiling here, and that is the point"
     `entity.gazetteer` finds exactly the terms you listed and nothing else. It found no dates, no
@@ -450,7 +453,8 @@ entities.
 
     That is the concrete reason production stacks run a learned zero-shot extractor
     (`fused_entity_relation.gliner2`) against a schema *induced per chunk*, rather than a term list
-    fixed up front. Tutorial 4 shows how a Provider like that plugs in behind this same seam.
+    fixed up front. Tutorial 4 shows how a Provider of your own plugs in behind a seam like
+    this one.
 
 ---
 
@@ -497,7 +501,8 @@ ready-made matrix for exactly this comparison (run it from inside the repo, wher
 uv run latence bake-off matrix/chunk.yaml
 ```
 
-✓ **look for** — a `MATRIX-RESULTS-chunk.md` table plus a JSON companion, one row per candidate:
+✓ **look for** — a `MATRIX-RESULTS-chunk.md` table plus a JSON companion, written next to the
+matrix file (pass `--out-dir` to put them somewhere else), one row per candidate:
 
 ```
 # Bake-off — `chunk` (chunk) — provider matrix
@@ -506,19 +511,20 @@ uv run latence bake-off matrix/chunk.yaml
 - corpus documents: 7
 - candidates: 2
 
-| candidate | quality | latency (docs/s) | memory measured/declared (MiB) | ... |
-| `chunk.markdown`        | chunks=4 (offset_preserving_fraction=1, tokens=185) | 339.3 | 19.06 / 16 | ... |
-| `chunk.sentence_window` | chunks=4 (offset_preserving_fraction=1, tokens=185) | 345.1 | 19.03 / 16 | ... |
+| candidate | quality | latency (docs/s) | memory measured/declared (MiB) | cost/1k | license | deterministic | errors | skipped/why |
+| `chunk.markdown`        | chunks=4 (chunks=4, offset_preserving_fraction=1, tokens=185) | 159.0 (0.0252s) | 19.06 / 16 | n/a | Apache-2.0 (verified) | declared=yes, observed=identical | 0 | — |
+| `chunk.sentence_window` | chunks=4 (chunks=4, offset_preserving_fraction=1, tokens=185) | 174.1 (0.0230s) | 19.03 / 16 | n/a | Apache-2.0 (verified) | declared=yes, observed=identical | 0 | — |
 ```
 
-Three things to notice. The quality, license and determinism columns are read from each Provider's
-own **declared** profile plus the run's Quality Report — nothing is invented for the table. A
-candidate that crashes or is device-skipped becomes a **row saying so**, never an aborted matrix.
-And the corpus is the *bundled* one (7 documents), not your folder: a bake-off is a controlled
-comparison of Providers, so it holds the corpus constant along with every other stage.
+Three things to notice. The license column is read from each Provider's own **declared** profile,
+the quality column from the run's Quality Report, and the determinism column states both what the
+Provider declared and what two runs showed — nothing is invented for the table. A candidate that
+crashes or is device-skipped becomes a **row saying so**, never an aborted matrix. And the corpus
+is the *bundled* one (7 documents), not your folder: a bake-off is a controlled comparison of
+Providers, so it holds the corpus constant along with every other stage.
 
-Latency here is wall-clock and machine-relative — reported, not gated. Two CPU chunkers within 2%
-of each other on a seven-document corpus is a measurement, not a result.
+Latency here is wall-clock and machine-relative — reported, not gated. Two CPU chunkers this close
+on a seven-document corpus is a measurement, not a result.
 
 Restore `chunk.markdown` before moving on, so the next tutorial's numbers match.
 
@@ -527,8 +533,8 @@ Restore `chunk.markdown` before moving on, so the next tutorial's numbers match.
 ## What you have
 
 A run directory that contains, in files you can read with ordinary tools: every stage's output, both
-screening ledgers, a knowledge graph in three formats, a RAG corpus with vectors and BM25
-statistics, and a report that says what happened. No database, no service, nothing hidden.
+screening ledgers, a knowledge graph in three formats, a corpus with vectors, and a report that
+says what happened. No database, no service, nothing hidden.
 
 **Next:** [Understanding the output](02-understanding-the-output.md) — every artifact, field by
 field, and how to trace a single graph edge back to the exact sentence that produced it.

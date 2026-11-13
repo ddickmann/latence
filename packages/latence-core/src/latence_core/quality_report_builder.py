@@ -91,13 +91,11 @@ from latence_core.pipeline import CapabilityKind
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
-    ContextEnrichmentQuality,
     DisambiguationQuality,
     DriftDiagnostics,
     EntityQuality,
     GoldSetEvaluation,
     GraphQuality,
-    HyperedgeQuality,
     LabelScore,
     ParseQuality,
     ProfilingQuality,
@@ -222,7 +220,7 @@ class QualityRunContext:
     """Everything an aggregator may need to decide whether it applies, and to configure itself.
 
     Handed to each registered factory exactly once per report. It carries the *run*, never the
-    records: an aggregator that needs a Stage's config (the Context-Enrichment caps), the Redaction
+    records: an aggregator that needs a Stage's config, the Redaction
     supersession topology, the run's fan-out tally, or the Storage-backed screening sidecars reads
     them from here at construction, and everything else arrives one record at a time through
     :meth:`QualityAggregator.observe`.
@@ -1349,14 +1347,6 @@ class _GraphAggregator:
         self._edges = 0
         self._node_confidence = 0.0
         self._edge_confidence = 0.0
-        # ADR-0057: Hyperedge roll-up inputs; empty for every run without the projection.
-        self._hyperedge_token_costs: list[int] = []
-        self._hyperedge_weak = 0
-        self._hyperedge_relations = 0
-        self._hyperedge_gamma = 0.0
-        self._hyperedge_arity = 0
-        self._hyperedge_arities: dict[str, int] = {}
-        self._hyperedge_support_max = 0
 
     @classmethod
     def for_run(cls, context: QualityRunContext) -> _GraphAggregator | None:
@@ -1393,17 +1383,6 @@ class _GraphAggregator:
             if edge.evidence.mention_ids:
                 quality.edges_with_evidence += 1
             self._edge_confidence += edge.confidence
-        elif record.scope is GraphScope.HYPEREDGE and record.hyperedge is not None:
-            hyperedge = record.hyperedge
-            self._hyperedge_token_costs.append(hyperedge.token_cost)
-            if hyperedge.weak:
-                self._hyperedge_weak += 1
-            self._hyperedge_relations += len(hyperedge.relations)
-            self._hyperedge_gamma += hyperedge.gamma
-            self._hyperedge_arity += hyperedge.arity
-            key = str(hyperedge.arity)
-            self._hyperedge_arities[key] = self._hyperedge_arities.get(key, 0) + 1
-            self._hyperedge_support_max = max(self._hyperedge_support_max, hyperedge.support)
 
     def finish(self) -> GraphQuality | None:
         quality = self._quality
@@ -1417,102 +1396,6 @@ class _GraphAggregator:
         quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
         quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
         quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
-        # ADR-0057: the section exists only when the projection ran (None otherwise, so a stack
-        # without hyperedges reports byte-identically apart from nothing at all).
-        if self._hyperedge_token_costs:
-            costs = sorted(self._hyperedge_token_costs)
-            n = len(costs)
-            quality.hyperedges = HyperedgeQuality(
-                hyperedges_total=n,
-                weak_count=self._hyperedge_weak,
-                relations_total=self._hyperedge_relations,
-                avg_gamma=round(self._hyperedge_gamma / n, 6),
-                avg_arity=round(self._hyperedge_arity / n, 6),
-                arity_histogram=dict(sorted(self._hyperedge_arities.items())),
-                token_cost_min=costs[0],
-                token_cost_median=costs[n // 2],
-                token_cost_max=costs[-1],
-                token_cost_total=sum(costs),
-                support_max=self._hyperedge_support_max,
-            )
-        return quality
-
-
-class _ContextEnrichmentAggregator:
-    """The OPTIONAL Context Enrichment Stage's coherence roll-up (W13, ADR-0039).
-
-    Constructed only when the Pipeline has a ``context_enrichment`` Stage (else the section is
-    ``None`` — byte-identical to a stack without it). Counts-only (no content).
-    ``chunks_enriched`` + ``avg_neighbors_per_chunk`` are read off the enriched
-    :class:`~latence_core.contracts.ChunkRecord`s directly (a chunk with a non-empty
-    :class:`~latence_core.contracts.ContextHeader` counts; its ``neighbor_node_ids`` are the
-    query-time KG-expansion keys averaged).
-
-    ``hub_entities_capped`` is the anti-bloat witness: the number of KG entities whose gated
-    neighbor DEGREE exceeds the Stage's ``max_neighbors_per_entity`` cap — those entities contribute
-    only their TOP-k relations wherever they appear (the hub-entity guard). It is computed from the
-    assembled graph (the second subscription, shared with :class:`_GraphAggregator` at no extra
-    decode) plus the Stage's config, so it is honest and reproducible. The degree map is bounded by
-    the node count, not the edge count.
-    """
-
-    section_field: ClassVar[str] = "context_enrichment"
-    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
-        CapabilityKind.CONTEXT_ENRICHMENT,
-        CapabilityKind.GRAPH_ASSEMBLY,
-    )
-
-    def __init__(self, max_neighbors: int, min_edge_confidence: float) -> None:
-        self._max_neighbors = max_neighbors
-        self._min_edge_confidence = min_edge_confidence
-        self._headers = 0
-        self._neighbors = 0
-        self._degree: dict[str, int] = {}
-
-    @classmethod
-    def for_run(cls, context: QualityRunContext) -> _ContextEnrichmentAggregator | None:
-        stage = next(
-            (
-                s
-                for s in context.pipeline.stages
-                if s.capability is CapabilityKind.CONTEXT_ENRICHMENT
-            ),
-            None,
-        )
-        if stage is None:
-            return None
-        return cls(
-            int(stage.config.get("max_neighbors_per_entity", 4)),
-            float(stage.config.get("min_edge_confidence", 0.0)),
-        )
-
-    def observe(self, stage: Stage, record: StageOutput) -> None:
-        if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
-            # Degree = distinct gated edges touching the node (each edge is a neighbor from both
-            # endpoints). Mirrors the Provider's edge-confidence gate.
-            if self._max_neighbors <= 0:
-                return
-            if not isinstance(record, GraphRecord) or record.scope is not GraphScope.EDGE:
-                return
-            edge = record.edge
-            if edge is None or edge.confidence < self._min_edge_confidence:
-                return
-            self._degree[edge.source_node_id] = self._degree.get(edge.source_node_id, 0) + 1
-            self._degree[edge.target_node_id] = self._degree.get(edge.target_node_id, 0) + 1
-            return
-        if isinstance(record, ChunkRecord) and record.context_header is not None:
-            self._headers += 1
-            self._neighbors += len(record.context_header.neighbor_node_ids)
-
-    def finish(self) -> ContextEnrichmentQuality | None:
-        quality = ContextEnrichmentQuality()
-        quality.chunks_enriched = self._headers
-        if self._headers:
-            quality.avg_neighbors_per_chunk = round(self._neighbors / self._headers, 6)
-        if self._max_neighbors > 0:
-            quality.hub_entities_capped = sum(
-                1 for d in self._degree.values() if d > self._max_neighbors
-            )
         return quality
 
 
@@ -1674,7 +1557,6 @@ QUALITY_AGGREGATORS: tuple[QualityAggregatorFactory, ...] = (
     _TypeConsolidationAggregator.for_run,
     _DisambiguationAggregator.for_run,
     _GraphAggregator.for_run,
-    _ContextEnrichmentAggregator.for_run,
     _DriftAggregator.for_run,
     _GoldSetAggregator.for_run,
 )

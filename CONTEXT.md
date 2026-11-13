@@ -1,6 +1,8 @@
 # Latence Framework
 
-A model-agnostic, cloud-agnostic framework that turns messy, siloed enterprise data into high-quality, AI-ready data — from document parsing through NER, relation extraction, PII handling, enrichment, and disambiguation to corpus-level knowledge graphs. The framework defines the stack and orchestration contracts; the concrete models and infrastructure are the adopter's choice.
+A model-agnostic, cloud-agnostic framework that reads documents and writes a corpus that carries its Provenance and a knowledge graph that carries its Evidence: parsing, entity and relation extraction, PII redaction, disambiguation and graph assembly. The framework defines the stack and orchestration contracts; the concrete models and infrastructure are the adopter's choice.
+
+This glossary has two parts. Everything down to *Decided, not yet in code* names something the code does today. That last section holds the vocabulary of the re-scope (ADR-0067, ADR-0069 to ADR-0073), which is decided and not built.
 
 ## Language
 
@@ -31,7 +33,7 @@ Whether a page map's boundaries were MEASURED (the Parser segmented the source, 
 _Avoid_: page source, page confidence (it is not a score — it is provenance of the boundaries)
 
 **Chunk**:
-The Stage that splits parsed documents into retrieval-sized pieces while preserving offsets, page alignment, Provenance, and Classification.
+The Stage that splits parsed documents into smaller pieces (by token budget, by sentence window or by page) while preserving offsets, page alignment, Provenance, and Classification.
 _Avoid_: Enrichment (banned project-wide — it meant chunking in superpod and feature computation in dataset-intelligence)
 
 **Entity Extraction**:
@@ -40,7 +42,7 @@ _Avoid_: Extraction (unqualified)
 
 **Relation Extraction**:
 The Stage that finds typed relations between entity mentions within a document.
-_Avoid_: Ontology (reserved exclusively for formal ontology induction, a post-v1 plugin)
+_Avoid_: Ontology (reserved for the schema level of the re-scope: classes, their hierarchy, properties and constraints. Nothing in the code builds one; see *Decided, not yet in code*)
 
 **Redaction**:
 The Stage that detects PII and produces masked/replaced variants of the text.
@@ -58,7 +60,7 @@ The corpus-level Stage that links entity mentions to canonical entities and merg
 _Avoid_: Entity linking / entity resolution as stage names (they name the two internal steps, not the Stage)
 
 **Graph Assembly**:
-The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations, and re-projects the same input m-ary as Hyperedges (ADR-0057).
+The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations.
 
 **Export**:
 The Stage that materializes AI-ready outputs (Parquet, JSONL, TTL, GraphML).
@@ -79,11 +81,11 @@ _Avoid_: Delete, drop, filter (unqualified)
 
 **Evidence**:
 The record linking a knowledge-graph edge (or a Disambiguation merge decision) back to the specific source mentions and offsets that justify it, with a confidence value.
-_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference), Hyperedge (a Hyperedge *carries* raw text for retrieval; Evidence never does)
+_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference)
 
-**Hyperedge**:
-The m-ary unit of retrieval: a minimal verbatim text span, the full set of canonical entities occurring in it, the directed relations extracted from it, and its token cost — emitted by Graph Assembly as a third `GraphScope` alongside nodes and edges (ADR-0057). Where an edge is binary, a Hyperedge connects m ≥ 2 entities at once, so a joint fact ("A acquired B in 2019 pending approval by C") stays one selectable unit instead of fragmenting into disconnected pairs. It is the atomic thing the chain-of-evidence selector packs into a token budget. Its `tau_text` never holds content the exported corpus would not hold.
-_Avoid_: Evidence Unit, EU (collides with Evidence), fact, claim (both assert truth; a Hyperedge asserts only that the text says so)
+**Embedder**:
+A Capability that maps text to a fixed-width vector. It is never a Stage of its own: a Stage names one in a nested `embedder` block, and the resolution phase (Disambiguation, Type Consolidation) uses it as one signal among several (ADR-0068).
+_Avoid_: Retrieval embedder, signal generator
 
 **Quality Report**:
 A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. For a delta run it also reports what changed — documents added/retracted, entities created/merged/split, edges added/retracted, and drift since the last reconciliation. The substantiation of the "AI-ready" claim.
@@ -108,7 +110,7 @@ A full recompute of all blocks, triggered when a drift metric crosses a threshol
 _Avoid_: Full rebuild, refresh
 
 **Retraction**:
-The default deletion disposition — a soft tombstone: the document and its derived records are excluded from every Export, the knowledge graph, and the RAG corpus, but retained for audit and rollback, with affected clusters re-resolved.
+The default deletion disposition — a soft tombstone: the document and its derived records are excluded from every Export, the knowledge graph, and the exported corpus, but retained for audit and rollback, with affected clusters re-resolved.
 _Avoid_: Soft delete, archive
 
 **Purge**:
@@ -135,46 +137,47 @@ _Avoid_: Seed record, raw record (unqualified), pre-parsed document
 A source document as first read by Source — its bytes plus stamped Provenance and Classification, before any Parse decoding — carried as a ParserInput. Contrast the DocumentRecord, which is the *parsed* (markdown) form the Parser produces.
 _Avoid_: Blob, payload, input record (unqualified)
 
-## Retrieval tooling
+## Decided, not yet in code
 
-The stateless, downstream layer that gives an adopter's retrieval engine SOTA quality without being one (ADRs 0048–0053). It never holds an index; it only generates signals and transforms candidate lists.
+The re-scope (ADR-0067) fixed the vocabulary below in ADR-0069. ADR-0070 to ADR-0073 use it. **No code implements any of these terms.** No record type, Stage or file in the repository carries them. They are here so that pages and discussions use one word for one thing before the first slice is built. Each entry is taken from the decision text and is marked *decided, not yet in code*.
 
-**Retrieval tooling**:
-The whole downstream layer (signal generators + candidate processors + the MCP server) that sits on the consumer side of Export. It is *not* a retrieval engine — it never runs first-stage search or holds durable state (ADR-0048).
-_Avoid_: Retrieval engine, retriever, search engine, index
+**Ledger**:
+The append-only record of Assertions and Decisions, and the engine's one source of truth. Nothing in the semantic layer exists without at least one Assertion behind it, and the layer anyone reads is a deterministic replay of the ledger. A correction is a new Decision, never an edit of an old record.
+_Status_: decided (ADR-0069), not yet in code.
+_Avoid_: Audit log (a log records that something changed; it cannot rebuild the layer)
 
-**Signal generator**:
-An index-time pure transform that turns chunk text into a vector / term-weight map / multi-vector, materialised as files during `latence process` (dense Embedder, SparseEmbedder, MultiVectorEmbedder, FdeConverter). The index-time half of retrieval tooling.
-_Avoid_: Encoder (unqualified), vectorizer
+**Assertion**:
+One statement harvested from one source. It always carries a Locator and the Actor that produced it.
+_Status_: decided (ADR-0069), not yet in code.
 
-**Candidate processor**:
-A query-time pure transform over a caller-supplied candidate list: fuse, rerank, pack, or expand. The query-time half of retrieval tooling; holds nothing, fetches nothing.
-_Avoid_: Retriever, ranker (unqualified)
+**Locator**:
+Where an Assertion came from: a text span, a Unity Catalog object, a query, a lineage edge or a value sketch.
+_Status_: decided (ADR-0069), not yet in code. Today a record points at its source through Provenance, which requires a file and character offsets.
 
-**Fuse**:
-Merge N ranked candidate lists into one (RRF or weighted). Distinct from rerank and pack.
-_Avoid_: Fusion (as a catch-all for rerank/pack), merge
+**Decision**:
+An accept, reject, merge, split or edit made on top of Assertions, with its Actor and the evidence it used. A human Decision outranks the engine and is never overwritten by a later run.
+_Status_: decided (ADR-0069), not yet in code. Today the merge log records what the resolver decided; no record type holds a person's accept or reject.
 
-**Rerank**:
-Re-score a single candidate list with a stronger model (cross-encoder; MaxSim over multi-vectors is the experimental path, ADR-0050). Distinct from fuse and pack.
-_Avoid_: Re-order, fusion
+**Actor**:
+Who produced an Assertion or made a Decision: the engine (rules and calibrated bands), a model (with its name and version) or a human.
+_Status_: decided (ADR-0069), not yet in code.
 
-**Pack**:
-Select a token-budgeted *subset* of candidates that maximises coverage and relevance minus redundancy — the ported Knapsack QKP context-packer. The final assembly before the LLM's context window. Distinct from fuse and rerank.
-_Avoid_: Fusion, context selection (unqualified), truncation
+**Concept**:
+A schema-level element: a class, a property or relation, or a measure or dimension. A Concept is only ever a proposal until a human approves it.
+_Status_: decided (ADR-0069, ADR-0073), not yet in code. Today the type vocabulary is a flat list of canonical types with their aliases.
 
-**Expand**:
-Graph-augmented widening/rescoring of candidates: 1-hop over the KG columns denormalised onto each chunk (default), or DuckDB multi-hop over the emitted graph parquet (ADR-0051).
-_Avoid_: Graph search, traversal (unqualified)
+**Entity**:
+One canonical real-world thing, made by merging records and mentions. Entities form the instance level.
+_Status_: decided (ADR-0069), not yet in code.
+_Not to be confused with_ the two ways the Stages above already use the word. An *entity mention* is a typed span of text that Entity Extraction finds. A *canonical entity* is what Disambiguation produces from mentions and what Graph Assembly writes as a node. Both meanings stay, and the Stage names stay. The ADR-0069 Entity is the second meaning widened: it also merges warehouse records, it is rebuilt by replaying the Ledger, and it can carry a Binding. Until that is built, write "mention" for a span and "canonical entity" for a node, and keep the capitalised "Entity" for the ADR-0069 sense.
 
-**RetrievalBackend**:
-The bring-your-own-engine adapter: a capability-declaring seam (`{dense, sparse, bm25, filter, multivector}`) whose `search` runs the customer's first-stage retrieval. The tooling orchestrates around it but never replaces it (ADR-0052).
-_Avoid_: Vector store (as the seam name), connector, driver
+**Binding**:
+A tie from the semantic layer to a Unity Catalog object, keyed on the object's id and carrying a role (for example *defines*, *identifies*, *measures*). A *Concept binding* ties a Concept to a table, column or metric-view measure. An *Entity binding* ties an Entity to the rows that represent it.
+_Status_: decided (ADR-0069), not yet in code.
 
-**Retrieval MCP**:
-The optional, stateless MCP server that wraps a RetrievalBackend with the candidate processors and exposes them as MCP tools; hardened from `memory_engine`, with all agent-facing copy loaded from operator config (ADR-0052).
-_Avoid_: Retrieval server, search API
+**Accept band**:
+The calibrated band inside which the engine may accept an instance-level merge or link by itself. Outside it the engine accepts nothing alone, and a model's verdict accepts nothing by itself either.
+_Status_: decided (ADR-0069), not yet in code. Today the resolvers merge on rules and configured thresholds, and no band exists.
 
-**FDE (Fixed-Dimensional Encoding)**:
-A data-oblivious, training-free conversion of a multi-vector into one dense vector whose dot-product approximates MaxSim, so it lands in an ordinary dense index (MUVERA). Ships experimental and off by default (ADR-0050).
-_Avoid_: Pooling (unqualified), flattening
+**Review band**, **reject band**:
+Not fixed by an accepted decision. ADR-0069 names only the accept band. Splitting what lies outside it into a band a person reviews and a band that is dropped is a candidate design that has not become an ADR. Do not write either term as decided.

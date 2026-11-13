@@ -1,9 +1,9 @@
-# Derived KG/corpus artifacts that NOTHING in the tree reads. `run_eval_final.py` opens exactly
-# two files from export/ — corpus.jsonl and graph-hyperedges.kv — and those two stay tracked so
-# the harness runs from a clean clone. The six below were 110 MB of pipeline output with no
-# reader anywhere in the repository, and no in-tree config regenerates them; they are a snapshot
-# of one run, not a fixture. Same posture as benchmark/enterprise-gold/.gitignore, which ships
-# corpus/ + run_pipeline.py and keeps its derived store/ local.
+# Derived KG/corpus artifacts of one earlier pipeline run. The folder's script,
+# run_eval_final.py, was removed with the retrieval layer on 2026-11-10; it opened exactly two
+# files from export/ (corpus.jsonl and graph-hyperedges.kv), and those two stay tracked as dated
+# records (see SOURCE.md). The six below were 110 MB of pipeline output with no reader anywhere
+# in the repository, and no in-tree config regenerates them; they are a snapshot of one run,
+# not a fixture.
 export/corpus.parquet
 export/graph-nodes.parquet
 export/graph-edges.parquet

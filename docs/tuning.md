@@ -3,7 +3,7 @@
 **"Deploys optimally on any box."** A client's GPU decides which perf knobs win — and which even
 *work* (compile support is env-dependent: `gliner2-multi-v1` + torch 2.4.1 raised
 `BackendCompilerFailed` **at inference** on one pod). `latence tune` profiles the actual device,
-sweeps each heavy Provider's perf knobs on a small real sample, **keeps only settings that don't
+sweeps each heavy Provider's perf knobs on timed runs of the stack, **keeps only settings that don't
 crash AND don't change output**, picks the fastest, and writes a per-device tuned config the runner
 can overlay. Throughput-first; **correctness is a hard gate**. Architecture: ADR-0036 (the tune seam),
 building on the W8 perf seam (`latence_core.providers.perf`).
@@ -12,11 +12,16 @@ building on the W8 perf seam (`latence_core.providers.perf`).
 
 ```bash
 latence tune stacks/gpu-sota.yaml \
-  --sample 8 \        # records to time each candidate on (the small real sample; default 8)
-  --repeats 3 \       # timed runs per candidate after a warmup; the MEDIAN is the throughput
+  --sample 8 \        # the numerator of each reported figure (default 8); it does not size the run
+  --repeats 3 \       # timed runs per candidate after a warmup; their MEDIAN is the divisor
   --seed 0 \          # sweep seed (determinism)
   --out tuned/<device>.yaml   # default: tuned/<device-slug>.yaml at the stack's repo root
 ```
+
+**What a figure in the report is.** A timed run is one run of the whole stack over the corpus
+bundled for stack validation, with only one Provider's knobs changed. The probe does not cut that
+corpus down to `--sample` records. Each figure is `--sample` divided by the median wall time of the
+timed runs, so it compares settings on one device and is not a count of records per second.
 
 It:
 
@@ -25,10 +30,10 @@ It:
    `torch`/CUDA version **only if torch is already importable** (an absent torch is an honest `None`,
    never faked). The fingerprint is the reuse key: a tuned config is only applied on a device whose
    fingerprint **matches** (see below).
-2. **Sweeps each heavy Provider's knobs** over the sample — `dtype` (fp32/bf16), `quantize` (gliner2),
+2. **Sweeps each heavy Provider's knobs** — `dtype` (fp32/bf16), `quantize` (gliner2),
    `compile` (on/off), `batch_size` / `ocr_batch_size`, `max_concurrency` (endpoint). The grid is
    cartesian-but-pruned and **deterministic**, baseline (fp32/plain, compile off, batch 1) first.
-3. **Applies the HARD correctness gate** (the whole point). Each candidate runs the sample and is
+3. **Applies the HARD correctness gate** (the whole point). Each candidate runs the stack and is
    **REJECTED** if it:
    - raises **any** error — including an **inference-time** compile/quantize failure
      (`BackendCompilerFailed`, a TorchDynamo/Inductor error) or an OOM. The compile-fault detection is
@@ -38,13 +43,15 @@ It:
      fault only surfaces on the **first forward pass**, not at load (the W9 lesson);
    - **changes output** beyond tolerance vs the fp32/plain baseline (the target-stage checkpoint bytes
      — labels/spans/offsets/text — hashed and compared; a different digest = rejected `output_changed`).
-4. **Picks the fastest ELIGIBLE** setting per Provider (median throughput; ties break toward fewer
+4. **Picks the fastest ELIGIBLE** setting per Provider (highest figure; ties break toward fewer
    pinned knobs, then label — a total, deterministic order) and writes `tuned/<device>.yaml`:
-   `{device_fingerprint, per-provider: {winner knobs, baseline/winner throughput, speedup, rejected
-   knobs + reasons}}`.
-5. **Prints an honest report** — per Provider: baseline→tuned throughput, speedup, winning knobs, AND
+   `{device_fingerprint, per-provider: {winner knobs, baseline/winner figure, speedup, rejected
+   knobs + reasons}}`. The two figures are stored under the keys `baseline_throughput` and
+   `winner_throughput`.
+5. **Prints a report** — per Provider: baseline and winner figure, speedup, winning knobs, AND
    the **rejected** knobs with reasons (e.g. `compile: rejected (compile_failure)`). Winners AND
-   rejections; **no number is fabricated** — each is the median of the seeded timed runs on THIS box.
+   rejections; **no number is fabricated** — each is computed from the median of the timed runs on
+   THIS box.
 
 > **Slow-but-correct always beats fast-but-crashing/wrong.** The baseline is eligible by construction
 > (it defines the correctness reference), so a Provider on which every acceleration is rejected still

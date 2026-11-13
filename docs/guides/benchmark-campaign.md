@@ -1,11 +1,10 @@
 # The benchmark campaign wizard
 
-`latence-campaign` drives the framework's end-to-end SOTA benchmark campaign — acquire real
-public corpora, OCR them, push them through the full enterprise pipeline, then measure
-retrieval — as **gated, resumable stages** with filesystem done-probes and an atomic
-`STATE.json`. It is how the numbers on the [front page](../index.md) were produced, and it is
-deliberately drivable from a clone with the framework installed and nothing else (stdlib
-`argparse`, no extra deps).
+`latence-campaign` drives the framework's end-to-end benchmark campaign — acquire real
+public corpora, OCR the scanned ones, then push each corpus through the full pipeline — as
+**gated, resumable stages** with filesystem done-probes and an atomic `STATE.json`. It is
+deliberately drivable from a clone with the framework installed and nothing else: the CLI is
+stdlib `argparse`.
 
 ```text
 latence-campaign init      # the wizard: answers -> a validated campaign.yaml
@@ -15,22 +14,33 @@ latence-campaign approve <stage>  # operator sign-off on a done stage (opens the
 latence-campaign resume    # continue an interrupted campaign (filesystem probes, not exit codes)
 ```
 
+The campaign ends at the pipeline stage. Its earlier fourth stage, a retrieval feature matrix,
+was removed with the query-time retrieval tooling
+([ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)),
+together with the `retrieval:` and `s5:` blocks of `campaign.yaml`.
+
 ## The wizard contract
 
 `init` follows the `latence setup` contract: **flag > prompt > default**, a "why it matters"
 line per question, one frozen answers struct from either path, generate → dry-validate →
 write, and exactly one next command printed. Identical answers produce a **byte-identical**
 `campaign.yaml` — the config is an artifact, not a session. `--non-interactive` takes every
-default/flag for CI use. Exit codes: `2` usage/contradiction, `1` invalid artifact or a
-blocked/failed stage, `0` success.
+default/flag for CI use. Exit codes: `2` usage, contradiction or a refused gate, `1` invalid
+artifact or a blocked/failed stage, `0` success.
 
-The prompts cover: the campaign root, the dataset selection (from the known-dataset registry),
-the pod SSH target for GPU stages, the S3 induction mode, and the two headline retrieval
-choices (policy-gate mode, selector) — the full `retrieval:` block with measured defaults is
-documented in [Graph-rescue retrieval](graph-rescue-retrieval.md#configuring-it-from-the-campaign-wizard).
-The `s5:` matrix block is flag-only (`--s5-datasets`, `--s5-legs`, `--s5-limit`, `--s5-fusion`):
-its default *is* the full matrix over the corpus selection, so every deviation is a deliberate
-narrowing rather than an answer worth interrogating up front.
+The prompts cover five things: the campaign root, the dataset selection (from the
+known-dataset registry), the pod SSH target for the GPU stages, the S3 label-induction mode
+(`per_chunk`, `doc` or `none`) and the S3 induction budget cap in USD. Every other knob of the
+`s3:` block is flag-only (`--s3-chunk-max-tokens`, `--s3-extraction-model`,
+`--s3-induction-model`, `--s3-no-guardrails` and the rest that `latence-campaign init --help`
+lists): the defaults are the settings the recorded campaign ran, so a deviation is a
+deliberate choice rather than an answer worth interrogating up front.
+
+`campaign.yaml` holds three blocks: `campaign` (root, pod SSH target), `corpus` (the dataset
+list) and `s3` (chunking, extraction, induction, labels, redaction). An unknown key inside
+the `s3` block is rejected, because a mistyped knob that silently fell back to its default
+would run the campaign on the wrong setting. An unknown top-level block is accepted and
+ignored, so a file that still carries a `retrieval:` or `s5:` block loads.
 
 ## The stage chain
 
@@ -39,54 +49,76 @@ and `approve` is an explicit operator sign-off, never automatic:
 
 | Stage | What it does | Gate artifact |
 | --- | --- | --- |
-| `s1-corpus` | Acquires the selected public datasets under their **machine-enforced license lanes** (a research-only corpus requires `--accept-non-commercial`; an unverifiable one is refused unconditionally) | acquisition manifest + per-dataset counts |
-| `s2-ocr` | OCRs the scanned corpora into markdown (served LightOn-OCR-2), page maps carried in sidecars | OCR metrics + spot-check dir |
-| `s3-pipeline` | Runs the full enterprise pipeline per dataset on the pod (extraction, redaction, KG, hyperedges, embeddings, exports) | per-dataset `metrics.json` — the campaign scale numbers |
-| `s5-retrieval` | Runs the retrieval feature matrix — every (dataset × leg) cell from `dense` through `+bm25 / +KG / +hyperedges / +CoE / +packer`, the content-only ablation and the three graph-rescue legs | one JSON cell per (dataset, leg) under `stages/s5-retrieval/results/`, plus `REPORT.md` + `metrics.json` |
+| `s1-corpus` | Acquires the selected public datasets under their **machine-enforced license lanes** (a research-only corpus requires `--accept-non-commercial`; an unverifiable one is refused unconditionally) | `stages/s1-corpus/metrics.json` + the corpus manifest, with per-dataset counts |
+| `s2-ocr` | OCRs the PDF corpora (`ohr_bench`, `vidoseek`, `uda`) into markdown with served LightOn-OCR-2, page boundaries carried in a `.pagemap.json` sidecar beside each document; the text-native datasets are recorded as skipped | `stages/s2-ocr/metrics.json` + a spot-check directory of sampled pages |
+| `s3-pipeline` | Generates one pipeline YAML per dataset from the `s3:` block and runs it on the pod: intake screening, parsing, chunking, content screening, optional label induction (per chunk by default), fused entity and relation extraction, redaction, profiling, type consolidation, disambiguation, graph assembly, the knowledge-graph export and the corpus export with embeddings | `stages/s3-pipeline/metrics.json`, folded from each dataset's Quality Report |
 
-The matrix is configured by the `s5:` block (`datasets`, `legs`, `limit`, `fusion`) and, when
-`s5.datasets` is left empty, follows the campaign's own `corpus.datasets` — so trimming the
-corpus trims the matrix with it. The stage derives its plan from that block and calls the
-harness's API (`benchmark.s5.run_matrix.run`) directly; the same harness is still drivable
-standalone as `python -m benchmark.s5.run_matrix`, and a cell produced either way is the same
-file. Resumability is per cell: a matrix that takes hours can be interrupted and re-entered, and
-`run` never re-runs a cell it already has.
+The registry holds five datasets: `wiki2multihop`, `multihop_rag`, `ohr_bench`, `vidoseek`
+and `uda`. Each has an acquisition plan in `s1-corpus` and a pipeline in `s3-pipeline`.
+`musique` and `hotpotqa` were in the registry until 2026-11-10; the campaign had no pipeline
+for them, and a `campaign.yaml` that still lists either is now rejected as an unknown dataset.
 
-Two refusals are load-bearing. A leg whose export artifacts are absent is recorded as
-`missing-inputs` with the file list, never as a zero — the reused MuSiQue/HotpotQA exports
-genuinely carry no embedding column, and the matrix says so. But a *dataset* whose every leg
-refused blocks the stage: that is an absent or unfinished export being advanced as a
-measurement. Gold resolution is audited per dataset before any recall number is trusted, and
-single-hop control datasets are reported as controls, not headlines.
+Two details of `s3-pipeline` are worth knowing before you run it:
 
-### The run has to be pinned, twice over
+* **Induction follows the OCR boundary.** The three OCR'd datasets run LLM label induction
+  under the budget cap; `multihop_rag` and `wiki2multihop` use the hand-authored label sets
+  and make no LLM call. Mode `none` turns induction off everywhere.
+* **The budget cap is converted into a call budget.** The inducer enforces a number of calls,
+  not a number of dollars, so the stage turns the USD cap into one `max_induction_calls` per
+  dataset when it generates the YAML. The allocation is proportional to the measured chunk
+  counts and scaled down when the estimate would exceed the cap. The cap is not a hard stop. A
+  chunk past its dataset's call budget gets no call and keeps the configured labels, the run
+  continues, and the Quality Report sets `induction_budget_exhausted`. The conversion uses an
+  estimated price per call; the actual spend is written to `stages/s3-pipeline/metrics.json`
+  (`usd_actual_total`) after the run and is not checked against the cap.
 
-The harness refuses to start unless **`PYTHONHASHSEED=0`** *and* **`OMP_NUM_THREADS`,
-`OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` are all `1`**:
-
-```bash
-PYTHONHASHSEED=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  python -m benchmark.s5.run_matrix --datasets all --legs all
-```
-
-The hash seed is the obvious one — the hypergraph entry is hash-order sensitive. The thread pin
-is the one that costs people a day. The dense leg is a brute-force cosine (a BLAS `gemv`) and
-the query embedder is a torch forward pass; both reassociate their floating-point sums
-differently at different thread counts, and that is enough to change *which documents land in
-the pool*. Measured on this corpus: running musique/bm25 at 4 threads instead of 1, with
-identical code, gives 33 of 1,209 queries a different dense pool and one query a different
-gold-hit count — moving `recall@10` from 0.3404 to 0.3406. An unpinned harness reports thread
-scheduling as a quality change. Because the campaign stage calls the harness in-process, the
-pins have to be in the environment you launch `latence-campaign` from.
-
-Every dataset's corpus/toolkit licenses and lanes are recorded in one place —
-[`THIRD-PARTY-LICENSES.md`](https://github.com/ddickmann/latence/blob/main/THIRD-PARTY-LICENSES.md)
-— and corpus-derived artifacts (raw acquisitions, OCR output, exports, reports) stay local by
-`.gitignore` discipline; only aggregate metrics and stage reports are committed.
+Each dataset's corpus and toolkit licence, and its lane, are declared in the stage's source
+(`packages/latence-benchmark/src/latence_benchmark/campaign/corpus_stage.py`) and written to
+`stages/s1-corpus/metrics.json` when the stage runs. Corpus-derived artifacts (raw
+acquisitions, OCR output, exports, reports) stay local by `.gitignore` discipline; only
+aggregate metrics, the corpus manifest, the chunk-validation report and the generated
+pipeline files are committed.
 
 ## Interruption is a state, not a failure
 
-Stages checkpoint through the same WAL/checkpoint discipline as the pipeline Runner; `resume`
-re-probes the filesystem (never trusts a recorded exit code) and relaunches only what is not
-provably done. A blocked stage records its reason in `STATE.json` and `status` renders it —
-fix the cause, `resume` under the same run id, finalized checkpoints replay from disk.
+`resume` finds the first stage that is not approved and acts on it; it never trusts a recorded
+exit code. A pending or interrupted stage is run under the same gate rules as `run`, and its
+done-probe is consulted **before** any work starts, so a stage whose artifact already exists
+is marked done without re-running. For a done stage, `resume` prints the `approve` command
+that opens the next gate.
+
+A blocked stage records its reason in `STATE.json`, and `status` renders it. Blocked is
+terminal: fix the cause, then re-run that stage with `latence-campaign run <stage> --fresh`.
+`--fresh` resets the recorded status, an approval included, and runs the stage again. The
+done-probe is not consulted on entry, so a stage whose artifacts are intact is run again too; the
+probe is consulted after the run, as always. `--fresh` deletes nothing, and the work inside a
+stage stays resumable (next paragraph): a file already fetched, a document already OCR'd and a
+finalized pipeline checkpoint are skipped or replayed. Remove those to have them recomputed.
+
+Inside a stage, the work itself is resumable. The OCR worker skips every document it has
+already written. Each pipeline run uses a fixed run id (`s3-<dataset>-v1`), and re-invoking
+the Runner with the same run id replays its finalized checkpoints from disk, so a dead pod job
+is relaunched under the same id and a live one is re-entered rather than started twice.
+
+## What the committed campaign artifacts record
+
+The files under `benchmark/sota-campaign/stages/` are the record of the campaign as it ran in
+August 2026 (`s3-pipeline/metrics.json` is dated 2026-08-06, with one dataset re-run on
+2026-08-09). They were produced by the pipeline of that date, which included parts that
+ADR-0068 has since removed: Context Enrichment, hyperedges, graph features and the BM25
+export. Three consequences:
+
+* `s3-pipeline/metrics.json` contains `hyperedges` and `chunks_enriched` counts. They describe
+  that run, not the current pipeline, which produces neither.
+* `s1-corpus/metrics.json` and `s3-pipeline/metrics.json` list seven datasets, including
+  `musique` and `hotpotqa`, and `s2-ocr/metrics.json` names the two under `skipped_native`.
+  Both have since left the registry. The done-probes of `s1-corpus` and `s3-pipeline` compare
+  the recorded dataset names with the current selection, so the committed records do not
+  satisfy them for any selection the wizard now accepts.
+* The five files under `s3-pipeline/pipelines/` are the configurations that run used. Each
+  declares an `enrich` Stage whose Capability no longer exists, so the file does not load and
+  `latence stack check` fails on it. They also carry five removed config keys
+  (`graph_features`, `hyperedges`, `hyperedge_kv`, `bm25`, `context_columns`). With the `enrich`
+  Stage taken out, `stack check` reports each of the five as an error, and a run refuses the
+  file with a `ConfigError` that names the key and its Stage. When `s3-pipeline` runs again it
+  writes the five files in the current shape.

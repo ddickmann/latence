@@ -1,5 +1,10 @@
 # Context Enrichment is an OPTIONAL Stage that projects the KG back onto chunks into the EMBEDDING input only
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 **Status: accepted** — W13-context-enrichment. Adds the `ContextEnricher` Capability + a
 `context_enrichment` Stage (a reference Provider `context.kg_header`, pure-Python, deterministic,
 CPU, zero-dep), the additive `ContextHeader` contract + `ChunkRecord.context_header` field, and the

@@ -337,8 +337,8 @@ join to drift from.
 
 ### What the OCR path does when it *is* in play
 
-Take `parser.lighton_vllm`, the production path (vLLM at concurrency measured ~2.7× faster than
-optimised in-process `transformers` on the same GPU). Per document:
+Take `parser.lighton_vllm`, the production path. (It has not been measured against in-process
+`transformers` on one machine; `PERF-RESULTS.md` lists that comparison as pending.) Per document:
 
 1. **Rasterise** through the shared `PageRasteriser` — deliberately *shared* with
    `parser.lighton` so the two back-ends cannot silently diverge at the pixel boundary. The
@@ -682,8 +682,8 @@ attention and linearly in the padded batch, so `microbatch_max_texts_for` buys t
 positions back out of the batch (`POD_SAFE_PADDED_POSITIONS = 4 × 768`, the point that peaked at
 21.6 GiB and passed on a 32 GB pod).
 
-**One precision worth stating, because a published doc gets it slightly wrong.** `docs/DEEP-DIVE.md`
-says the downstream encoder's window "is *derived* from this budget rather than fixed". That is
+**One precision worth stating.** It is tempting to say the downstream encoder's window "is
+*derived* from this budget rather than fixed". That is
 true of a stack the setup wizard emits — `model_window_for` runs at recipe-emission time and
 writes an explicit `max_len` into the generated YAML. It is **not** true of a hand-written
 pipeline file. `resolve_max_len` is a plain config read with a fixed default:

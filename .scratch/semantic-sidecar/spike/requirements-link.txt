@@ -1,0 +1,13 @@
+# The environment the estate build runs the record linker in (`estate build --resolver ../spike`).
+# The versions the kept result was built with. A clean install of exactly these gave the same
+# resolution file byte for byte on the Linux machine that built it (2026-11-11); another
+# processor may differ in the last digits. The model arms of the spike need more: NEXT.md.
+splink==5.0.0
+duckdb==2.0.0
+pandas==3.1.1
+pyarrow==26.0.1
+numpy==2.5.4
+scikit-learn==1.9.1
+scipy==1.18.1
+jellyfish==1.3.0
+pytest==9.2.0

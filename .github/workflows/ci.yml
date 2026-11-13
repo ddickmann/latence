@@ -63,16 +63,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # `benchmark/s5` is measurement-harness code, not a package — but it is the S5 campaign
-      # stage's runtime (latence_benchmark.campaign.retrieval_stage imports it from the
-      # checkout), it is declared in-scope + clean by ticket wayfinder-enterprise-serving/04,
-      # and until now nothing in CI enforced that. Linted and (below) strictly typed here.
-      #
       # The lint scope matches the in-scope set the ruff config's `exclude` comment claims —
-      # packages, the benchmark harnesses, the campaign stage scripts and scripts/ — so the
+      # packages, the campaign stage scripts and scripts/ — so the
       # claim is enforced rather than asserted. Frozen evidence scripts stay excluded there.
       - name: Ruff (lint)
-        run: uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+        run: uv run ruff check packages benchmark/sota-campaign scripts
 
       # Strict type check over BOTH src AND tests for every workspace package (issue #24).
       # The per-package loop (not a single `mypy --strict packages`) is deliberate: the
@@ -82,13 +77,6 @@ jobs:
       # process; one non-zero exit fails the whole step.
       - name: Mypy (strict, src + tests)
         run: MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
-
-      # The S5 harness, checked as its own package (`-p benchmark.s5`, src + tests). The
-      # per-package loop above cannot reach it — `benchmark/` holds no `packages/*/src` — and
-      # the incidental reachability through latence-benchmark's wizard-mirror test covers only
-      # the modules that test imports. This step is the harness's own gate.
-      - name: Mypy (strict, benchmark/s5 harness)
-        run: uv run mypy --strict --namespace-packages -p benchmark.s5
 
   # ---- Full test suite + provider conformance + coverage.
   #
@@ -116,6 +104,10 @@ jobs:
     name: test · conformance · coverage (${{ matrix.os }} · py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     needs: lint-type
+    # A healthy leg takes 30 to 48 minutes. Without a limit a stalled leg holds the run for the
+    # default six hours; pytest's faulthandler_timeout (pyproject.toml) names the stuck test in
+    # the log well before this cuts the job off.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -214,7 +206,6 @@ jobs:
           uv run latence stack validate stacks/universal-parse.yaml
           uv run latence stack validate stacks/linkpred-base.yaml
           uv run latence stack validate stacks/schema-induction.yaml
-          uv run latence stack validate stacks/context-enrichment.yaml
 
   # ---- Packaging gate: every publishable package builds a wheel + sdist. Runs only
   # after tests pass; uploads the dist/ tree so a release dry-run is one click away.

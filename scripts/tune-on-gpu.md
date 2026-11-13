@@ -53,7 +53,8 @@ PY
 ## 3. Run the sweep on the real stack
 
 ```bash
-# The GPU/high-accuracy stack. --sample 8 is the small real sample; --repeats 3 = timed median.
+# The GPU/high-accuracy stack. --sample 8 is the numerator of each reported figure (it does not
+# size the run); --repeats 3 is the number of timed runs whose median is the divisor.
 latence tune stacks/gpu-sota.yaml --sample 8 --repeats 3 --seed 0 --out tuned/$(python -c \
   "from latence_core.tune.fingerprint import probe_device_fingerprint as p; print(p().slug())").yaml
 ```
@@ -61,14 +62,14 @@ latence tune stacks/gpu-sota.yaml --sample 8 --repeats 3 --seed 0 --out tuned/$(
 **Read the printed report against these expectations (fold the real numbers into the report — do NOT
 fabricate):**
 
-- Each heavy Provider has a **winner** row with a **baseline r/s → winner r/s → speedup** measured on
+- Each heavy Provider has a **winner** row with a **baseline figure → winner figure → speedup** measured on
   THIS device. bf16 should generally win over fp32 (the W8 measured ~1.36× for gliner encoders, ~1.49×
   for OCR); batch/ocr_batch should add throughput where the encoder is under-fed.
 - The **Rejected knobs** section is the crux. If this box's torch/driver cannot compile a given
   Provider, its `compile: true` candidate(s) MUST appear as `rejected (compile_failure)` with a
   `BackendCompilerFailed`/dynamo detail — and the winner MUST NOT be a compile candidate. If a
   `quantize`/`dtype` candidate changes output it MUST appear as `rejected (output_changed)`.
-- **No fabricated numbers.** Every r/s is the median of the seeded timed runs; a Provider that is not
+- **No fabricated numbers.** Every figure is `--sample` divided by the median of the timed runs; a Provider that is not
   installed / not runnable is recorded honestly (baseline-crash / un-tunable), not given a fake number.
 
 ## 4. Confirm the overlay applies on THIS box and is guarded off a mismatch

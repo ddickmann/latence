@@ -2,8 +2,8 @@
 
 **You are a coding agent. This page is written for you.** It is the structured entry point to the
 Latence Framework: what it does, how it is organised, which models are available at each Stage, and
-the exact commands that take a user from a folder of documents to a retrievable corpus and knowledge
-graph.
+the exact commands that take a user from a folder of documents to a processed corpus and a
+resolved knowledge graph.
 
 Read this top to bottom once. It is ordered so that each section only depends on the ones above it.
 
@@ -12,7 +12,7 @@ Two ground rules, both load-bearing:
 1. **The code is the authority.** Every fact below was read out of a file at the path named, and the
    paths are cited so you can re-verify rather than trust. Where this page and the code disagree,
    the code is right and this page is a bug — fix it in the same change.
-2. **Nothing degrades silently.** A missing Provider, an unserveable retrieval leg, a Stage that
+2. **Nothing degrades silently.** A missing Provider, a mis-wired nested block, a Stage that
    cannot reach its device — each is a loud typed error naming what to do, never a quiet fallback.
    If you are handling an exception to "make it work", you are almost certainly defeating a
    guarantee. Read the error; it names the fix.
@@ -25,12 +25,19 @@ Two ground rules, both load-bearing:
 
 ## 1 · What the framework does
 
-Point it at messy documents. Get back two portable deliverables, as plain files:
+Point it at documents. Get back two portable deliverables, as plain files:
 
-- a **RAG corpus** — one row per chunk, PII-masked, embedded, carrying provenance to the exact
-  character offset and source page;
+- a **corpus** — one row per chunk, PII-masked, carrying provenance to the exact character
+  offset and source page, with an embedding column when an Embedder is wired;
 - a **knowledge graph** — resolved canonical entities and the relations between them, every edge
   carrying the sentence it came from.
+
+This page describes what runs today. The project has been re-scoped
+([ADR-0067](adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md));
+none of that work is built, and the repository's
+[`ROADMAP.md`](https://github.com/ddickmann/latence/blob/main/ROADMAP.md) lists it. Do not
+describe a re-scope term (Assertion, Decision, Concept, Binding, ledger) as something the code
+has.
 
 ```
 corpus folder ──► latence setup ──► latence.stack.yaml ──► latence process
@@ -38,13 +45,10 @@ corpus folder ──► latence setup ──► latence.stack.yaml ──► lat
                    emits a validated    Stages, Pydantic-             │
                    config)              validated)                    ▼
                                           <storage_uri>/_latence/runs/<run_id>/
-                                            export/corpus.{jsonl,parquet}       ← the RAG corpus
+                                            export/corpus.{jsonl,parquet}       ← the corpus
                                             export/graph-{nodes,edges}.parquet  ← the KG
                                             export/graph.{ttl,graphml}
                                             quality-report.{json,md}
-                                                                      │
-                                                                      ▼
-                                      latence-sink-qdrant load  ·  latence-retrieval (query time)
 ```
 
 ---
@@ -160,29 +164,16 @@ end of this section.
 | `disambiguation` | ★ `disambiguation.cascade` (5-strategy resolver, audited merge log) · `…exact_surface` · `…embedding` · `…glinker` (GPU, `gliner-linker-large-v1.0`) |
 | `graph` | ★ `graph.canonical` (content-addressed, per-edge Evidence) · `graph.weighted` |
 | `graph_completion` | ★ `graph_completion.reference` (bounded 2-hop closure) · `graph_completion.ultra` (`ultra_3g`, MIT) |
-| `context` | ★ `context.kg_header` — projects the KG back onto each chunk, embedding input only |
-| `embedding` | ★ `embedding.hashing` · `embedding.sentence_transformers` (`granite-embedding-311m-multilingual-r2`; 97m on CPU) · `embedding.endpoint` |
+| `embedding` | ★ `embedding.hashing` · `embedding.sentence_transformers` (`granite-embedding-311m-multilingual-r2`; 97m on CPU) · `embedding.endpoint` — a nested resolution signal, not a Stage ([Embedders](embedders.md)) |
 | `export` | ★ `export.jsonl_parquet` · `export.knowledge_graph` · `export.demo_site` |
 
 ### Signal seams
 
-These are **not** Stages. They are sub-Provider slots nested inside an Export's or Graph Assembly's
-`config`, and they are additive — each one adds columns without changing the default schema.
+This is **not** a Stage. It is a Capability the engine resolves itself.
 
-| Seam | Providers | Nested in |
+| Seam | Providers | Used by |
 |---|---|---|
-| `sparse` | ★ `sparse.hashing` · `sparse.splade` | Export `config.sparse_embedder` |
-| `multivector` | ★ `multivector.hashing` | Export `config.multivector_embedder` |
-| `fde` | ★ `fde.reference` · `fde.muvera` | Export `config.fde_converter` |
-| `tokenizer` | ★ `tokenizer.regex` · `tokenizer.whitespace` | Export `config.bm25` |
-| `graph_features` | ★ `graph_features.pagerank` · `graph_features.degree` | Graph Assembly `config.graph_features` |
 | `delta` | ★ `delta.affected_set` | the delta Runner |
-
-> **`sparse.splade` is the one Provider that is not licence-cleared.** It declares
-> `license_verified=False`, `license="UNVERIFIED"`, and pins no default checkpoint. `latence
-> retrieval splade-index` refuses to run without an explicit `--accept-noncommercial-license` and an
-> operator-chosen model. **Never wire it silently on a user's behalf** — surface the licence
-> question to them.
 
 The generated, always-current version of this catalogue is
 [`docs/reference/stage-contracts.md`](reference/stage-contracts.md), regenerated by
@@ -195,8 +186,11 @@ JSON rather than trusting this table.
 
 The schema authority is the Pydantic model in
 `packages/latence-core/src/latence_core/pipeline.py`. Both `Pipeline` and `Stage` are
-`extra="forbid"` — **any unknown key is a hard error**, which means a typo fails loudly at
-`stack check` rather than being ignored.
+`extra="forbid"` — **any unknown key at those two levels is a hard error**, which means a typo
+fails loudly at `stack check` rather than being ignored. A Stage's `config` is different: it is a
+free mapping that the Provider reads, and a key the Provider does not read is not an error. The
+one exception is the nine keys ADR-0068 removed (`REMOVED_CONFIG_KEYS` in the same file):
+`stack check` reports them and a run refuses a Pipeline that carries one.
 
 | Top-level key | Required | Default | Notes |
 |---|---|---|---|
@@ -243,10 +237,8 @@ stages:
     depends_on: [redact]          # depending on redact is what makes the corpus PII-safe
     config:
       basename: corpus
-      # every block below is an OPTIONAL, ADDITIVE {provider, config} sub-Provider seam
+      # an OPTIONAL, ADDITIVE {provider, config} sub-Provider seam
       embedder: {provider: embedding.hashing, config: {dimension: 32}}
-      bm25:     {provider: tokenizer.regex}
-      context_columns: true
 ```
 
 **Wiring rules are enforced, not documented.** Some Capabilities hard-require particular parents:
@@ -272,9 +264,8 @@ stages:
 | `latence tune <yaml>` | On a real GPU, sweep dtype/batch/compile knobs, correctness-gated. |
 
 Other console scripts: `latence-demo` (the one-command showable artifact), `latence-console` (a
-read-only localhost browser over runs and Quality Reports), `latence-sink-qdrant` (idempotent load
-into Qdrant, plus `verify-absent` as erasure evidence), `latence-label-profile` (mine a type space
-with no model and no network).
+read-only localhost browser over runs and Quality Reports), `latence-label-profile` (mine a type
+space with no model and no network).
 
 ---
 
@@ -289,72 +280,22 @@ with no model and no network).
 └── export/
     ├── corpus.jsonl, corpus.parquet
     ├── graph-nodes.parquet, graph-edges.parquet
-    ├── graph.ttl, graph.graphml
-    ├── bm25-stats.json, bm25-postings.parquet    # only with a bm25 block
-    └── multivectors.parquet                      # only with keep_multivectors
+    └── graph.ttl, graph.graphml
 ```
 
 The corpus Parquet always carries `record_id`, `schema_version`, `provenance`, `classification`,
-`content`, `media_type`. Columns appear **only when the producing Stage is wired**, so the default
-schema stays byte-stable: `embedding`, `sparse_indices`/`sparse_values`, `fde_embedding`,
-`context_header`, `kg_node_ids`, `neighbor_node_ids`, `kg_node_community`, `kg_node_centrality`.
+`content`, `media_type`. One optional column, `embedding`, appears **only when an Embedder is
+wired** on the Export, so the default schema stays byte-stable.
 
 **The PII guarantee.** Where Redaction produced `masked_content`, that is what fills the `content`
-cell, the embedder input, the sparse and multivector inputs, and the BM25 postings. Beneath any
+cell and the embedder input. Beneath any
 learned redactor sits a deterministic floor for `ssn` / `credit_card` / `iban` that no Provider
 choice can bypass. The single opt-out is `unsafe_unmasked_corpus: true`, and it is named that way
 deliberately.
 
 ---
 
-## 8 · Retrieval
-
-Retrieval is a **separate, strictly stateless library** (`latence-retrieval`). It holds no index and
-runs no first-stage search. The user keeps whatever engine they already run; the library fuses,
-expands over the emitted graph, reranks and packs the candidates *that engine* returned.
-
-It uses its own entry-point group, `latence.retrieval`, deliberately disjoint from
-`latence.providers` — which is why `sparse.splade` (index time) and `query_sparse.splade` (query
-time) can coexist without colliding.
-
-```yaml
-fuser:       {provider: fuser.rrf}        # rank-only, scale-free; the default
-processors:                                # ordered; defaults to EMPTY on purpose
-  - {provider: processor.expand}
-  - {provider: processor.bm25}
-  - {provider: processor.rerank}
-  - {provider: processor.pack, config: {token_budget: 4000}}
-fetch_top_k: 50
-fuse_weights: {dense: 2.0, bm25: 1.0}
-final_top_k: null
-```
-
-`processors` is empty by default because `rerank` needs a licence-cleared model and `pack` needs a
-token budget — neither has a safe hidden default.
-
-**The one architectural fact that decides whether the graph helps:** `graph` is a *first-stage
-retrieval mode*, not a rescoring pass. `processor.expand` and `processor.multihop_expand` run after
-fusion and can only reorder a pool the graph did not choose. Only a real graph leg — seeded from
-`seed_node_ids`, entering fusion as a peer — can surface a document that dense and sparse never
-retrieved.
-
-What each signal needs on disk:
-
-| Signal | Requires | Produced by |
-|---|---|---|
-| dense | `embedding` column | Export `config.embedder` |
-| sparse | `sparse_indices` + `sparse_values` | Export `config.sparse_embedder` |
-| bm25 | `bm25-stats.json` + `bm25-postings.parquet` | Export `config.bm25` |
-| multivector | `multivectors.parquet` | `multivector_embedder` + `keep_multivectors: true` |
-| graph 1-hop | `kg_node_ids` and friends | Export `context_columns: true` (needs a `context` Stage upstream) |
-| graph multi-hop | `graph-edges.parquet` | `export.knowledge_graph` |
-
-The DuckDB multi-hop leg needs nothing but that Parquet file — no server, no graph database, and it
-never mutates the file. `duckdb` is imported lazily on first use.
-
----
-
-## 9 · Adding a Provider — do this instead of editing core
+## 8 · Adding a Provider — do this instead of editing core
 
 If the user needs a model the framework does not ship, **you write a package, not a patch**. No core
 edit is required or accepted.
@@ -374,10 +315,10 @@ deliberate-sabotage exercise is [Bringing your own Provider](tutorials/04-bringi
 
 ---
 
-## 10 · Verifying your work
+## 9 · Verifying your work
 
 ```bash
-uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+uv run ruff check packages benchmark/sota-campaign scripts
 MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
 PYTHONHASHSEED=0 uv run pytest packages
 uv sync --extra docs && uv run mkdocs build --strict     # if you touched docs/
@@ -388,7 +329,7 @@ Cheapest first, so a lint break costs seconds rather than ten minutes. The full 
 
 ---
 
-## 11 · Six things that will burn you
+## 10 · Six things that will burn you
 
 1. **`PYTHONHASHSEED=0` is mandatory and cannot be set from a fixture.** It is read once at
    interpreter startup, so it must be in the environment *before* the process launches. The root
@@ -409,7 +350,7 @@ Cheapest first, so a lint break costs seconds rather than ten minutes. The full 
 
 ---
 
-## 12 · Where to read more
+## 11 · Where to read more
 
 | You want | Read |
 |---|---|

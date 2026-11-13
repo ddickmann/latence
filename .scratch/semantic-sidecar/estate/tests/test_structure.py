@@ -1,0 +1,123 @@
+"""Structure the data proves: roll-ups between value sets, equivalent value sets, part-of from
+keys, derived objects that describe an entity, and which value sits under which."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import duckdb
+import pytest
+
+from estate.reader_duckdb import DuckDBReader
+from estate.codes import render, say
+from estate.structure import broader_edges, build_structure, explain_review
+
+
+@pytest.fixture()
+def shop(tmp_path: Path) -> DuckDBReader:
+    """60 towns in 6 regions in 2 countries; a region code that says the same as the region;
+    11 brand names of which one is used for two brands; a colour that goes with any region.
+    Brand names and colours cycle with 11 and 7, which share nothing with 60."""
+    path = tmp_path / "shop.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE SCHEMA s")
+    cols = ("'T' || (i % 60) AS town, 'R' || (i % 60 % 6) AS region, 'code-' || (i % 60 % 6) AS region_code, 'C' || (i % 60 % 6 % 2) AS country, "
+            "'N' || (i % 11) AS brand_name, CASE WHEN i % 22 = 7 THEN 'B9' ELSE 'B' || (i % 11 % 4) END AS brand, 'colour' || (i % 7) AS colour")
+    con.execute(f"CREATE TABLE s.orders AS SELECT 'O' || i AS order_id, {cols} FROM range(600) t(i)")
+    con.execute(f"CREATE TABLE s.visits AS SELECT i AS visit_no, {cols} FROM range(900) t(i)")
+    con.execute("CREATE TABLE s.lines AS SELECT 'O' || (i % 600) AS order_id, i % 3 AS line_no FROM range(1800) t(i)")
+    con.close()
+    return DuckDBReader(path, schemas=["s"], name="shop")
+
+
+def _model() -> dict:
+    def ref(col: str, values: int, objects: tuple[str, ...] = ("s.orders", "s.visits")) -> dict:
+        return {"id": f"concept:value:{col}", "kind": "reference", "column": col, "label": col.replace("_", " ").title(), "values": values, "objects": list(objects)}
+
+    concepts = [ref("town", 60), ref("region", 6), ref("region_code", 6, ("s.orders", "s.visits")), ref("country", 2), ref("brand_name", 11), ref("brand", 5), ref("colour", 7),
+                {"id": "concept:s.orders", "kind": "entity", "label": "Order", "key": ["order_id"], "object_name": "s.orders"},
+                {"id": "concept:s.lines", "kind": "fact", "label": "Line", "key": ["order_id", "line_no"], "object_name": "s.lines"},
+                {"id": "concept:m.order_profile", "kind": "derived", "label": "Order profile", "key": ["order_id"], "object_name": "m.order_profile"}]
+    relations = [{"id": "relation:s.lines.order_id->s.orders", "from": "concept:s.lines", "to": "concept:s.orders", "columns": ["order_id"], "to_columns": ["order_id"]}]
+    relations += [{"id": f"relation:s.orders.{c}->value:{c}", "from": "concept:s.orders", "to": f"concept:value:{c}", "columns": [c], "to_columns": [c]}
+                  for c in ("town", "region", "country", "colour")]
+    return {"concepts": concepts, "relations": relations}
+
+
+def test_roll_ups_are_proposed_with_their_support_and_what_follows_from_two_is_left_out(shop: DuckDBReader) -> None:
+    st = build_structure(shop, _model())
+    steps = {r["id"]: r for r in st["roll_ups"]}
+    assert {"roll_up:value:town->value:region", "roll_up:value:region->value:country", "roll_up:value:brand_name->value:brand"} <= set(steps)
+    assert "roll_up:value:town->value:country" not in steps  # it follows from town -> region -> country
+    assert not any("colour" in k for k in steps)  # a colour goes with any region: no hierarchy
+    clean, near = steps["roll_up:value:town->value:region"], steps["roll_up:value:brand_name->value:brand"]
+    assert clean["support"]["values_breaking"] == 0 and clean["signals"][0] == {"kind": "functional_dependency", "code": "functional_dependency.all", "params": {"objects": 2, "a": "town", "b": "region"}, "ref": ""}
+    assert near["support"] == {"objects": ["s.orders", "s.visits"], "values_checked": 22, "values_breaking": 2, "share": 0.9091}
+    assert near["signals"][0]["code"] == "functional_dependency.most" and near["signals"][0]["params"] == {"objects": 2, "holding": 20, "checked": 22, "a": "brand_name", "b": "brand"}
+    assert all(r["status"] == "proposed" for r in st["roll_ups"])  # nothing here is accepted by the machine
+
+
+def test_two_columns_that_cut_the_rows_the_same_way_are_one_level(shop: DuckDBReader) -> None:
+    st = build_structure(shop, _model())
+    assert [e["concepts"] for e in st["equivalent"]] == [["concept:value:region", "concept:value:region_code"]]
+    assert not any("region_code" in r["id"] for r in st["roll_ups"])  # town -> region, not town -> region code as well
+
+
+def test_master_data_hangs_below_the_finest_level_it_carries(shop: DuckDBReader) -> None:
+    st = build_structure(shop, _model())
+    below = [r for r in st["roll_ups"] if r["kind"] == "belongs_to"]
+    assert [(r["from"], r["to"]) for r in below] == [("concept:s.orders", "concept:value:town")]  # not region or country: they follow from the town
+    assert below[0]["support"] == {"rows": 600, "rows_with_the_level": 600, "share": 1.0}
+
+
+def test_a_level_that_only_some_rows_carry_says_how_many(tmp_path: Path) -> None:
+    # Seen on the real dealers (2026-11-11): 95 of 211 carry a dealer group, and the export
+    # proposed "dealer belongs to dealer group" without a word about the other 116.
+    path = tmp_path / "half.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE SCHEMA s")
+    con.execute("CREATE TABLE s.orders AS SELECT 'O' || i AS order_id, CASE WHEN i % 2 = 0 THEN 'T' || (i % 60) END AS town, CASE WHEN i % 2 = 0 THEN 'R' || (i % 60 % 6) END AS region FROM range(600) t(i)")
+    con.execute("CREATE TABLE s.visits AS SELECT i AS visit_no, 'T' || (i % 60) AS town, 'R' || (i % 60 % 6) AS region FROM range(900) t(i)")
+    con.close()
+    model = _model()
+    model["concepts"] = [c for c in model["concepts"] if c["id"] in ("concept:value:town", "concept:value:region", "concept:s.orders")]
+    model["relations"] = [r for r in model["relations"] if r["to"] in ("concept:value:town", "concept:value:region")]
+    st = build_structure(DuckDBReader(path, schemas=["s"], name="half"), model)
+    step = next(r for r in st["roll_ups"] if r["kind"] == "belongs_to")
+    assert step["support"] == {"rows": 600, "rows_with_the_level": 300, "share": 0.5}
+    assert step["signals"][0]["code"] == "refers_to_a_level.some" and step["signals"][0]["params"]["filled"] == 300 and step["signals"][0]["params"]["rows"] == 600
+
+
+def test_part_of_comes_from_keys_and_a_derived_object_describes_its_entity(shop: DuckDBReader) -> None:
+    st = build_structure(shop, _model())
+    assert [(p["from"], p["to"], p["kind"]) for p in st["part_of"]] == [("concept:s.lines", "concept:s.orders", "part_of")]
+    assert st["part_of"][0]["signals"][0]["params"] == {"concept": "Line", "key": ["order_id", "line_no"], "whole": "Order", "columns": ["order_id"]}
+    assert [(d["from"], d["to"]) for d in st["describes"]] == [("concept:m.order_profile", "concept:s.orders")]
+
+
+def test_every_value_gets_the_value_above_it_and_one_under_two_values_gets_none(shop: DuckDBReader) -> None:
+    st = build_structure(shop, _model())
+    known = {f"value:town:T{k}" for k in range(60)} | {f"value:region:R{k}" for k in range(6)} | {f"value:brand_name:N{k}" for k in range(11)} | {f"value:brand:B{k}" for k in (0, 1, 2, 3, 9)}
+    edges = broader_edges(shop, st, known)
+    up = {e["from"]: e for e in edges}
+    assert up["value:town:T7"]["to"] == "value:region:R1" and "contested" not in up["value:town:T7"]
+    assert "value:brand_name:N7" not in up  # mostly B3, sometimes B9: the data does not say, so no edge is drawn
+    step = next(r for r in st["roll_ups"] if r["id"] == "roll_up:value:brand_name->value:brand")
+    assert step["breaking"] == [{"value": "N7", "parents": ["B3", "B9"]}]  # the step names the value that breaks it (it does so in both objects)
+    assert "breaking" not in next(r for r in st["roll_ups"] if r["id"] == "roll_up:value:town->value:region")
+    assert sum(e["from"].startswith("value:town:") for e in edges) == 60
+    assert all(e["from"] in known and e["to"] in known and e["kind"] == "broader" for e in edges)
+
+
+def test_the_hierarchy_is_a_reason_for_or_against_two_names_being_the_same() -> None:
+    nodes = [{"id": f"value:maker:{n}", "concept": "concept:value:maker", "label": n} for n in ("Kia America", "Kia Motors", "Toyota Corp", "Lexus Corp")]
+    nodes += [{"id": f"value:make:{n}", "concept": "concept:value:make", "label": n} for n in ("KIA", "TOYOTA", "LEXUS")]
+    edges = [{"from": "value:maker:Kia America", "to": "value:make:KIA", "kind": "broader"}, {"from": "value:maker:Kia Motors", "to": "value:make:KIA", "kind": "broader"},
+             {"from": "value:maker:Toyota Corp", "to": "value:make:TOYOTA", "kind": "broader"}, {"from": "value:maker:Lexus Corp", "to": "value:make:LEXUS", "kind": "broader"}]
+    review = [{"id": "1", "a": "value:maker:Kia America", "b": "value:maker:Kia Motors", "reasons": [say("same_start", word="kia")], "strength": "weak"},
+              {"id": "2", "a": "value:maker:Toyota Corp", "b": "value:maker:Lexus Corp", "reasons": [say("shared_rare_word", word="corp")], "strength": "strong"},
+              {"id": "3", "a": "value:other:x", "b": "value:other:y", "reasons": [say("same_start", word="x")], "strength": "weak"}]
+    out = explain_review(review, edges, nodes, [{"id": "concept:value:make", "label": "Make"}])
+    assert [render(r) for r in out[0]["reasons"]] == ["both names begin with “kia”", "both belong to the Make KIA"] and out[0]["strength"] == "strong"
+    assert out[1]["reasons"][1] == say("different_parents", level="Make", a="TOYOTA", b="LEXUS") and out[1]["strength"] == "weak"
+    assert out[2] == review[2] and review[0]["strength"] == "weak"  # no hierarchy above them: unchanged; the input is not altered

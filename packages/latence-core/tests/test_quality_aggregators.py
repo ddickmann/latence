@@ -81,13 +81,12 @@ def test_folded_report_is_byte_identical_to_the_pre_c5_gather_fixture(tmp_path: 
             "type_consolidation",
             "disambiguation",
             "graph",
-            "context_enrichment",
             "drift",
             "goldset",
         )
         if getattr(report, name) is not None
     ]
-    assert len(populated) == 13, f"fixture covers only {populated}"
+    assert len(populated) == 12, f"fixture covers only {populated}"
 
 
 def test_rendered_report_is_byte_identical_to_the_pre_c5_render(tmp_path: Path) -> None:
@@ -101,7 +100,7 @@ def test_rendered_report_is_byte_identical_to_the_pre_c5_render(tmp_path: Path) 
     rendered = report.render()
     assert (
         "## Stage metrics present: Parse, Chunk, Screening, Entities, Relations, Redaction, "
-        "Profiling, TypeConsolidation, Disambiguation, Graph, ContextEnrichment" in rendered
+        "Profiling, TypeConsolidation, Disambiguation, Graph" in rendered
     )
 
 

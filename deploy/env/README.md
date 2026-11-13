@@ -15,7 +15,7 @@ test is the regression guard.
 
 | Environment | Slice | Ticket |
 | --- | --- | --- |
-| [`cpu-text/`](cpu-text/) | CPU/text enterprise-sota: GLiNER2 fused extraction, learned GLiNER PII redaction, GLinker disambiguation, Granite r2 dense embeddings, SPLADE sparse | #195 |
+| [`cpu-text/`](cpu-text/) | CPU/text enterprise-sota: GLiNER2 fused extraction, learned GLiNER PII redaction, GLinker disambiguation, Granite r2 dense embeddings | #195 |
 | [`served-ocr-server/`](served-ocr-server/) | the vLLM **serving** environment for LightOn-OCR-2 on CUDA-13/Blackwell (pinned image + bare-metal recipe) | #196 |
 | [`served-ocr-client/`](served-ocr-client/) | the CPU **client** environment that calls that endpoint (`parser.lighton_vllm` -> chunk -> RAG export) | #196 |
 | [`gpu-learned/`](gpu-learned/) | GPU learned Providers on CUDA 13 / Blackwell: GLiNER2 fused extraction, GLiNER2 financial-PII + learned GLiNER PII redaction, GLinker disambiguation, Granite r2 GPU-tier embeddings — with the `transformers` split resolved and **real GPU placement asserted** | #198 |

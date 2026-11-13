@@ -30,39 +30,39 @@ class TestAnswers:
 
     def test_unknown_dataset_rejected(self) -> None:
         with pytest.raises(CampaignConfigError, match="beir"):
-            CampaignAnswers(campaign_root="/tmp/c", datasets=("musique", "beir"))
+            CampaignAnswers(campaign_root="/tmp/c", datasets=("wiki2multihop", "beir"))
 
     def test_duplicate_dataset_rejected(self) -> None:
         with pytest.raises(CampaignConfigError, match="more than once"):
-            CampaignAnswers(campaign_root="/tmp/c", datasets=("uda", "musique", "uda"))
+            CampaignAnswers(campaign_root="/tmp/c", datasets=("uda", "wiki2multihop", "uda"))
 
     def test_operator_order_is_preserved(self) -> None:
-        answers = CampaignAnswers(campaign_root="/tmp/c", datasets=("uda", "musique"))
-        assert answers.datasets == ("uda", "musique")
+        answers = CampaignAnswers(campaign_root="/tmp/c", datasets=("uda", "wiki2multihop"))
+        assert answers.datasets == ("uda", "wiki2multihop")
 
 
 class TestGeneratorDeterminism:
     def test_identical_answers_yield_byte_identical_yaml(self) -> None:
-        a = CampaignAnswers(campaign_root="/c", datasets=("musique", "uda"), pod_ssh="x@y")
-        b = CampaignAnswers(campaign_root="/c", datasets=("musique", "uda"), pod_ssh="x@y")
+        a = CampaignAnswers(campaign_root="/c", datasets=("wiki2multihop", "uda"), pod_ssh="x@y")
+        b = CampaignAnswers(campaign_root="/c", datasets=("wiki2multihop", "uda"), pod_ssh="x@y")
         assert build_campaign_config(a) == build_campaign_config(b)
         assert build_campaign_config(a) == build_campaign_config(a)
 
     def test_different_answers_yield_different_yaml(self) -> None:
-        a = CampaignAnswers(campaign_root="/c", datasets=("musique",))
+        a = CampaignAnswers(campaign_root="/c", datasets=("wiki2multihop",))
         b = CampaignAnswers(campaign_root="/c", datasets=("uda",))
         assert build_campaign_config(a) != build_campaign_config(b)
 
     def test_header_is_derived_from_the_config(self) -> None:
         answers = CampaignAnswers(
-            campaign_root="/camp", datasets=("musique", "ohr_bench"), pod_ssh="root@pod"
+            campaign_root="/camp", datasets=("wiki2multihop", "ohr_bench"), pod_ssh="root@pod"
         )
         text = build_campaign_config(answers)
         header = [line for line in text.splitlines() if line.startswith("#")]
         joined = "\n".join(header)
         assert "/camp" in joined
         assert "2 dataset(s)" in joined
-        assert "musique, ohr_bench" in joined
+        assert "wiki2multihop, ohr_bench" in joined
         assert "root@pod" in joined
 
     def test_no_pod_reads_as_local_only(self) -> None:
@@ -73,7 +73,7 @@ class TestGeneratorDeterminism:
 class TestParsing:
     def test_roundtrip(self) -> None:
         answers = CampaignAnswers(
-            campaign_root="/camp", datasets=("hotpotqa", "vidoseek"), pod_ssh="a@b:2222"
+            campaign_root="/camp", datasets=("multihop_rag", "vidoseek"), pod_ssh="a@b:2222"
         )
         assert parse_campaign_config(build_campaign_config(answers)) == answers
 
@@ -90,7 +90,7 @@ class TestParsing:
 
     def test_missing_campaign_block_is_loud(self) -> None:
         with pytest.raises(CampaignConfigError, match="campaign"):
-            parse_campaign_config("corpus:\n  datasets: [musique]\n")
+            parse_campaign_config("corpus:\n  datasets: [wiki2multihop]\n")
 
     def test_missing_corpus_block_is_loud(self) -> None:
         with pytest.raises(CampaignConfigError, match="corpus"):

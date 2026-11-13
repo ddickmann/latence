@@ -69,7 +69,7 @@ ok "all latence_* editables resolve under $(pwd)"
 # scripts/ were unlinted locally while CI checked them. test_verify_local_mirrors_ci_lint_scope
 # pins the two together so they cannot drift apart again.
 step "ruff (lint)"
-uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+uv run ruff check packages benchmark/sota-campaign scripts
 ok "ruff"
 
 step "mypy --strict (src + tests, per-package)"
@@ -94,7 +94,6 @@ uv run latence stack validate stacks/gpu-ocr.yaml
 uv run latence stack validate stacks/universal-parse.yaml   # W5 any-file parser; Parse skip-with-flag on CPU
 uv run latence stack validate stacks/linkpred-base.yaml   # the reference completer RUNS on CPU
 uv run latence stack validate stacks/schema-induction.yaml  # induce+extract skip-with-flag; CPU spine validates (W4)
-uv run latence stack validate stacks/context-enrichment.yaml  # the KG→chunk enrich Stage RUNS on CPU (W13)
 ok "stack validate"
 
 step "reproducible-environment specs (#195 — pins, enforced conflict boundaries, providers)"

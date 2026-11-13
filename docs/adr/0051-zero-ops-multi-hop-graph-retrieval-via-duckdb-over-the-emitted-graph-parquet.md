@@ -1,5 +1,10 @@
 # Zero-ops multi-hop graph retrieval via DuckDB over the emitted graph parquet; Neo4j demoted to an optional enterprise adapter
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 Graph-augmented retrieval defaults to **1-hop over the KG columns already denormalised onto each chunk**
 (no extra infrastructure, any vector store). For **multi-hop**, the zero-ops default is **DuckDB running
 recursive traversal over the graph parquet the pipeline already emits** — an embedded, serverless engine

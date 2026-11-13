@@ -21,8 +21,7 @@ HEAVY_PKGS := $(shell grep -vE '^[[:space:]]*(\#|$$)' scripts/heavy-packages.txt
 ALL_PKGS := \
 	latence-core latence-parser-plaintext latence-parser-document \
 	latence-parser-pdfplumber \
-	$(HEAVY_PKGS) latence-demo latence-disambig-embedding latence-muvera \
-	latence-sink-qdrant
+	$(HEAVY_PKGS) latence-demo latence-disambig-embedding
 
 # One-time setup for a fresh checkout: run this before `make test`.
 sync:

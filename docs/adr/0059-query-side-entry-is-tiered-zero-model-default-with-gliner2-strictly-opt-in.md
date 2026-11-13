@@ -1,5 +1,10 @@
 # Query-side entry is tiered: a zero-model default over the alias KV and the caller's own query embedding, with GLiNER2 strictly opt-in
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 Entity entry for chain-of-evidence retrieval (spec 2.1) ships as **three independently useful
 tiers**. The default tier loads **no model beyond what the adopter already has** — ANN over
 `entity_vecs` with the query embedding the caller computed for their own first-stage search, plus

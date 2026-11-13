@@ -1,8 +1,8 @@
 """``parser.lighton_vllm`` — the PRODUCTION OCR path: LightOn-OCR served by a warm vLLM endpoint.
 
-**Production OCR is a warm vLLM server, not in-process transformers.** Pod-measured on the same GPU,
-vLLM at concurrency is ~**2.7x faster than optimised transformers** (LightOn's recommended path;
-their 5.71 pg/s H100 headline figure is the vLLM path). This Provider is the drop-in
+**Production OCR is a warm vLLM server, not in-process transformers** (ADR-0030). The two paths
+have not been measured against each other on one machine: ``PERF-RESULTS.md`` lists that comparison
+as pending. This Provider is the drop-in
 :class:`~latence_core.capability.Parser` that hits a **running vLLM OpenAI-compatible endpoint**
 over HTTP — the same served-endpoint shape as ``embedding.endpoint`` / the LLM Providers — while the
 in-process ``parser.lighton`` (W1/W8, transformers on a single box) stays for single-box / simple
@@ -40,8 +40,8 @@ float decoding is not promised byte-identical; verify on the pod, do not overcla
 --------------------------------------------------------------------------------------------------
 The PRODUCTION vLLM serve recipe (CUDA GRAPHS ON — no ``--enforce-eager`` in production)
 --------------------------------------------------------------------------------------------------
-LightOn's official + optimal-throughput config. cudagraphs give the extra speed the transformers
-head-to-head's enforce-eager floor did NOT capture, so production keeps them ON::
+LightOn's official + optimal-throughput config. ``--enforce-eager`` turns cudagraphs off, so
+production does not pass it and keeps them ON::
 
     vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0.90 \\
       --max-model-len 10000 --limit-mm-per-prompt '{"image": 1}' --mm-processor-cache-gb 0 \\

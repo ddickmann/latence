@@ -7,7 +7,6 @@ from latence_core.contracts import (
     SCHEMA_VERSION,
     ChunkRecord,
     Classification,
-    ContextHeader,
     Disposition,
     DocumentRecord,
     OffsetMap,
@@ -196,7 +195,10 @@ def test_schema_version_is_current() -> None:
     # Provider prompts with has a per-record slot. Additive + defaulted to []. Both T2's and T3's
     # additions ship in the SAME revision — they land together, so no record carries one without
     # the other.
-    assert SCHEMA_VERSION == 21
+    # 22 (ADR-0068) REMOVES the retrieval-only contracts: ContextHeader + ChunkRecord's
+    # ``context_header``, and the Hyperedge family (GraphHyperedge / HyperedgeRelation /
+    # HyperedgeSourceRef / GraphScope.HYPEREDGE / GraphRecord.hyperedge).
+    assert SCHEMA_VERSION == 22
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:
@@ -293,9 +295,13 @@ def test_chunk_record_carries_offset_map_and_roundtrips() -> None:
     )
 
 
-def test_context_header_is_additive_and_prior_version_json_validates() -> None:
-    """W13: ChunkRecord.context_header is additive + defaulted None; a v14 chunk JSON still validates."""
-    # Default None (a chunk with no context_enrichment Stage).
+def test_a_chunk_record_carrying_a_context_header_is_rejected() -> None:
+    """v22 (ADR-0068): ``context_header`` left the ChunkRecord contract — it is not silently dropped.
+
+    Every v21 chunk dump carries the key (``null`` when no Context-Enrichment Stage ran), and
+    ChunkRecord is ``extra="forbid"``, so a record written before the removal fails loudly rather
+    than deserialising into a chunk that quietly lost a field.
+    """
     plain = ChunkRecord(
         record_id="d1#chunk-0",
         document_record_id="d1",
@@ -305,38 +311,11 @@ def test_context_header_is_additive_and_prior_version_json_validates() -> None:
         content="Alice works for Acme.",
         token_count=4,
     )
-    assert plain.context_header is None
+    dumped = plain.model_dump(mode="json")
+    assert "context_header" not in dumped
 
-    # A prior-version (v14) ChunkRecord JSON — one that predates the field entirely — still validates
-    # (the additive-field guarantee): drop context_header AND pin schema_version to 14.
-    prior = plain.model_dump(mode="json")
-    prior.pop("context_header")
-    prior["schema_version"] = 14
-    restored_prior = ChunkRecord.model_validate(prior)
-    assert restored_prior.context_header is None
-
-    # A populated header round-trips byte-for-byte.
-    enriched = plain.model_copy(
-        update={
-            "context_header": ContextHeader(
-                entities=["Acme", "Alice"],
-                entity_types=["ORG", "PERSON"],
-                neighbor_triples=["Alice —works_for→ Acme"],
-                kg_node_ids=["n-acme", "n-alice"],
-                neighbor_node_ids=["n-berlin"],
-            )
-        }
-    )
-    restored = ChunkRecord.model_validate_json(enriched.model_dump_json())
-    assert restored == enriched
-    assert restored.context_header is not None
-    assert restored.context_header.entities == ["Acme", "Alice"]
-
-
-def test_context_header_entities_and_types_must_align() -> None:
-    """A ContextHeader with mismatched entities/entity_types lengths fails validation."""
     with pytest.raises(ValidationError):
-        ContextHeader(entities=["Acme", "Alice"], entity_types=["ORG"])
+        ChunkRecord.model_validate({**dumped, "context_header": None})
 
 
 def test_chunk_record_flagged_when_it_has_markers() -> None:

@@ -415,12 +415,9 @@ def test_refuses_to_sign_an_sbom_that_omits_published_distributions(tmp_path: Pa
             "latence-core",
             "latence-demo",
             "latence-disambig-embedding",
-            "latence-muvera",
             "latence-parser-document",
             "latence-parser-pdfplumber",
             "latence-parser-plaintext",
-            "latence-retrieval",
-            "latence-sink-qdrant",
             "latence-source-sharepoint",
         }
     ]

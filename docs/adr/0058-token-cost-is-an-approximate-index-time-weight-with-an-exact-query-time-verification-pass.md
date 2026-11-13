@@ -1,5 +1,10 @@
 # `token_cost` is an approximate index-time weight carrying its tokenizer's identity; the budget guarantee comes from an exact query-time verification pass
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 Hyperedge `token_cost` is precomputed at index time with an **operator-named, optional** tokenizer
 (dependency-free heuristic by default) and stored **alongside the identity of the tokenizer that
 produced it**. It is treated as an *approximate ranking weight*, not as truth. The guarantee that the

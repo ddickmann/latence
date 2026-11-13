@@ -1,5 +1,10 @@
 # The hypergraph Evidence sidecar is read per call over a point-lookup KV; no global edge-adjacency matrix is ever built
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 The Evidence-Unit (EU) hypergraph store that backs chain-of-evidence retrieval is emitted by the
 pipeline as **files** (ADR-0017, ADR-0049) and read by the query-time tooling **per call, holding
 nothing between calls** (ADR-0048) — the same discipline `DuckDBGraphSource` already follows

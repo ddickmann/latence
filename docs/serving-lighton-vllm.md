@@ -1,10 +1,12 @@
 # Serving LightOn-OCR with vLLM — the production OCR path (`parser.lighton_vllm`, W10)
 
-**Production OCR is a warm vLLM server, not in-process transformers.** Pod-measured on the same GPU,
-vLLM at concurrency is ~**2.7× faster than optimised in-process transformers** (LightOn's recommended
-path; their 5.71 pg/s H100 headline figure is the vLLM path). The `parser.lighton_vllm` Provider is a
-drop-in for `parser.lighton` that POSTs each rasterised page to a running vLLM OpenAI-compatible
-endpoint. This note is the turnkey serve recipe + the client wiring.
+**Production OCR is a warm vLLM server, not in-process transformers** (ADR-0030). The two paths
+have not been measured against each other on one machine: `PERF-RESULTS.md` lists that comparison
+as pending. Each path has one record of its own, on different hardware and a different corpus;
+[Deployment](deployment.md) gives both figures and says why they are not a ratio. The
+`parser.lighton_vllm` Provider is a drop-in for `parser.lighton` that POSTs each rasterised page to
+a running vLLM OpenAI-compatible endpoint. This note is the turnkey serve recipe + the client
+wiring.
 
 > **Reproducible version of this page:** `deploy/env/served-ocr-server/` (#196) is the *pinned*
 > serving environment — a solved lockfile (`vllm==0.24.0`, `torch==2.11.0+cu130`,
@@ -16,8 +18,8 @@ endpoint. This note is the turnkey serve recipe + the client wiring.
 
 ## 1. Serve LightOn-OCR-2 with vLLM (CUDA GRAPHS ON — production)
 
-LightOn's official + optimal-throughput config. **No `--enforce-eager` in production** — cudagraphs
-give the extra speed the in-process transformers head-to-head's enforce-eager floor did NOT capture:
+LightOn's official + optimal-throughput config. **No `--enforce-eager` in production**: that flag
+turns cudagraphs off, and the recipe keeps them on:
 
 ```bash
 vllm serve lightonai/LightOnOCR-2-1B \
@@ -58,8 +60,8 @@ It disables only the FlashInfer **sampler** — every other FlashInfer path, and
 cudagraphs, stay on. `deploy/env/served-ocr-server/serve.sh` exports it for you.
 
 > **`--enforce-eager` is NOT the fix here.** It does clear the abort, but by turning cudagraphs off
-> entirely — the exact throughput floor this whole page exists to avoid, and the one the in-process
-> transformers head-to-head was already stuck at. Never reach for it as the Blackwell remedy.
+> entirely — the throughput floor this whole page exists to avoid. Never reach for it as the
+> Blackwell remedy.
 
 The other legitimate exit is upgrading `flashinfer` to a build whose capability check is fixed, then
 keeping cudagraphs on. That is a deliberate version bump — the pinned

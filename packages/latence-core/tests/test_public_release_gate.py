@@ -28,6 +28,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from _removed_capabilities import lines_naming_a_removed_capability
 
 # packages/latence-core/tests/ -> repo root is three parents up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -195,9 +196,8 @@ def test_placeholders_are_greppable_and_the_page_gates_something_substantial() -
 
     assert len(names) >= 20, (
         f"only {len(names)} placeholders on the results page. The end-to-end run produces "
-        "throughput, per-signal retrieval, hop-stratified results, the question funnel, the KG "
-        "ablation and link-prediction numbers — a page gating fewer than 20 values has probably "
-        "lost a section."
+        "per-stage throughput and memory, the device-honesty check and link-prediction numbers "
+        "— a page gating fewer than 20 values has probably lost a section."
     )
 
 
@@ -211,13 +211,28 @@ def test_the_results_page_declares_its_own_status() -> None:
 
 
 def test_the_gates_cover_the_capabilities_most_likely_to_be_overclaimed() -> None:
-    """The four an evaluator probes first. Each was, or is, partial — none may be assumed."""
+    """The claims an evaluator probes first. Each is unproven until measured — none may be assumed.
+
+    The first version of this list named SPLADE and the graph retrieval leg. Both left the
+    product with the retrieval tooling (ADR-0068), and a gate that names a capability the tree no
+    longer has can never be met, which blocks every release for a reason nobody can act on. The
+    headline claims of the re-scoped product are about resolution: what the engine accepts
+    without a human, and how much of the truth it finds while doing so.
+    """
     gates = _text(_GATES).lower()
-    for capability in ("splade", "graph leg", "link prediction", "verify-local"):
+    for capability in ("auto-accept precision", "recall", "link prediction", "verify-local"):
         assert capability in gates, (
-            f"RELEASE-GATES.md does not gate {capability!r}. It is one of the capabilities an "
-            "evaluator probes first, and it was partial when these gates were written."
+            f"RELEASE-GATES.md does not gate {capability!r}. It is one of the claims an "
+            "evaluator probes first, and it is unproven until it is measured."
         )
+
+
+def test_the_gates_name_no_capability_the_tree_no_longer_has() -> None:
+    """A gate on a removed capability is unmeetable; it must go when the capability goes."""
+    gates = _text(_GATES)
+    unchecked = [line for line in gates.splitlines() if line.lstrip().startswith("- [ ]")]
+    stale = lines_naming_a_removed_capability(unchecked)
+    assert not stale, "open release gates name capabilities removed by ADR-0068:\n" + "\n".join(stale)
 
 
 def test_the_outstanding_set_is_inventoried(capsys: pytest.CaptureFixture[str]) -> None:
@@ -243,7 +258,7 @@ def test_release_no_result_is_still_a_placeholder() -> None:
     assert not names, (
         f"{len(names)} result(s) in docs/BENCHMARKS-E2E.md are still placeholders:\n  "
         + "\n  ".join(sorted(set(names)))
-        + "\n\nThese are filled from a real GPU run (issues/e2e-extended/RUNBOOK.md). Do NOT fill "
+        + "\n\nThese are filled from a real GPU run. Do NOT fill "
         "one with a number from a different corpus, commit, or card — each table states its own "
         "method, and a number that does not match its stated method is worse than a missing one, "
         "because it looks checked."

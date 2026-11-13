@@ -39,14 +39,12 @@ from latence_core.setup import (
     StageContribution,
     build_stack_config,
     recipe_for,
-    validate_config_text,
 )
 from latence_core.setup.recipe import (
     PARSER_OCR_VLLM,
     PROFILE_LITE,
     PROFILE_SOTA,
     ChunkContribution,
-    ExportCorpusContribution,
     ExtractContribution,
     InduceContribution,
     RedactContribution,
@@ -123,28 +121,6 @@ def test_predefined_only_omits_the_induce_stage_and_re_anchors_its_consumers() -
 # ---------------------------------------------------------------------------
 # the header derives from the stack — the ADR-0041 7a drift class
 # ---------------------------------------------------------------------------
-
-
-def test_header_stops_claiming_bm25_when_the_stack_stops_emitting_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Drop the BM25 block from ONE contribution; the comment header stops advertising it.
-
-    The pre-C7 renderer keyed this paragraph off ``answers.profile``, so the same edit left the
-    header advertising a `bm25-stats.json` artifact the stack no longer produced.
-    """
-    claim = "bm25-stats.json"
-    assert claim in header_of(build_stack_config(_answers()))  # the shipped SOTA recipe does emit it
-
-    dense_only = _with_contribution(
-        SOTA_RECIPE, ExportCorpusContribution(gpu_embedder=True, bm25=False)
-    )
-    monkeypatch.setattr(wizard, "recipe_for", lambda _profile: dense_only)
-    text = build_stack_config(_answers())
-
-    assert claim not in header_of(text)
-    assert "bm25" not in text
-    validate_config_text(text)  # and the stack is still a valid one
 
 
 def test_header_names_the_redactor_the_stack_actually_emitted(

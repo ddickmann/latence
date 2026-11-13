@@ -1,12 +1,13 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""The s3-pipeline stage, fully offline: gating, reuse verification, preps, the pod loop.
+"""The s3-pipeline stage, fully offline: gating, the dataset registry, preps, the pod loop.
 
 Same posture as the s2 suite: no ssh, no GPU, no OpenRouter — the pod is a scripted
 :class:`FakePod` behind the transport seam and the poll loop runs on a fake clock. What is
 proven here is every decision the stage makes AROUND the real run: refusal until s2 is
-approved, blocked-with-reason on a lost M6 export, deterministic prep bytes, launch/
-re-enter/relaunch semantics, stall + death handling, and the consolidated metrics contract.
+approved, a pipeline for every selectable dataset, deterministic prep
+bytes, launch/re-enter/relaunch semantics, stall + death handling, and the consolidated
+metrics contract.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from latence_benchmark.campaign import pipeline_stage
+from latence_benchmark.campaign.corpus_stage import CORPUS_PLAN
 from latence_benchmark.campaign.pipeline_stage import (
     STAGE_NAME,
     launch_cmd,
@@ -27,7 +29,6 @@ from latence_benchmark.campaign.pipeline_stage import (
     prepare_wiki2multihop,
     run_s3_stage,
     s3_done_probe,
-    verify_reused_export,
 )
 from latence_benchmark.campaign.s3_lib import REMOTE_ROOT
 from latence_benchmark.campaign.stages import (
@@ -39,10 +40,12 @@ from latence_benchmark.campaign.stages import (
     stage_dir,
 )
 from latence_benchmark.campaign.state import STATE_FILENAME, CampaignState
-from latence_benchmark.campaign.wizard import CampaignAnswers
+from latence_benchmark.campaign.wizard import KNOWN_DATASETS, CampaignAnswers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # -- fixtures --------------------------------------------------------------------------------
@@ -76,7 +79,6 @@ def fixture_report(*, with_induction: bool = True) -> dict[str, Any]:
         "graph": {
             "nodes_total": 80,
             "edges_total": 25,
-            "hyperedges": {"hyperedges_total": 12},
         },
     }
 
@@ -112,12 +114,6 @@ def make_repo(tmp_path: Path, *, datasets: Sequence[str] = ("ohr_bench",)) -> Pa
         cast("Any", pq).write_table(
             pa.table({"context": contexts}), raw / "dev.parquet"
         )
-    for incumbent, name in (("musique", "musique-full"), ("hotpotqa", "hotpot-full")):
-        if incumbent in datasets:
-            export = repo / "benchmark" / "official-data" / name / "export"
-            export.mkdir(parents=True)
-            (export / "graph-hyperedges.kv").write_bytes(b"LHKV1-fixture")
-            (export / "corpus.jsonl").write_text("{}\n", encoding="utf-8")
     return repo
 
 
@@ -197,28 +193,46 @@ class TestGating:
             run_stage(specs, STAGE_NAME, ctx, state)
 
 
-# -- reuse verification ----------------------------------------------------------------------
+# -- the registry and the stages agree ---------------------------------------------------------
 
 
-class TestReuse:
-    def test_present_export_is_recorded_not_reprocessed(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique",))
-        entry = verify_reused_export(repo, "musique")
-        assert entry["reused_from_m6"] is True
-        assert entry["export"] == "benchmark/official-data/musique-full/export"
-        assert entry["hyperedge_kv_bytes"] > 0
+class TestEverySelectableDatasetHasAPipeline:
+    def test_every_known_dataset_is_planned_and_processed(self) -> None:
+        # A name the wizard offers must be one s1 can acquire and s3 has a pipeline for.
+        # A selectable dataset no stage processes is a registry entry with nothing behind it.
+        for name in KNOWN_DATASETS:
+            assert name in CORPUS_PLAN, f"{name} is selectable but has no CORPUS_PLAN entry"
+            assert name in pipeline_stage.PROCESS_ORDER, (
+                f"{name} is selectable but s3-pipeline has no pipeline for it"
+            )
 
-    def test_missing_export_blocks_with_the_fix(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=())
-        with pytest.raises(StageBlockedError, match="graph-hyperedges.kv"):
-            verify_reused_export(repo, "hotpotqa")
 
-    def test_empty_kv_blocks_too(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique",))
-        kv = repo / "benchmark/official-data/musique-full/export/graph-hyperedges.kv"
-        kv.write_bytes(b"")
-        with pytest.raises(StageBlockedError, match="missing/empty"):
-            verify_reused_export(repo, "musique")
+# -- the removed reuse and not-processed paths -------------------------------------------------
+
+
+class TestRemovedPaths:
+    """The stage once verified an earlier campaign's export for two datasets, then listed
+    the two as ``not_processed``. Both datasets left the registry, and both paths with them.
+    """
+
+    def test_the_reuse_check_is_gone_from_the_module(self) -> None:
+        assert not hasattr(pipeline_stage, "verify_reused_export")
+        assert not hasattr(pipeline_stage, "REUSED_EXPORTS")
+        source = Path(pipeline_stage.__file__).read_text(encoding="utf-8")
+        assert "graph-hyperedges" not in source
+
+    def test_the_not_processed_bookkeeping_is_gone_from_the_module(self) -> None:
+        assert not hasattr(pipeline_stage, "NOT_PROCESSED")
+        source = Path(pipeline_stage.__file__).read_text(encoding="utf-8")
+        assert "not_processed" not in source
+
+    def test_the_guide_describes_neither_path(self) -> None:
+        guide = (REPO_ROOT / "docs" / "guides" / "benchmark-campaign.md").read_text(
+            encoding="utf-8"
+        )
+        assert "graph-hyperedges.kv" not in guide
+        assert "reused_from_m6" not in guide
+        assert "not_processed" not in guide
 
 
 # -- local preps -----------------------------------------------------------------------------
@@ -305,13 +319,13 @@ class TestPollLoop:
 
 class TestStageRun:
     def test_fresh_run_pushes_launches_polls_pulls_and_records(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique", "ohr_bench"))
-        ctx = make_ctx(tmp_path, ("musique", "ohr_bench"), repo)
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         pod = FakePod(states={"ohr_bench": [("absent", 0), ("running", 1), ("done", 9)]})
         clock = FakeClock()
         note = run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
-        assert "1 dataset(s) processed" in note
-        assert "1 reused from M6" in note
+        assert "1 dataset(s) processed (42 chunks)" in note
+        assert "not processed" not in note
 
         # Launched exactly once: nohup + pid file + the same-run-id resume contract.
         launches = [c for c in pod.commands if "nohup" in c]
@@ -337,14 +351,14 @@ class TestStageRun:
         metrics = json.loads(
             (stage_dir(ctx.campaign_root, STAGE_NAME) / "metrics.json").read_text()
         )
-        assert set(metrics["datasets"]) == {"musique", "ohr_bench"}
+        assert set(metrics["datasets"]) == {"ohr_bench"}
+        assert "not_processed" not in metrics
         ohr = metrics["datasets"]["ohr_bench"]
         assert (ohr["chunks"], ohr["mentions"], ohr["relations"]) == (42, 120, 30)
-        assert (ohr["entities"], ohr["hyperedges"], ohr["pii_total"]) == (80, 12, 5)
+        assert (ohr["entities"], ohr["edges"], ohr["pii_total"]) == (80, 25, 5)
         # Priced at the default deepseek card: 100k @ $0.09/M + 20k @ $0.18/M.
         assert ohr["induction"]["usd_actual"] == pytest.approx(0.0126)
         assert ohr["run_id"] == "s3-ohr_bench-v1"
-        assert metrics["datasets"]["musique"]["reused_from_m6"] is True
         budget = metrics["induction_budget"]
         assert budget["induced_datasets"] == ["ohr_bench"]
         # Proportional allocation: ohr_bench's measured 13909 chunks × 1.10 headroom.
@@ -451,13 +465,6 @@ class TestStageRun:
         with pytest.raises(StageBlockedError, match="pod_ssh"):
             run_s3_stage(ctx)  # no transport injected, no pod_ssh configured
 
-    def test_reused_only_selection_never_needs_a_pod(self, tmp_path: Path) -> None:
-        repo = make_repo(tmp_path, datasets=("musique", "hotpotqa"))
-        ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
-        note = run_s3_stage(ctx)  # no transport at all: nothing to process
-        assert "0 dataset(s) processed" in note
-        assert s3_done_probe(ctx) is True
-
     def test_a_zero_document_report_blocks_the_stage(self, tmp_path: Path) -> None:
         # No-fake-green: a run over zero documents still writes quality-report.json and
         # reads as `done` to the status probe (the dangling-symlink field failure). The
@@ -505,12 +512,12 @@ class TestStageRun:
     ) -> None:
         # The crashed-graph hole (production S3, 2026-08-04): the run crashed inside
         # Graph Assembly but still left a quality-report.json, so the probe read `done`.
-        # Every campaign pipeline configures graph.canonical + hyperedges, so a report
+        # Every campaign pipeline configures graph.canonical, so a report
         # with zero graph nodes is a crash, never data — block, naming the pod log.
         repo = make_repo(tmp_path, datasets=("ohr_bench",))
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         report = fixture_report()
-        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        report["graph"] = {"nodes_total": 0, "edges_total": 0}
         pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
         clock = FakeClock()
         with pytest.raises(
@@ -520,27 +527,13 @@ class TestStageRun:
             run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
         assert s3_done_probe(ctx) is False  # the stage stays open
 
-    def test_a_null_hyperedges_section_blocks_even_with_nodes(
-        self, tmp_path: Path
-    ) -> None:
-        # A crash BETWEEN node emission and hyperedge emission leaves nodes_total > 0 but
-        # no hyperedges section; on a hyperedge-configured pipeline that is truncation.
-        repo = make_repo(tmp_path, datasets=("ohr_bench",))
-        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
-        report = fixture_report()
-        report["graph"] = {"nodes_total": 80, "edges_total": 25, "hyperedges": None}
-        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
-        clock = FakeClock()
-        with pytest.raises(StageBlockedError, match="hyperedges section null"):
-            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
-
     def test_a_crashed_graph_report_blocks_on_resume_too(self, tmp_path: Path) -> None:
         # Both completion paths again: a previously pulled crashed-graph report must not
         # slide through the local-resume branch either.
         repo = make_repo(tmp_path, datasets=("ohr_bench",))
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
         report = fixture_report()
-        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        report["graph"] = {"nodes_total": 0, "edges_total": 0}
         report_dir = stage_dir(ctx.campaign_root, STAGE_NAME) / "reports" / "ohr_bench"
         report_dir.mkdir(parents=True)
         (report_dir / "quality-report.json").write_text(

@@ -337,3 +337,150 @@ stages:
     for leaked in (pem, "LEAKME", passphrase, "CERTBLOB"):
         assert leaked not in manifest, f"{leaked!r} leaked into manifest.json"
     assert "***REDACTED***" in manifest
+
+
+# -- the "token" pattern hid the chunk budget ---------------------------------
+
+# Config keys that count model tokens. Their names contain "token" and their values are numbers.
+_TOKEN_BUDGET_KEYS = (
+    "max_tokens",
+    "min_tokens",
+    "overlap_tokens",
+    "max_new_tokens",
+    "microbatch_token_budget",
+)
+
+# Config keys that name a credential, or might. Every one of these must stay redacted.
+_TOKEN_CREDENTIAL_KEYS = (
+    "token",
+    "tokens",
+    "auth_token",
+    "access_token",
+    "api_token",
+    "api_tokens",
+    "bearer_token",
+    "refresh_token",
+    "id_token",
+    "session_token",
+    "hf_token",
+    "github_token",
+    "authToken",
+    "TOKEN",
+    "token_env",
+    "token_file",
+    # Not known budgets: a name that only resembles one is not shown.
+    "max_token",
+    "token_budget",
+    "chunk_max_tokens",
+    "tokens_per_minute",
+    "max_tokens_secret",
+)
+
+
+def test_scrub_sensitive_shows_token_budgets() -> None:
+    """A token COUNT is not a credential: the manifest must say what budget the run used.
+
+    ``token`` is one of the scrubber's substring patterns, so ``max_tokens`` / ``min_tokens`` /
+    ``overlap_tokens`` were written as ``***REDACTED***`` and the manifest stopped answering
+    "what chunk budget produced this export".
+    """
+    from latence_core.runner import scrub_sensitive
+
+    config: dict[str, object] = {key: 100 + i for i, key in enumerate(_TOKEN_BUDGET_KEYS)}
+    scrubbed = scrub_sensitive({"stages": [{"name": "chunk", "config": config}]})
+    assert isinstance(scrubbed, dict)
+    stages = scrubbed["stages"]
+    assert isinstance(stages, list) and isinstance(stages[0], dict)
+    shown = stages[0]["config"]
+    assert isinstance(shown, dict)
+    for i, key in enumerate(_TOKEN_BUDGET_KEYS):
+        assert shown[key] == 100 + i, key
+    # A float budget is a number too.
+    assert scrub_sensitive({"max_tokens": 256.0}) == {"max_tokens": 256.0}
+
+
+def test_scrub_sensitive_still_redacts_every_token_credential() -> None:
+    """Narrowing the pattern must not open it: anything credential-like stays redacted."""
+    from latence_core.runner import scrub_sensitive
+
+    values = {key: f"LEAKME-{i}" for i, key in enumerate(_TOKEN_CREDENTIAL_KEYS)}
+    scrubbed = scrub_sensitive({"config": dict(values), "nested": [{"deep": dict(values)}]})
+    dumped = json.dumps(scrubbed)
+    assert "LEAKME" not in dumped
+    assert isinstance(scrubbed, dict)
+    config = scrubbed["config"]
+    assert isinstance(config, dict)
+    for key in _TOKEN_CREDENTIAL_KEYS:
+        assert config[key] == "***REDACTED***", key
+    # A credential-like key is redacted whatever its value is: a number or a list included.
+    for key in _TOKEN_CREDENTIAL_KEYS:
+        assert scrub_sensitive({key: 123456}) == {key: "***REDACTED***"}, key
+        assert scrub_sensitive({key: ["LEAKME-a"]}) == {key: "***REDACTED***"}, key
+
+
+def test_scrub_sensitive_redacts_a_budget_key_whose_value_is_not_a_number() -> None:
+    """When in doubt, redact: a budget key is shown only while its value is a plain number.
+
+    A string, a mapping, a list, a boolean or a null under ``max_tokens`` is not a token count,
+    whatever the key says, so it gets the same treatment as any other key containing ``token``.
+    """
+    from latence_core.runner import scrub_sensitive
+
+    not_numbers: tuple[object, ...] = (
+        "LEAKME-string",
+        "4096",
+        {"inner": "LEAKME-mapping"},
+        ["LEAKME-list"],
+        True,
+        None,
+    )
+    for key in _TOKEN_BUDGET_KEYS:
+        for value in not_numbers:
+            assert scrub_sensitive({key: value}) == {key: "***REDACTED***"}, (key, value)
+
+
+def test_manifest_shows_the_chunk_budget_and_hides_an_inlined_token(
+    docs_dir: Path, tmp_path: Path
+) -> None:
+    """End-to-end, both directions in one manifest: the budget is readable, a credential is not."""
+    store = f"file://{tmp_path}/store"
+    leaked = "LEAKME-DO-NOT-PERSIST"
+    p = Pipeline.from_yaml_text(
+        f"""
+name: t
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs_dir}'}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {{max_tokens: 256, overlap_tokens: 32, min_tokens: 8}}
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [chunk]
+"""
+    )
+    # Added after parsing so no credential-shaped line sits in this file.
+    credential_key = "_".join(("auth", "token"))
+    p.stages[2].config[credential_key] = leaked
+    LocalRunner().run(p, run_id="r1")
+    s = Storage.for_uri(store)
+    text = s.read_text(f"{store}/_latence/runs/r1/manifest.json")
+    assert leaked not in text
+    manifest = json.loads(text)
+    chunk = next(stage for stage in manifest["pipeline"]["stages"] if stage["name"] == "chunk")
+    assert chunk["config"] == {
+        "max_tokens": 256,
+        "overlap_tokens": 32,
+        "min_tokens": 8,
+        credential_key: "***REDACTED***",
+    }

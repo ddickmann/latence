@@ -23,22 +23,20 @@ Every file is byte-stable (records are emitted in the order Graph Assembly produ
 node-id then edge-id order — and every attribute is written in a fixed order), so a seeded
 run is reproducible (Baseline bar). The file set is also published **atomically as a set**
 (one :meth:`~latence_core.storage.Storage.atomic_writers` publication, the same discipline as
-the S1 corpus exporter): a consumer pairing the parquet with the TTL/KV can never observe a
+the S1 corpus exporter): a consumer pairing the parquet with the TTL can never observe a
 half-published set — a crash mid-export leaves the previous complete set, never a torn file
-and never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv``. The Provider is a
+and never a new ``graph.ttl`` beside a stale ``graph-nodes.parquet``. The Provider is a
 pass-through sink: it returns its input records unchanged so the Runner can checkpoint them,
 exactly like the S1 exporter.
 
-**Redaction posture — this export applies no redaction gate, deliberately.** It is the one
-KG surface that carries readable entity names, and the asymmetry against
-:attr:`~latence_core.contracts.GraphHyperedge.tau_text` (redacted at its writer per ADR-0057)
-is intended, not an omission:
+**Redaction posture — this export applies no redaction gate, deliberately.** It carries
+readable entity names while the exported corpus carries the masked text, and that asymmetry is
+intended, not an omission:
 
-* a graph whose nodes are all ``[PERSON]`` is a graph about nobody — resolution,
-  disambiguation and graph-RAG expansion all degrade in proportion to what was masked; and
-* masking the label would COLLIDE the graph: every person node would normalise to the single
-  alias key ``a|person`` in the ADR-0056 KV, so the alias keyspace would stop being a lookup,
-  and ``canonical_name`` (``min_length=1``) cannot simply be emptied.
+* a graph whose nodes are all ``[PERSON]`` is a graph about nobody — resolution and
+  disambiguation degrade in proportion to what was masked; and
+* masking the label would COLLIDE the graph: every person node would carry the same name, and
+  ``canonical_name`` (``min_length=1``) cannot simply be emptied.
 
 The lever is UPSTREAM and structural, not a knob here: ``extract_on: masked`` (W18, ADR-0044)
 redirects the extraction Stages to read ``masked_content``, so PII never reaches extraction and
@@ -46,7 +44,7 @@ therefore never reaches the graph at all — and the Pipeline validator refuses 
 the extraction Stages transitively depend on a redaction Stage, so it cannot be set without the
 ordering that makes it true. A span-symmetric gate could not live here in any case: this Stage
 receives only :class:`~latence_core.contracts.GraphRecord`s — no chunk text, no ``pii_spans``,
-no ``masked_content`` — so it holds none of the evidence the ``tau_text`` gate acts on.
+no ``masked_content`` — so it holds none of the evidence a span-level gate would act on.
 
 Under the default ``extract_on: unmasked`` posture the exact surfaces that carry the real
 surface string are listed on :class:`KnowledgeGraphExport`. When a redaction Stage IS wired
@@ -67,7 +65,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from latence_core.contracts import GraphRecord, GraphScope
-from latence_core.hyperedge_store import build_store_bytes, store_entries
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
@@ -78,7 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import IO
 
-    from latence_core.contracts import GraphEdge, GraphHyperedge, GraphNode, Record
+    from latence_core.contracts import GraphEdge, GraphNode, Record
     from latence_core.storage import Storage
 
 # The base IRI the TTL/GraphML node and predicate identifiers hang off. A non-dereferenceable
@@ -103,16 +100,6 @@ def _scrub(value: str) -> str:
     return _XML_ILLEGAL.sub("", value)
 
 
-def _feature_float(value: Any) -> float | None:
-    """A stamped graph-feature centrality as a float column cell (None if absent/malformed)."""
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def _feature_str(value: Any) -> str | None:
-    """A stamped graph-feature community id as a string column cell (None if absent/malformed)."""
-    return value if isinstance(value, str) else None
-
-
 class KnowledgeGraphExport:
     """Export Provider writing the KG as Parquet + TTL + GraphML (ADR-0017).
 
@@ -124,21 +111,15 @@ class KnowledgeGraphExport:
     records). An empty graph writes valid empty files (headers only), never an error.
 
     **What this export does and does not redact** (the module docstring records the decision;
-    this is the surface list it turns on). ``GraphHyperedge.tau_text`` — in
-    ``graph-hyperedges.parquet`` and the KV's ``t|`` keyspace — IS the corpus redaction variant,
-    enforced upstream at its writer (ADR-0057). ``GraphNode.canonical_name`` is NOT, so under the
-    default ``extract_on: unmasked`` posture the REAL surface string is written to all six of:
+    this is the surface list it turns on). ``GraphNode.canonical_name`` is NOT the corpus
+    redaction variant, so under the default ``extract_on: unmasked`` posture the REAL surface
+    string is written to all four of:
 
     * ``<stem>-nodes.parquet`` → the ``canonical_name`` column;
     * ``<stem>-nodes.parquet`` → the ``evidence`` column, whose ``snippet`` Graph Assembly
       renders as ``node '<canonical_name>' (<label>) from N mention(s)``;
     * ``<stem>.ttl`` → each node's ``rdfs:label`` literal;
-    * ``<stem>.graphml`` → each node's ``<data key="label">``;
-    * ``<stem>-hyperedges.kv`` → the ``a|`` alias keyspace, normalised
-      (:func:`~latence_core.hyperedge_store.normalize_alias`);
-    * ``<stem>-nodes.parquet`` → the ``properties`` column's ``description``, on the
-      hyperedge-configured path: it opens ``<canonical_name> — <label>`` and its relation
-      contexts name the NEIGHBOUR nodes' canonical names too (``_stamp_hyperedge_descriptions``).
+    * ``<stem>.graphml`` → each node's ``<data key="label">``.
 
     Choose the posture deliberately with ``extract_on``; there is no knob on this Stage that
     changes the above.
@@ -172,22 +153,18 @@ class KnowledgeGraphExport:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self._basename = str(config.get("basename", "graph"))
-        # ADR-0056: within the (already opt-in) hyperedge path, the KV ships by default —
-        # the strong configuration is the default, the cheap mode is the documented opt-out.
-        self._hyperedge_kv = bool(config.get("hyperedge_kv", True))
 
     @property
     def exports_entity_names(self) -> bool:
         """True: this Export writes readable entity names, so the Runner may warn about them.
 
-        The Runner checks this attribute (absent/False on every other Provider — the same
-        additive duck-typed seam as
-        :attr:`~latence_core.stages.graph_assembly.CanonicalGraphAssembler.wants_document_streams`,
-        no Capability-protocol change) and, when a redaction Stage is wired under the default
-        ``extract_on: unmasked`` posture, logs :data:`~latence_core.runner.KG_ENTITY_NAMES_WARNING`
-        once — the "your corpus is masked but your graph is not" case. The Provider cannot raise
-        that warning itself: it sees only GraphRecords, so it knows neither the extraction posture
-        nor whether anything upstream was redacted.
+        The Runner checks this attribute (absent/False on every other Provider — an additive
+        duck-typed seam, no Capability-protocol change) and, when a redaction Stage is wired under
+        the default ``extract_on: unmasked`` posture, logs
+        :data:`~latence_core.runner.KG_ENTITY_NAMES_WARNING` once — the "your corpus is masked but
+        your graph is not" case. The Provider cannot raise that warning itself: it sees only
+        GraphRecords, so it knows neither the extraction posture nor whether anything upstream
+        was redacted.
 
         A third-party KG Export that also materializes ``canonical_name`` should declare this too;
         one that pseudonymises or drops names should not.
@@ -199,18 +176,14 @@ class KnowledgeGraphExport:
         # form did ``list(records)`` and then three filtering passes over it, so every
         # ``GraphRecord`` envelope stayed alive alongside the inner record it carries for the
         # whole export. At UDA scale that is 1 263 672 envelopes on top of the 516 512 nodes /
-        # ~90 k edges / hyperedges actually needed — the envelopes alone OOM-killed the run
+        # ~90 k edges actually needed — the envelopes alone OOM-killed the run
         # inside a 29 GB container. Partitioning in a single pass keeps ONLY the inner records
         # (the envelope becomes garbage immediately), and consuming ``records`` exactly once is
         # what lets the Runner hand this Stage a lazy stream instead of a gathered corpus list
         # (:data:`~latence_core.capability_descriptor.STREAMED_INPUT_KINDS`). Output is unchanged:
-        # the three lists hold the same objects, in the same order, as the comprehensions did.
+        # the two lists hold the same objects, in the same order, as the comprehensions did.
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
-        # ADR-0057: the OPTIONAL Hyperedge stream. Present only when Graph Assembly was
-        # configured for hyperedges; an unconfigured stack collects an empty list and the
-        # export output — files, names, bytes — is identical to today.
-        hyperedges: list[GraphHyperedge] = []
         for r in records:
             if not isinstance(r, GraphRecord):
                 continue
@@ -218,57 +191,35 @@ class KnowledgeGraphExport:
                 nodes.append(r.node)
             elif r.scope is GraphScope.EDGE and r.edge is not None:
                 edges.append(r.edge)
-            elif r.scope is GraphScope.HYPEREDGE and r.hyperedge is not None:
-                hyperedges.append(r.hyperedge)
         base = out_dir.rstrip("/")
         stem = self._basename
 
-        # The KG deliverable is ONE file set — a downstream consumer (the ADR-0056 KV reader,
-        # a graph-RAG loader pairing parquet with TTL) treats these files as one graph, so they
+        # The KG deliverable is ONE file set — a downstream consumer (a loader pairing parquet
+        # with TTL) treats these files as one graph, so they
         # ride ONE :meth:`Storage.atomic_writers` publication, exactly like the corpus Export's
         # jsonl/parquet set: every file streams into its own temp sibling (parent dir created by
         # the publication, not here), not one byte is published until every stream has closed
         # cleanly, and a crash mid-set sweeps the temps and leaves the previous complete set —
-        # never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv`` (the silent divergence
-        # ADR-0061 §2 forbids). The full set is known up front (the record pass above already
-        # partitioned the stream), so the optional hyperedge files join the same publication.
+        # never a new ``graph.ttl`` beside a stale ``graph-nodes.parquet`` (the silent divergence
+        # ADR-0061 §2 forbids).
         uris = [
             f"{base}/{stem}-nodes.parquet",
             f"{base}/{stem}-edges.parquet",
             f"{base}/{stem}.ttl",
             f"{base}/{stem}.graphml",
         ]
-        if hyperedges:
-            uris.append(f"{base}/{stem}-hyperedges.parquet")
-            # ADR-0056: the derived point-lookup KV the online path reads per call —
-            # rebuildable from the parquet above (the durable form), written beside it so
-            # the sidecar ships complete. Disable with ``hyperedge_kv: false`` to rebuild
-            # downstream instead; either way an unconfigured stack (no HYPEREDGE records)
-            # writes nothing and is byte-identical to before the feature existed.
-            if self._hyperedge_kv:
-                uris.append(f"{base}/{stem}-hyperedges.kv")
 
         with storage.atomic_writers(uris) as streams:
             self._write_nodes_parquet(nodes, streams[0])
             self._write_edges_parquet(edges, streams[1])
             streams[2].write(self._render_ttl(nodes, edges).encode("utf-8"))
             streams[3].write(self._render_graphml(nodes, edges).encode("utf-8"))
-            if hyperedges:
-                self._write_hyperedges_parquet(hyperedges, streams[4])
-                if self._hyperedge_kv:
-                    streams[5].write(build_store_bytes(store_entries(hyperedges, nodes)))
         return uris
 
     # -- Parquet ------------------------------------------------------------
 
     @staticmethod
     def _write_nodes_parquet(nodes: list[GraphNode], fh: IO[bytes]) -> None:
-        # ADR-0051: promote the graph-feature enrichment to FIRST-CLASS ``centrality`` (double) +
-        # ``community`` (string) columns — the shape the Knapsack packer / a graph-aware ranker
-        # reads directly (they also ride the ``properties`` JSON; this is the consumable view).
-        # Added ONLY when a node carries them (the assembler stamped features), so the schema is
-        # byte-identical to today when the enrichment is off (the genuinely-optional guarantee).
-        has_features = any("centrality" in n.properties for n in nodes)
         flat = [
             {
                 "node_id": n.node_id,
@@ -285,14 +236,6 @@ class KnowledgeGraphExport:
                 "source_document_ids": json.dumps(n.source_document_ids, sort_keys=True),
                 "properties": json.dumps(n.properties, sort_keys=True),
                 "evidence": json.dumps(n.evidence.model_dump(mode="json"), sort_keys=True),
-                **(
-                    {
-                        "centrality": _feature_float(n.properties.get("centrality")),
-                        "community": _feature_str(n.properties.get("community")),
-                    }
-                    if has_features
-                    else {}
-                ),
             }
             for n in nodes
         ]
@@ -308,9 +251,6 @@ class KnowledgeGraphExport:
             ("properties", pa.string()),
             ("evidence", pa.string()),
         ]
-        if has_features:
-            fields.append(("centrality", pa.float64()))
-            fields.append(("community", pa.string()))
         table = pa.Table.from_pylist(flat, schema=pa.schema(fields))
         pq.write_table(table, fh)  # type: ignore[no-untyped-call]
 
@@ -337,55 +277,6 @@ class KnowledgeGraphExport:
                 ("target_node_id", pa.string()),
                 ("label", pa.string()),
                 ("confidence", pa.float64()),
-                ("properties", pa.string()),
-                ("evidence", pa.string()),
-            ]
-        )
-        table = pa.Table.from_pylist(flat, schema=schema)
-        pq.write_table(table, fh)  # type: ignore[no-untyped-call]
-
-    @staticmethod
-    def _write_hyperedges_parquet(hyperedges: list[GraphHyperedge], fh: IO[bytes]) -> None:
-        # ADR-0057/0056: the solver-facing columns are FIRST-CLASS (token_cost, gamma, support,
-        # has_relations, token_counter — everything the chain-of-evidence selector reads),
-        # entity/relation sets ride as JSON like every other list column in this export.
-        flat = [
-            {
-                "hyperedge_id": h.hyperedge_id,
-                "entity_node_ids": json.dumps(h.entity_node_ids, sort_keys=True),
-                "relations": json.dumps(
-                    [r.model_dump(mode="json") for r in h.relations], sort_keys=True
-                ),
-                "tau_text": h.tau_text,
-                "token_cost": h.token_cost,
-                "token_counter": h.token_counter,
-                "gamma": h.gamma,
-                "support": h.support,
-                "has_relations": h.has_relations,
-                "arity": h.arity,
-                "member_mention_ids": json.dumps(h.member_mention_ids, sort_keys=True),
-                "merged_sources": json.dumps(
-                    [m.model_dump(mode="json") for m in h.merged_sources], sort_keys=True
-                ),
-                "properties": json.dumps(h.properties, sort_keys=True),
-                "evidence": json.dumps(h.evidence.model_dump(mode="json"), sort_keys=True),
-            }
-            for h in hyperedges
-        ]
-        schema = pa.schema(
-            [
-                ("hyperedge_id", pa.string()),
-                ("entity_node_ids", pa.string()),
-                ("relations", pa.string()),
-                ("tau_text", pa.string()),
-                ("token_cost", pa.int64()),
-                ("token_counter", pa.string()),
-                ("gamma", pa.float64()),
-                ("support", pa.int64()),
-                ("has_relations", pa.bool_()),
-                ("arity", pa.int64()),
-                ("member_mention_ids", pa.string()),
-                ("merged_sources", pa.string()),
                 ("properties", pa.string()),
                 ("evidence", pa.string()),
             ]

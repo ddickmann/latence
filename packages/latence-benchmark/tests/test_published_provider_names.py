@@ -30,7 +30,7 @@ _BENCHMARK_SRC = _PACKAGES / "latence-benchmark" / "src" / "latence_benchmark"
 #: ``--provider foo.bar`` as written in prose/notes, optionally wrapped in backticks.
 _PROVIDER_FLAG = re.compile(r"--provider\s+`?([a-z0-9_]+\.[a-z0-9_]+)`?")
 
-_ENTRY_POINT_GROUPS = ("latence.providers", "latence.retrieval")
+_ENTRY_POINT_GROUPS = ("latence.providers",)
 
 
 def _declared_provider_names() -> set[str]:

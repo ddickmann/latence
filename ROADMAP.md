@@ -7,6 +7,14 @@ from what is not, and [`docs/adr/`](./docs/adr/) records *why* each architectura
 Planning happens in the open from here: **GitHub Issues** for concrete work, **Discussions** for
 direction.
 
+The direction changed with two decisions.
+[ADR-0067](./docs/adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md)
+re-scopes the project: from a framework that turns documents into AI-ready data, into an engine
+that builds a traceable semantic and ontology layer.
+[ADR-0068](./docs/adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md)
+removed the query-time retrieval tooling. [What is built](#what-is-built) describes the tree after
+that removal. [What is next](#what-is-next) is the re-scope, and none of it is built.
+
 ## What is built
 
 Everything below runs today, is exercised by the test suite, and is reachable from the CLI or the
@@ -14,44 +22,44 @@ library API. "Built" means *wired end to end and covered by tests*, not *proven 
 [Known limitations](#known-limitations).
 
 **Getting documents in.** A Source seam with a local-folder reference implementation and a
-dependency-free SharePoint/OneDrive connector. Intake screening quarantines dangerous files (zip
-bombs, oversized dumps, type spoofing) *before* anything parses them, and flags prompt-injection
-content into the corpus rather than silently dropping it. Parsers cover plain text, PDFs
-(text-layer and page-aware), a license-clean universal renderer, and several VLM-OCR models —
-in-process or behind an HTTP endpoint — and every one emits a page map, so a character offset
-resolves back to a source page.
+SharePoint/OneDrive connector that has no third-party dependency. Intake screening quarantines
+dangerous files (zip bombs, oversized files, type spoofing) *before* anything parses them. Content
+screening flags prompt-injection and harmful-content hits on the chunk and, by default, keeps the
+chunk in the corpus with the marker rather than dropping it. Parsers cover plain text, PDFs
+(text-layer and page-aware), a universal renderer free of AGPL code, and VLM-OCR models —
+in-process or behind an HTTP endpoint — and each emits a page map, so a character offset resolves
+back to a source page.
 
 **Extraction and privacy.** Zero-shot entity extraction; relation extraction that is
-pattern-based, model-based, fused entity+relation, or LLM-backed; schema induction; and PII
-redaction with a rule-based floor no model choice can bypass. Redaction runs before anything
-downstream sees the text, and derived artifacts inherit the redacted variant by construction.
+pattern-based, model-based, fused entity+relation, or LLM-backed; schema induction, per chunk by
+a small LLM or from an operator-declared candidate type space with no network; and PII redaction
+with a rule-based floor no model choice can bypass. The corpus export writes the masked text
+unless an option named `unsafe_unmasked_corpus` is set.
 
-**From chunks to a knowledge graph.** Offset-preserving chunking, corpus profiling, entity
-disambiguation, canonical graph assembly with per-edge Evidence, learned graph completion (an
-inductive link-prediction Provider alongside a deterministic closure reference), and context
-enrichment that projects graph structure back onto chunks.
+**From chunks to a knowledge graph.** Offset-preserving chunking, corpus profiling,
+canonicalisation of the type vocabulary, entity disambiguation with an audited merge log (a merge
+below the confidence policy is recorded and not applied), canonical graph assembly with per-edge
+Evidence, and optional graph completion: a learned inductive link-prediction Provider alongside a
+deterministic closure reference. A predicted edge is marked as inferred and stays distinct from
+the asserted ones.
 
-**What a run leaves behind.** Parquet and JSONL corpus files, graph node/edge tables, RDF and
-GraphML exports, BM25 term statistics, a machine- and human-readable Quality Report, and a
-manifest of the pipeline that produced the run with credentials redacted. Every record carries
-Provenance and Classification, validated at each Stage boundary.
+**What a run leaves behind.** Parquet and JSONL corpus files, graph node and edge tables, RDF
+Turtle and GraphML exports, a machine- and human-readable Quality Report, and a manifest of the
+pipeline that produced the run with credentials redacted. The corpus Parquet can also be
+registered as a table in an Iceberg REST catalog. When an Embedder is wired, each corpus row
+carries a dense embedding. Every record carries Provenance and Classification, validated at each
+Stage boundary.
 
-**Retrieval quality without a retrieval engine.** A stateless query-time library that fuses ranked
-lists, reranks with a cross-encoder, packs a token-budgeted context window, and expands over the
-knowledge graph (1-hop over columns, or multi-hop over the exported Parquet with no graph database).
-At index time it emits a structured SPLADE sparse signal and optional multi-vector/FDE encodings. An
-MCP server exposes all of it to agents, with agent-facing copy loaded from operator config rather
-than baked in. It holds no index and runs no first-stage search — that always stays the adopter's
-engine ([`docs/retrieval-tooling.md`](./docs/retrieval-tooling.md)).
+**Running it.** A local Runner with checkpoint/resume, an Airflow adapter running the identical
+Stages as a DAG, incremental ingest with delta detection, retraction and purge, one fsspec
+Storage seam covering local, S3, GCS and Azure, a read-only run console for non-engineers, a
+guided setup that writes a validated stack config, a tuner for the heavy Providers' performance
+knobs, and reproducible environment specs.
 
-**Hypergraph evidence and chain-of-evidence selection.** Sentence-window hyperedges emitted as an
-engine-agnostic sidecar, query-aware confidence propagation, and a greedy selector that assembles a
-token-budgeted chain of evidence. No LLM call in indexing or the online path.
-
-**Running it.** A local Runner with checkpoint/resume (verified against a process killed
-mid-checkpoint-write), an Airflow adapter running the identical Stages as a DAG, incremental ingest
-with delta detection and retraction/purge, one fsspec Storage seam covering local, S3, GCS and
-Azure, a read-only run console for non-engineers, and a benchmark harness.
+**Measuring it.** A gold-set harness that scores a run's entities and relations against an
+adopter's own annotated documents, a labelling tool for question gold sets with supporting-fact
+spans over an exported corpus, a benchmark harness with per-Stage suites, and a staged benchmark
+campaign that acquires public corpora behind a licence gate.
 
 **Making "model-agnostic" checkable.** Every Provider declares its compute footprint and verified
 weights-and-code license, and a conformance suite runs over *every* registered Provider — typed
@@ -62,63 +70,76 @@ per-Stage bake-offs compare Providers on one corpus
 
 ## What is next
 
-Rough priority order, not a schedule. Nothing here is committed to a release.
+Rough priority order, not a schedule. Nothing here is committed to a release, and nothing here is
+built: each item is an intention recorded in an accepted decision.
 
-1. **Close out the extraction-quality work.** The items under [Known limitations](#known-limitations)
-   are the active queue, and the highest-value work in the project: every downstream artifact
-   inherits extraction quality.
-2. **Run the pinned end-to-end benchmark protocol.** [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md)
-   already fixes the hardware, corpus, hop stratification and ablations; every number in it is still
-   a placeholder, and a number from a different corpus would be worse than a missing one.
-3. **Second reference Providers** for Capabilities that still have only one — a seam with a single
-   implementation is a claim, not a proof.
-4. **Formal ontology induction** — concepts, taxonomy and axioms over the assembled graph, exported
-   as SHACL shapes and OWL. Designed and scoped; not built.
-5. **More Source connectors** — Confluence, Google Drive, SQL and chat systems, on the seam the
-   SharePoint connector already uses.
-6. **More retrieval backend adapters.** Qdrant is the reference; the adapter contract is written
-   down so Databricks, Azure AI Search and Elastic can follow.
-7. **Context compression** as a Capability, for token-budget-constrained RAG.
-8. **Groundedness scoring** — scoring a generated answer against the corpus it should have come
-   from, with cited evidence spans.
-9. **Remote MCP transport.** The MCP server is loopback + bearer token today; remote transport is a
-   deliberate follow-on, not an oversight.
+1. **Generalise the contracts.** A structured locator next to character offsets, and an actor on
+   every decision, so that a statement can come from a catalog object as well as from a span of
+   text. This changes the record contracts
+   ([ADR-0067](./docs/adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md)).
+2. **Make the semantic layer a replay of a ledger.** Statements harvested from sources and the
+   decisions made on top of them are kept append-only; the layer anyone reads is rebuilt by
+   replaying them, so a human decision survives every rebuild and delta run
+   ([ADR-0069](./docs/adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md)).
+3. **Read warehouse metadata as an input.** Catalog metadata, metric views, lineage and existing
+   glossaries enter the same Pipeline as new Source kinds and meet the text path in one
+   resolution phase. Databricks Unity Catalog comes first. Row values are compared inside the
+   customer's own workspace and do not leave it
+   ([ADR-0071](./docs/adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md)).
+4. **Calibrate resolution.** The engine accepts an instance-level merge or link by itself only
+   inside a calibrated accept band. Everything outside that band is a proposal an expert accepts
+   or rejects, and a human decision outranks the engine (ADR-0069). The bars a release must meet
+   are Gate 6 of [`RELEASE-GATES.md`](./RELEASE-GATES.md).
+5. **Re-select the extraction stack.** The text path stays. Its extraction Providers are chosen
+   again by measurement against a recorded baseline (ADR-0067).
+6. **Induce the schema level and export it in standards.** Classes, hierarchy, properties and
+   constraints are proposed from several explainable signals, a proposed constraint is checked
+   against the data before a human sees it, and a human approves every schema-level element. The
+   export targets are OWL 2 QL, SHACL, SKOS and PROV-O, with opaque stable identifiers
+   ([ADR-0073](./docs/adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md)).
+7. **A Databricks Jobs Runner.** The same Pipeline executed as jobs in the customer's workspace,
+   with the ledger, the published results and the review state in Delta tables. The local Runner
+   stays for standalone use, development and CI
+   ([ADR-0072](./docs/adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md)).
+8. **An expert review surface.** One web app with two modes: deployed inside the workspace in
+   production, run locally against files for standalone use. It shows each proposal with the
+   evidence behind it (ADR-0072).
+9. **One declared seam for a consuming agent harness.** A reviewable proposal file per use case;
+   everything else reaches a consumer through the catalog
+   ([ADR-0070](./docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).
+10. **Run the pinned end-to-end benchmark protocol.** [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md)
+    fixes the hardware and the method; every value on it is still a placeholder, and a number
+    from a different corpus would be worse than a missing one.
 
 ## Known limitations
 
-Measured, or deliberately unmeasured — not speculative. This is where an evaluator should spend their
-time.
+Read from the code and from the repository's own records. This is where an evaluator should spend
+their time.
 
-- **Relation extraction fabricates.** On a judged sample of hyperedges from English encyclopedic
-  text, a majority of the relation-bearing ones carried at least one triple the source sentence
-  does not actually assert, and some relation labels are far worse than others. Queued fixes: gating
-  spans that carry a title but no predicate, filtering common-noun and pronoun mentions out of
-  entity promotion, and cell-aware segmentation so table rows are not read as prose.
-- **Confidence scores are not calibrated out of the box.** The extractor's confidence is informative
-  but is not a probability, and the high-confidence tail was the *least* reliable band in the judged
-  sample. Calibration ships as tooling you run on your own labeled sample, so an adopter who skips
-  it is working with raw scores.
-- **Entity resolution merges by surface form.** Distinct entities sharing a written form are not
-  reliably separated, and one entity written two ways is not reliably merged.
-- **Induced type vocabularies have a junk tail.** There is no minimum-support floor yet, so rare
-  spurious types survive into the graph.
-- **Chunk size silently gates hyperedge yield.** Sentence windows rarely cross chunk boundaries, so
-  a larger chunk size yields markedly fewer hyperedges from the same corpus. The coupling is
-  measured; whether it hurts retrieval is not, and no fix is built on suspicion.
-- **The chain-of-evidence retrieval gain depends on an opt-in model.** The configuration that
-  passed the evaluation gate uses an opt-in query-time NER model; the zero-model default entry
-  point does **not** pass that gate on the harder multi-hop dataset. Per-tier curves ship with the
-  results rather than being averaged away, so you can see which tier your install is on.
-- **Query-side latency for that tier is an assertion, not a measurement.** It is described as "tens
-  of milliseconds on CPU". Nobody has measured it. Treat it as unknown.
-- **Evaluation gold labels are partly LLM-generated.** The enterprise-corpus gold set and the
-  judged calibration sample were produced by a language model with provenance recorded; human
-  spot-checking is outstanding, and any number derived from them inherits the judge's errors.
-- **The graph does not help general retrieval.** Measured across three datasets, graph-expansion
-  lanes added essentially nothing to recall against a strong dense+lexical base, while costing
-  hundreds of milliseconds per query. The value is concentrated in cross-document multi-hop
-  questions that single-signal retrievers score zero on. Enable graph lanes for that class of
-  query, not for a general recall lift.
+- **The contracts assume files and character offsets.** Provenance requires a source URI, a file
+  name and a file type. Nothing in the tree reads a warehouse: the two Sources are a local folder
+  and SharePoint/OneDrive.
+- **There is no schema level.** The type vocabulary is a flat list of canonical types with their
+  aliases. It has no hierarchy, no properties and no constraints.
+- **No human decision is persisted.** The merge log records what the resolver decided. There is
+  no record type for an expert's accept or reject.
+- **Resolution is not calibrated.** The resolvers merge on rules and configured thresholds. A
+  merge decision carries a confidence, not a calibrated probability, and no accept band exists.
+- **The default resolver matches by surface form.** `disambiguation.exact_surface` merges on
+  exact normalised-surface equality and configured aliases. It will not unify two different
+  written forms of one entity without an alias. The cascade adds acronym, substring and embedding
+  rungs.
+- **The RDF export uses a private vocabulary.** `graph.ttl` is written with an `lg:` prefix under
+  a `urn:` base that does not dereference. It is valid RDF; it is not OWL, SHACL, SKOS or PROV-O.
+- **Extraction quality has one dated record and no current measurement.** In August 2026 a
+  language model judged 250 hyperedges of the earlier pipeline: 54% correct, 32% partial, 14%
+  incorrect (`benchmark/official-data/PROVENANCE.md`). That is a record of the earlier pipeline's
+  output on one corpus, and the same file lists the labels as pending a human spot-check.
+- **Evaluation gold labels are partly LLM-generated.** The enterprise-corpus gold set and that
+  judged sample were produced by a language model, with provenance recorded. Any number derived
+  from them inherits the judge's errors.
+- **The end-to-end benchmark protocol has not been run.** Every value on
+  [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md) is a placeholder.
 - **Scale is characterised, not eliminated.** The 100k and 1M-document envelopes are recorded as
   open in [`PERF-RESULTS.md`](./PERF-RESULTS.md) rather than previewed.
 - **Nothing has been released yet.** Signing and SBOM machinery is built and tested but has never
@@ -128,18 +149,20 @@ time.
 
 So nobody files it, and nobody plans around it arriving:
 
-- **A retrieval engine.** No index, no stored vectors, no standing graph service, no second
-  system of record. First-stage search always runs on the adopter's own store.
+- **Query-time retrieval.** The retrieval tooling was removed (ADR-0068). The project produces the
+  resolved graph and the processed corpus; a consumer brings its own retrieval engine. Embedders
+  stay only as a signal the resolution phase uses.
 - **A hosted service.** This is a library and a CLI that write files you own.
-- **An LLM in the indexing or online retrieval path.** LLM Providers exist for extraction where an
-  adopter picks one, but the default pipeline and every retrieval path are zero-LLM by design —
-  a constraint, not a stage of development.
-- **A general-purpose graph database or query language.** Exported Parquet plus DuckDB is the
-  zero-operations answer; Neo4j is an optional adapter for people who already run one.
+- **A second source of truth beside the warehouse catalog.** The engine is to bind to what the
+  catalog defines and send any change to it upstream as a proposal a human applies (ADR-0069).
+- **Accepting schema-level elements without a human.** Decided against, on the measured accuracy
+  of ontology learning (ADR-0069).
+- **A model that accepts by itself.** A model's verdict is a feature of the score or a suggestion
+  shown to the expert (ADR-0069).
+- **A graph database or a query language.** The graph is exported as files.
 - **Bundled model weights, or a blessed "best" model.** The framework names Capabilities, never
   models. Restricted-license models are opt-in and never a default.
-- **Answer generation.** This project builds the corpus and retrieves the evidence; what generates
-  the answer is yours.
+- **Answer generation.** What generates an answer from the layer is the consumer's.
 
 ## How to influence it
 

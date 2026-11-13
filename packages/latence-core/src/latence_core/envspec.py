@@ -1236,9 +1236,8 @@ def probe_providers(spec: EnvironmentSpec) -> EnvironmentReport:
 class StackComponent:
     """One ``provider`` + its ``config`` as a stack YAML declares it (issue #198).
 
-    Covers Stage-level components AND the nested sub-Provider components (the ``embedder`` /
-    ``sparse_embedder`` / ``multivector_embedder`` / ``fde_converter`` / ``bm25`` signal slots, the
-    Assembler's ``graph_features``, the universal Parser's ``ocr``): both are real,
+    Covers Stage-level components AND the nested sub-Provider components (the ``embedder`` slot
+    of the Export and the resolvers, the universal Parser's ``ocr``): both are real,
     separately-loaded models, and the GPU-placement probe must exercise the nested Granite embedder
     exactly as it exercises the Stage-level extractor. ``capability`` is the Stage's declared
     capability, or the nesting key for a nested component — either way it is what selects the
@@ -1256,8 +1255,8 @@ def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
     The nesting keys come from :func:`~latence_core.subprovider.declared_slot_keys` — the one
     declaration of what a nested ``{provider, config}`` block may sit under — read HERE, at walk
     time, rather than copied into a tuple in this module. That copy existed
-    (``_NESTED_COMPONENT_KEYS``) and listed three of the seven declared slots, so this walker was
-    blind to every ``ocr`` / ``fde_converter`` / ``bm25`` / ``graph_features`` sub-Provider while
+    (``_NESTED_COMPONENT_KEYS``) and did not list every declared slot, so this walker was
+    blind to every ``ocr`` sub-Provider while
     the structural :func:`stack_providers` in this same module saw them: the GPU-placement probe
     (which iterates THIS function) reported ok=True over a stack whose only GPU model was a nested
     OCR it never drove (R3-seams_real_not_hypothetical-0).
@@ -1300,9 +1299,9 @@ def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
 
 
 def stack_providers(stack_path: Path) -> set[str]:
-    """Every provider name a stack YAML references, including nested signal Providers.
+    """Every provider name a stack YAML references, including nested sub-Providers.
 
-    Nested (``embedder`` / ``sparse_embedder`` / ``multivector_embedder``) Providers are as real a
+    Nested (``embedder`` / ``ocr``) Providers are as real a
     part of the environment as the Stage ones — the pod post-mortems were full of nested-embedder
     surprises — so the walk is structural rather than a fixed key list.
     """

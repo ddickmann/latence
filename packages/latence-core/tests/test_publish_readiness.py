@@ -579,7 +579,7 @@ def test_no_package_readme_claims_its_own_code_is_polyform_or_noncommercial() ->
 
     Third-party statements stay legal, and that is what keeps this gate honest rather
     than a blanket word-ban: `latence-benchmark` documents research-only corpora
-    (OmniDocBench) and `naver/splade-v3`'s CC-BY-NC-SA-4.0 weights, and those really are
+    (OmniDocBench), and those really are
     noncommercial — the framework's outbound licence does not change a third party's
     terms. So the patterns match claims about *this* code (framework code, this package,
     the repository-wide licence), never the word "noncommercial" on its own.
@@ -635,38 +635,6 @@ def test_every_declared_file_licence_is_the_outbound_licence() -> None:
         + f"{_SUPERSEDED_SPDX_LICENSE}, it is a leftover from the 2026-07-29 relicence; flip "
         "it. If a genuine exception is ever wanted, it must be decided in an ADR, stated in "
         "the file, and pinned here — not left to be discovered by a scanner."
-    )
-
-
-def test_pack_keeps_its_inbound_provenance_distinct_from_the_outbound_grant() -> None:
-    """``pack.py`` carries TWO licence claims. Conflating them would break both.
-
-    *Inbound provenance* — the QKP packer derives from the maintainer's own ``colsearch``
-    project and was relicensed Apache-2.0 for this use — answers "where did this code come
-    from, and was it clean to take". *Outbound grant* — this file is licensed Apache-2.0 —
-    answers "what may you do with it". They are independent: the inbound record would
-    still be true if the file were PolyForm (it was, from 2026-07-29 to 2026-08-15, and
-    the record did not change), and the outbound grant would still be the owner's to make
-    if the code had been written from scratch here.
-
-    Now that the outbound licence is Apache-2.0 the two claims name the SAME identifier,
-    which makes conflating them easier, not harder — the sentence "this is Apache-2.0"
-    is true twice over for two unrelated reasons, and collapsing it once would silently
-    delete the only record that the port was clean to take. So both must be present and
-    both must stay labelled.
-    """
-    header = "\n".join(
-        (_REPO_ROOT / "packages/latence-retrieval/src/latence_retrieval/pack.py")
-        .read_text(encoding="utf-8")
-        .splitlines()[:_SPDX_HEADER_LINES]
-    )
-    assert "colsearch" in header and "relicensed Apache-2.0 for this use" in header, (
-        "pack.py lost the INBOUND provenance record for the ported QKP packer"
-    )
-    assert "OUTBOUND" in header and "INBOUND" in header, (
-        "pack.py states both licence claims but does not label which is which — the one "
-        "shape that lets a reader mistake 'we were allowed to take this' for 'you are "
-        "allowed to take this'"
     )
 
 
@@ -896,13 +864,11 @@ def test_project_urls_did_not_swallow_dependencies() -> None:
     vanishes from `project`. Assert every package still exposes its declared
     dependencies (all depend on latence-core except the standalone root libraries).
     """
-    # The two workspace ROOTS that intentionally declare no latence-core dependency:
-    # latence-core itself, and latence-retrieval — the SEPARATE stateless downstream
-    # query-time library (ADR-0048/0049), a thin pure-Python root (only pydantic) that an
-    # adopter installs à la carte without pulling the pipeline. Both still must expose a
-    # non-empty [project.dependencies] (the footgun guard) — they are exempt only from the
+    # The workspace ROOT that intentionally declares no latence-core dependency:
+    # latence-core itself. It still must expose a
+    # non-empty [project.dependencies] (the footgun guard) — it is exempt only from the
     # latence-core-edge proxy, not from the "dependencies survived parsing" check.
-    _standalone_roots = {"latence-core", "latence-retrieval"}
+    _standalone_roots = {"latence-core"}
     # Packages that are DELIBERATELY dependency-free, where `dependencies = []` is the
     # declared design and not a parsing casualty: latence-label-profiler is a build-time
     # corpus analysis tool whose whole claim (zero network, zero cost, zero model,
@@ -941,6 +907,34 @@ def test_secrets_baseline_is_audited_clean() -> None:
         if item.get("is_secret") is not False
     ]
     assert not unaudited, f"un-audited or true-positive secret findings: {unaudited}"
+
+
+def test_a_hung_test_job_ends_with_a_traceback_not_in_silence() -> None:
+    """A test job that hangs must stop within a bounded time and say where it was.
+
+    On 2026-11-10 two legs of the test matrix stalled on unrelated commits: one ended after 56
+    minutes with no downloadable log, one was still running after 75 minutes, where a healthy
+    leg takes 30 to 48. Without a job timeout a stalled leg holds the run for GitHub's default
+    of six hours, and without a per-test watchdog it leaves nothing that names the test.
+
+    Two settings close that: ``timeout-minutes`` on the ``test`` job, and pytest's
+    ``faulthandler_timeout``, which dumps every thread's traceback into the log when one test
+    runs longer than the limit (it does not fail the test). The watchdog has to fire well
+    before the job is cut off, or the dump is never written.
+    """
+    job = yaml.safe_load(_CI_WORKFLOW.read_text())["jobs"]["test"]
+    minutes = job.get("timeout-minutes")
+    assert isinstance(minutes, int) and 60 <= minutes <= 120, (
+        "ci.yml job `test` needs `timeout-minutes` between 60 and 120: long enough for a "
+        f"healthy leg (about 48 minutes), short enough that a hang is noticed. Found {minutes!r}."
+    )
+    ini = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    watchdog = ini.get("faulthandler_timeout")
+    assert isinstance(watchdog, int) and 0 < watchdog * 2 <= minutes * 60, (
+        "pyproject.toml [tool.pytest.ini_options] needs `faulthandler_timeout` (seconds), at "
+        f"most half the job's {minutes} minutes, so a stuck test is named in the log. "
+        f"Found {watchdog!r}."
+    )
 
 
 def test_ci_secret_scan_uses_a_baseline_tolerant_gate() -> None:
@@ -1031,7 +1025,7 @@ def test_verify_local_mirrors_ci_lint_scope() -> None:
     )
     # Not satisfiable by an empty or one-path scope: the harnesses and scripts/ are the
     # paths that were missing, so name them.
-    for required in ("packages", "benchmark/s5", "scripts"):
+    for required in ("packages", "benchmark/sota-campaign", "scripts"):
         assert required in scope, f"verify-local.sh's ruff scope no longer covers {required}"
 
 
@@ -1044,6 +1038,26 @@ def test_secret_scan_gate_script_exists_and_is_wired() -> None:
     # only pass findings a human audited is_secret==false.
     assert "hashed_secret" in body
     assert "is_secret" in body
+
+
+def test_secret_scan_gate_does_not_depend_on_the_network() -> None:
+    """The gate scans with vendor verification off, so its verdict is the same everywhere.
+
+    ``detect-secrets`` verifies some key shapes by calling the vendor's API (a Stripe-shaped
+    string goes to ``api.stripe.com``). A string the vendor reports invalid is then dropped
+    from the scan. With verification on, a fixture key was dropped where the host was
+    reachable and kept where it was blocked: the same tree passed in CI and failed on a
+    machine without open internet, and every CI run sent key-shaped strings from the tree to
+    third parties. ``--no-verify`` keeps every finding and makes no call, so a fixture is
+    accounted for by an audited baseline entry, not by a network round trip.
+    """
+    body = (_REPO_ROOT / "scripts" / "secret_scan_gate.py").read_text()
+    call = re.search(r'\[\s*"detect-secrets",\s*"scan"[^\]]*\]', body)
+    assert call, "could not find the detect-secrets scan invocation in the gate script"
+    assert '"--no-verify"' in call.group(0), (
+        "the secret-scan gate must pass --no-verify: with verification on, its result "
+        "depends on whether vendor APIs are reachable"
+    )
 
 
 def test_secrets_baseline_line_numbers_are_in_range() -> None:

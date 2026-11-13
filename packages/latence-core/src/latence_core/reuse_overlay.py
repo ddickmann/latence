@@ -13,15 +13,14 @@ Both halves of the rule live here:
 
 * **where** — :func:`folds_at`: the stream of a DOCUMENT-level Stage (:func:`is_doc_level_stage`)
   that PRODUCES the carrier (:func:`stage_produces`). Never a corpus-level Stage's stream: a
-  corpus-level re-emitter (Type Consolidation, Context Enrichment) already carries the union in
+  corpus-level re-emitter (Type Consolidation) already carries the union in
   its own checkpoint, so folding again would double-count every reused record. And only the
   FIRST such stream per enumeration, so the union reaches each consumer exactly once.
 * **how** — :func:`merge_overlay_doc_ordered`: document-interleaved in source order (not
   appended), so every consumer sees ``fresh ∪ reused`` in the exact arrival order a full rebuild
-  would deliver — the resolver's first-seen display spelling, the hyperedge dedup's γ-tie-breaks
-  and ``merged_sources`` order, the profiler's last-document fields, the enriched chunk order
-  and hence the export row order (and the embedder's batch composition) all match a
-  from-scratch run byte-for-byte.
+  would deliver — the resolver's first-seen display spelling, the profiler's last-document
+  fields, the chunk order and hence the export row order (and the embedder's batch
+  composition) all match a from-scratch run byte-for-byte.
 
 What VARIES between the Runner's consumers is only (a) the *enumeration* the fold walks — a
 Stage's ``depends_on`` parents, the whole pipeline in topological order, or an Export's
@@ -206,11 +205,9 @@ class OverlayTrailer(Enum):
       union always reaches the accumulator exactly once. But a CORPUS-LEVEL parent producing
       the carrier means the union already arrived through that parent's checkpoint — appending
       would double-count — so "seen" counts producers of ANY level.
-    * ``NEVER`` — the per-carrier doc-level input (``StageInputs.stream_of`` under a PER_CARRIER
-      plan, Context Enrichment). A doc-level Stage's input contract is "its parents' records",
-      never records no parent produced: its chunk carrier always has a doc-level parent (the
-      Stage's own wiring check requires one), and its graph carrier is never in the overlay
-      (corpus-level records are not reused) — so an unclaimed overlay is dropped, exactly as the
+    * ``NEVER`` — a doc-level per-carrier input (``StageInputs.stream_of`` under a
+      non-accumulator plan). A doc-level Stage's input contract is "its parents' records",
+      never records no parent produced — so an unclaimed overlay is dropped, exactly as the
       overlay-blind eager gather would have.
     * ``ALWAYS`` — the corpus-wide gather over every Stage in topological order
       (``StageInputs.corpus_records_of``). Its contract is "every record of this carrier in the

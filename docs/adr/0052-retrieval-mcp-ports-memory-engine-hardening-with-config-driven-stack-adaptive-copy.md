@@ -1,5 +1,10 @@
 # The Retrieval MCP server ports memory_engine's hardening, wraps a bring-your-own backend, and pulls all agent-facing copy from operator config at runtime
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 The optional MCP server (`latence-retrieval-mcp`) is a **stack-agnostic, stateless orchestrator**: it
 wraps the *customer's* retrieval engine (via the `RetrievalBackend` adapter) with the query-time tooling
 and exposes it as MCP tools for agentic search. It **ports the security / reliability / observability

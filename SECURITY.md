@@ -186,8 +186,10 @@ These are implemented and covered by tests, not aspirational:
 - **Secret scrubbing** — the run manifest persists the whole Pipeline verbatim, so any config
   key whose name looks like a secret (`api_key`, `token`, `secret`, `password`, `credential`,
   …) has its **value** replaced with `***REDACTED***` before the manifest is written. Inlined
-  values and environment-variable references alike. No secret is written to `manifest.json`
-  or to logs. Contributors: the repository also runs a `detect-secrets` gate over the tree,
+  values and environment-variable references alike. The one exception is a closed list of
+  token-count keys (`max_tokens`, `min_tokens`, `overlap_tokens`, `max_new_tokens`,
+  `microbatch_token_budget`), shown only while the value is a number. No secret is written to
+  `manifest.json` or to logs. Contributors: the repository also runs a `detect-secrets` gate over the tree,
   and `.env*`, `*.pem`, `*.key` and `.pypirc` are git-ignored.
 - **No unsafe deserialization** — contracts are Pydantic-validated at every Stage boundary;
   there is no `pickle` or `eval` of external data; exports are Parquet, JSONL, TTL and

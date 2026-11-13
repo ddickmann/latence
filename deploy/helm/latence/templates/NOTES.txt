@@ -16,7 +16,8 @@ Next steps:
 {{- else }}
        kubectl -n {{ .Release.Namespace }} logs job/{{ include "latence.fullname" . }}-run -f
 {{- end }}
-  4. The RAG corpus + KG + Quality Report land under /data/out on the data PVC.
+  4. The corpus export and the Quality Report land under /data/out on the data PVC. The default
+     stack has no graph Stage, so it writes no knowledge graph.
 
 Secrets: endpoint keys are env-only and REFERENCED, never embedded. See docs/secrets.md.
 Air-gapped: pre-cache the model into the hf-cache PVC and set HF_HUB_OFFLINE=1. See docs/deployment.md.

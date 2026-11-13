@@ -14,7 +14,7 @@
   ONE Stage, writing a signed-style ``MATRIX-RESULTS-<stage>.md`` + a JSON companion with
   per-candidate quality/latency/memory/cost/license/determinism/error-rate (ADR-0036 §4, P3-F5).
 * ``latence tune <stack.yaml>`` — profile the device, sweep each heavy Provider's perf knobs
-  over a small real sample under a HARD correctness gate (reject any setting that crashes —
+  on timed runs of the whole stack under a HARD correctness gate (reject any setting that crashes —
   incl. inference-time ``BackendCompilerFailed`` — or changes output), pick the fastest eligible
   per Provider, and write a device-fingerprinted ``tuned/<device>.yaml`` + an honest report
   (winners AND rejected knobs). ``latence run --tuned tuned/<device>.yaml`` overlays it ONLY on
@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from latence_core.errors import LatenceError, error_category
+from latence_core.errors import ConfigError, LatenceError, error_category
 from latence_core.observability import (
     DEFAULT_LINEAGE_NAMESPACE,
     OpenLineageEmitter,
@@ -70,16 +70,6 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
-# The ``retrieval`` sub-command group (``latence retrieval splade-index ...``, tutorial §4.2). The
-# stateless (ADR-0048) index-time tooling that builds a retrieval signal over an existing Export —
-# today the SPLADE-v3 sparse leg. The heavy model stack lives in the ``sparse.splade`` Provider
-# package (ADR-0016); this group resolves it through the Provider registry, so the thin core names
-# the capability, not ``latence-splade``.
-retrieval_app = typer.Typer(
-    add_completion=False, help="Stateless retrieval-index tooling over an Export (ADR-0048)."
-)
-app.add_typer(retrieval_app, name="retrieval")
-
 logger = logging.getLogger("latence")
 
 
@@ -106,13 +96,22 @@ def _load_pipeline(pipeline_path: Path) -> Pipeline:
     """Load a Pipeline from a stack/pipeline YAML (the exact loader ``run`` uses).
 
     The YAML itself is read from local disk; its declared ``storage_uri`` can point anywhere
-    fsspec supports. Exits 2 (a usage error) when the file is missing.
+    fsspec supports. Exits 2 (a usage error) when the file is missing, and when the file is a
+    template that still carries a placeholder such as ``{STORAGE_URI}``: every command that loads
+    a Pipeline through here executes it, and a template executed as written is a silent empty run.
+    It exits 2 as well when a Stage carries a config key ADR-0068 removed, which a run would
+    ignore without a message.
     """
     if not pipeline_path.exists():
         typer.echo(f"Pipeline file not found: {pipeline_path}", err=True)
         raise typer.Exit(code=2)
     text = pipeline_path.read_text(encoding="utf-8")
     pipeline = Pipeline.from_yaml_text(text)
+    try:
+        pipeline.require_runnable()
+    except ConfigError as exc:
+        typer.echo(f"Not running {pipeline_path} [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     logger.info("loaded pipeline %r with %d stages", pipeline.name, len(pipeline.stages))
     return pipeline
 
@@ -502,10 +501,22 @@ def tune(
         Path, typer.Argument(help="Path to the stack YAML to tune (e.g. stacks/gpu-sota.yaml).")
     ],
     sample: Annotated[
-        int, typer.Option("--sample", help="Records to time each candidate on (the small sample).")
+        int,
+        typer.Option(
+            "--sample",
+            help="The numerator of every figure in the report: a figure is this number divided "
+            "by the median wall time of one timed run of the whole stack over the bundled "
+            "validation corpus. It does not size the run; no candidate is cut down to this many "
+            "records.",
+        ),
     ] = 8,
     repeats: Annotated[
-        int, typer.Option("--repeats", help="Timed runs per candidate after warmup (median → r/s).")
+        int,
+        typer.Option(
+            "--repeats",
+            help="Timed runs per candidate after an untimed warm-up. Their median wall time is "
+            "the divisor of the reported figure.",
+        ),
     ] = 3,
     seed: Annotated[int, typer.Option("--seed", help="Sweep seed (determinism).")] = 0,
     out: Annotated[
@@ -529,11 +540,14 @@ def tune(
     """Profile the device, sweep each heavy Provider's perf knobs correctness-gated, write a tune.
 
     For each GPU/heavy Provider in the stack it sweeps dtype/quantize/compile/batch_size/
-    ocr_batch_size/max_concurrency over the small real sample, REJECTS any setting that crashes
-    (including an inference-time ``BackendCompilerFailed`` — the W9 lesson) or changes output vs the
-    fp32/plain baseline, picks the fastest ELIGIBLE per Provider, and writes a device-fingerprinted
-    ``tuned/<device>.yaml`` + an honest report (winners AND rejected knobs). Never fabricates a
-    number — every throughput is the median of the seeded timed runs on THIS device.
+    ocr_batch_size/max_concurrency. Each candidate is timed on runs of the whole stack over the
+    bundled validation corpus, with only that Provider's knobs changed. It REJECTS any setting that
+    crashes (including an inference-time ``BackendCompilerFailed`` — the W9 lesson) or changes
+    output vs the fp32/plain baseline, picks the fastest ELIGIBLE per Provider, and writes a
+    device-fingerprinted ``tuned/<device>.yaml`` + a report (winners AND rejected knobs).
+
+    A figure in the report is ``--sample`` divided by the median wall time of the timed runs on
+    THIS device. It compares settings with each other; it is not a count of records per second.
     """
     _configure_logging(verbose)
     if not stack_path.exists():
@@ -1330,9 +1344,9 @@ def setup(
     )
     if pii_on:
         typer.echo(
-            "  NOTE: the exported RAG chunks are masked AND context-enriched (W16, ADR-0042): "
-            "redact sets each chunk's masked_content, enrich reads that redacted stream, and "
-            "export_corpus materializes it — a genuinely PII-safe, context-enriched corpus."
+            "  NOTE: the exported corpus chunks are masked (W16, ADR-0042): "
+            "redact sets each chunk's masked_content, and export_corpus reads that redacted "
+            "stream and materializes it — a genuinely PII-safe corpus."
         )
     typer.echo("")
     typer.echo("Run `latence process` to start.")
@@ -1430,8 +1444,7 @@ def delta(
     affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: each UNCHANGED
     document's doc-level records are reused, so only NEW/CHANGED documents run
     parse/chunk/extract/redact (and only their chunks are induced) — the compute is O(changed
-    documents), not O(corpus); since ADR-0061 this includes context-enrichment pipelines, whose
-    chunk headers are re-derived from the current graph every run. Consistency with the base run
+    documents), not O(corpus). Consistency with the base run
     comes from the corpus's canonical TYPE vocabulary, which the delta EXTENDS rather than
     recomputes (T4/ADR-0054): a new type aliases into an existing canonical entry or appends a
     new one, and existing canonical types never churn. ``--reinduce`` is the full rebuild —
@@ -1526,9 +1539,12 @@ def purge(
 ) -> None:
     """Hard-delete documents (Purge — GDPR / right-to-be-forgotten erasure).
 
-    DESTRUCTIVE and NON-RECOVERABLE: unlike a Retraction, NOTHING is retained — the on-disk source
-    file(s), every derived record across ALL Corpus Versions, and the run artifacts are physically
-    erased. Guarded by a confirmation prompt; pass ``--yes`` to skip it. Give ids via ``--doc``
+    DESTRUCTIVE and NON-RECOVERABLE: unlike a Retraction, nothing of the document is retained —
+    the on-disk source file(s), every derived record across ALL Corpus Versions, the run artifacts,
+    and the file name and content hash every Corpus Version listed it under are physically erased.
+    One thing stays, on purpose: the document's content-addressed id, as a suppression tombstone
+    (a one-way hash of the erased bytes) so a Source that still serves the file cannot bring it
+    back. Guarded by a confirmation prompt; pass ``--yes`` to skip it. Give ids via ``--doc``
     (repeatable) and/or ``--docs-file``.
     """
     _configure_logging(verbose)
@@ -1560,7 +1576,7 @@ def contracts(
         typer.Option(
             "--capability",
             help="Print only this Capability's entry — a Stage kind (e.g. 'parse', "
-            "'entity_extraction') or a signal-seam prefix (e.g. 'tokenizer').",
+            "'entity_extraction') or a signal-seam prefix (e.g. 'delta').",
         ),
     ] = None,
     write: Annotated[
@@ -1810,132 +1826,6 @@ def env_matrix(
     typer.echo(report.describe())
     if not report.ok:
         raise typer.Exit(code=1)
-
-
-@retrieval_app.command("splade-index")
-def splade_index(
-    export: Annotated[
-        Path,
-        typer.Option(
-            "--export",
-            help="The Export directory to index (holds records.parquet + records.jsonl).",
-        ),
-    ],
-    out: Annotated[
-        Path,
-        typer.Option(
-            "--out", help="Where to write the splade/ artifact (index.parquet + manifest.json)."
-        ),
-    ],
-    model: Annotated[
-        str,
-        typer.Option(
-            "--model",
-            help="The multilingual SPLADE checkpoint id (e.g. naver/splade-v3). No default is "
-            "pinned — the model is operator-selected and its license cleared (ADR-0053/0012).",
-        ),
-    ],
-    accept_noncommercial_license: Annotated[
-        bool,
-        typer.Option(
-            "--accept-noncommercial-license",
-            help="Assert you accept the model's NON-COMMERCIAL weights license (e.g. "
-            "naver/splade-v3 is CC-BY-NC-SA-4.0). MANDATORY: without it the command refuses "
-            "rather than silently defaulting to permissive.",
-        ),
-    ] = False,
-    weights_license: Annotated[
-        str,
-        typer.Option(
-            "--weights-license",
-            help="The non-commercial weights license the acceptance covers (recorded honestly in "
-            "the manifest, license_verified=false — this tool does not read the model card).",
-        ),
-    ] = "CC-BY-NC-SA-4.0",
-    max_length: Annotated[
-        int, typer.Option("--max-length", help="Max tokens per chunk fed to the SPLADE model.")
-    ] = 512,
-    batch_size: Annotated[
-        int, typer.Option("--batch-size", help="Chunks encoded per batch (O(batch) memory).")
-    ] = 64,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
-) -> None:
-    """Build a REAL SPLADE-v3 sparse index over an Export corpus (tutorial §4.2).
-
-    Loads the operator-selected multilingual SPLADE checkpoint via the ``sparse.splade`` Provider
-    (:class:`~latence_splade.provider.SpladeCompositionEmbedder`), encodes every corpus chunk's
-    (redacted) content to a term-weight :class:`~latence_core.capability.SparseVector`, and writes a
-    ``splade/`` artifact: ``index.parquet`` (per-chunk ``record_id`` + parallel ``indices`` /
-    ``values`` for every chunk with a non-empty vector) plus a ``manifest.json`` recording the
-    checkpoint and the honest ADR-0012 license provenance (``weights_license`` /
-    ``license_verified=false`` / ``operator_accepted=true``).
-
-    ``--accept-noncommercial-license`` is MANDATORY: naver/splade-v3's weights are CC-BY-NC-SA-4.0
-    (non-commercial), so the command REFUSES without the operator's explicit acceptance rather than
-    silently treating a non-commercial model as a permissive default.
-    """
-    _configure_logging(verbose)
-
-    # License gate FIRST — before resolving or loading anything heavy, and independent of whether
-    # ``latence-splade`` is installed. A non-commercial weights license is never a silent default:
-    # the operator must accept it explicitly (ADR-0012 honesty).
-    if not accept_noncommercial_license:
-        typer.echo(
-            "refused: --accept-noncommercial-license is required. The SPLADE checkpoint's weights "
-            f"({model}) are a NON-COMMERCIAL license (e.g. naver/splade-v3 is CC-BY-NC-SA-4.0); "
-            "this command will not default a non-commercial model to permissive. Re-run with "
-            "--accept-noncommercial-license once you accept the model's non-commercial terms.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    if not export.exists():
-        typer.echo(f"Export directory not found: {export}", err=True)
-        raise typer.Exit(code=2)
-
-    from latence_core.capability import ProviderRegistry
-    from latence_core.splade_index import SpladeIndexError, build_splade_index
-
-    # Resolve the real sparse signal generator through the Provider registry (ADR-0004/0049) — the
-    # thin core names the ``sparse.splade`` capability, not the provider package. A missing provider
-    # package surfaces as a clear KeyError → exit 2 (install latence-splade), not a fake fallback.
-    registry = ProviderRegistry()
-    try:
-        embedder_cls = registry.load("sparse.splade")
-    except (KeyError, TypeError) as exc:
-        typer.echo(
-            f"sparse.splade Provider unavailable [{error_category(exc)}]: {exc}. Install the "
-            "SPLADE Provider (e.g. `uv pip install -e packages/latence-splade`) so the real "
-            "naver/splade-v3 sparse leg can be generated.",
-            err=True,
-        )
-        raise typer.Exit(code=2) from exc
-    embedder = embedder_cls({"model": model, "max_length": max_length})
-
-    try:
-        result = build_splade_index(
-            export_dir=str(export),
-            out_dir=str(out),
-            embedder=embedder,
-            model_id=model,
-            weights_license=weights_license,
-            batch_size=batch_size,
-        )
-    except (SpladeIndexError, LatenceError) as exc:
-        typer.echo(f"splade-index failed [{error_category(exc)}]: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-
-    typer.echo(
-        f"splade-index: {result.chunks_indexed}/{result.chunks_total} chunks indexed "
-        f"({result.chunks_empty} empty) → {result.index_uri}"
-    )
-    typer.echo(
-        f"  model={result.model_id} vocab_size={result.vocab_size} "
-        f"weights_license={result.weights_license}, "
-        f"license_verified={str(result.license_verified).lower()}, "
-        f"operator_accepted={str(result.operator_accepted).lower()}"
-    )
-    typer.echo(f"  manifest → {result.manifest_uri}")
 
 
 def main() -> None:  # pragma: no cover - console entry shim

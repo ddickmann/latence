@@ -117,10 +117,10 @@ stages:
     # NOTE — this stack masks its CORPUS but not its GRAPH, and the run says so out loud.
     # The redact Stage below feeds export_corpus, while `extract_on` defaults to `unmasked`, so
     # extraction reads the RAW chunks and every GraphNode.canonical_name here is the real name
-    # (nodes parquet canonical_name/evidence/properties, TTL rdfs:label, GraphML label, KV 'a|'
-    # alias keys). GraphHyperedge.tau_text follows the corpus redaction (ADR-0057); node labels
-    # deliberately do NOT — a graph of [PERSON] nodes is a graph about nobody, and masking the
-    # label would collapse every person onto one alias key. The Runner logs one WARNING per KG
+    # (nodes parquet canonical_name/evidence, TTL rdfs:label, GraphML label). Node labels
+    # deliberately do NOT follow the corpus redaction — a graph of [PERSON] nodes is a graph about
+    # nobody, and masking the label would collapse every person onto one name. The Runner logs
+    # one WARNING per KG
     # export naming this. To keep PII out of the graph entirely, set `extract_on: masked` at the
     # top level (W18/ADR-0044) and route the extraction Stages' depends_on through `redact`.
 

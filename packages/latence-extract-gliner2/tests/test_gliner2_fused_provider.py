@@ -1121,6 +1121,9 @@ def test_intra_op_threads_config_override(
 ) -> None:
     calls: list[int] = []
     monkeypatch.setitem(sys.modules, "torch", _fake_torch_recording(calls))
+    # Pin the host size: an explicit cap is clamped to os.cpu_count(), so on a runner with fewer
+    # than 4 cores (GitHub's 3-core macOS runner) the honoured value would be the core count.
+    monkeypatch.setattr("os.cpu_count", lambda: 128)
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     Gliner2FusedExtractor({**_config(), "intra_op_threads": 4}).extract_fused([_chunk("Alice waved.")])
     assert calls == [4]

@@ -166,7 +166,12 @@ def cores(monkeypatch: pytest.MonkeyPatch) -> Any:
     """
 
     def _pin(n: int) -> None:
+        # All three probes effective_cpu_count() reads: the derived default prefers the
+        # affinity-aware answers (process_cpu_count on 3.13+, sched_getaffinity on Linux) over
+        # cpu_count, so pinning cpu_count alone leaves the default tied to the real host.
         monkeypatch.setattr(os, "cpu_count", lambda: n)
+        monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(n)), raising=False)
+        monkeypatch.setattr(os, "process_cpu_count", lambda: n, raising=False)
 
     return _pin
 

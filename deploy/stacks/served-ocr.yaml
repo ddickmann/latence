@@ -2,17 +2,22 @@
 #
 # The SOTA scanned-document pipeline whose OCR runs on a *served vLLM endpoint* (LightOn-OCR-2),
 # not in-process (parser.lighton_vllm, ADR-0030/W6). It is the stack the deploy artifacts run:
-#   * deploy/docker-compose.yml mounts it and points `base_url` at the bundled `vllm-ocr` service;
-#   * deploy/helm renders it into a ConfigMap with `base_url` = the in-cluster vLLM Service.
+#   * deploy/docker-compose.yml mounts this file and runs it as written; the `base_url` below
+#     already names the bundled `vllm-ocr` service;
+#   * deploy/helm does not read this file. The chart carries the same stack in its values.yaml
+#     (`stack.yaml`) and renders that into a ConfigMap with `base_url` = the in-cluster vLLM
+#     Service.
 #
 # Concrete values (NOT the {STORAGE_URI}/{CORPUS_DIR} harness placeholders that stacks/*.yaml use)
 # so `latence run` executes it directly. Override the two paths + the endpoint by editing this file
 # (or the Helm values) — nothing else needs to change.
 #
 # The head (Source -> Intake -> Parse[OCR]) is the server-dependent part; everything downstream
-# (Chunk -> Content Screening -> RAG Export) is the deterministic in-core CPU spine. Swap the
-# in-core entity/relation stages for the endpoint Providers (entity.endpoint / relation.llm) to
-# route those through the optional LLM service — see docs/deployment.md.
+# (Chunk -> Content Screening -> RAG Export) is the deterministic in-core CPU spine. The stack ends
+# at the corpus export: it has no entity, relation, redaction or graph Stage, so it writes no
+# knowledge graph and nothing in it calls the optional LLM service. To use that service, add a
+# Stage with an endpoint Provider (entity.endpoint / relation.llm) and set its base_url to the
+# LLM service's URL.
 name: latence-served-ocr
 storage_uri: "file:///data/out"
 stages:
@@ -40,7 +45,7 @@ stages:
     provider: parser.lighton_vllm
     depends_on: [intake_screen]
     config:
-      base_url: "http://vllm-ocr:8000/v1"   # overridden by compose/Helm to the real endpoint
+      base_url: "http://vllm-ocr:8000/v1"   # the compose service; the Helm chart sets its own
       max_concurrency: 8                     # fan a document's page-images out concurrently
       dpi: 200                               # PDF->image rasterisation DPI
 

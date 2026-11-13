@@ -1,0 +1,88 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "proposal file: what a reviewed ontology hands to a host's semantic layer",
+ "description": "The file `python -m estate propose` writes (YAML; this schema is held against the file as read back). It is written from a host's description of the shape its own proposal tool reads, extended by two kinds of entry; the host's reader is the authority on that shape, and this schema describes only what this writer writes. Every entry names where it goes by a catalog object and a column, and carries the decision it rests on. Nothing else is written: no mark such as `seeded` or `certified_on` exists here, because what would carry one is never written.",
+ "type": "object",
+ "required": ["source", "entries"],
+ "additionalProperties": false,
+ "properties": {
+  "source": {
+   "description": "The kind of source the entries come from.",
+   "const": "ontology"
+  },
+  "entries": {
+   "type": "array",
+   "items": {
+    "oneOf": [
+     {"$ref": "#/$defs/spellings_entry"},
+     {"$ref": "#/$defs/names_entry"}
+    ]
+   }
+  }
+ },
+ "$defs": {
+  "text": {
+   "type": "string",
+   "minLength": 1
+  },
+  "origin": {
+   "description": "The decision the entry rests on: the element decided (its id in the export), what it stated when it was decided (its claim), and who approved it on which day.",
+   "type": "object",
+   "required": ["element", "claim", "decision"],
+   "additionalProperties": false,
+   "properties": {
+    "element": {"$ref": "#/$defs/text"},
+    "claim": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+    "decision": {
+     "type": "object",
+     "required": ["verdict", "by", "at"],
+     "additionalProperties": false,
+     "properties": {
+      "verdict": {"const": "approved"},
+      "by": {"$ref": "#/$defs/text"},
+      "at": {"description": "The day of the decision, an ISO date.", "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+     }
+    }
+   }
+  },
+  "spellings_entry": {
+   "description": "Two values of a value set that a reviewer called the same: the value kept and its other spellings.",
+   "type": "object",
+   "required": ["spellings", "origin"],
+   "additionalProperties": false,
+   "properties": {
+    "spellings": {
+     "type": "object",
+     "required": ["object", "column", "value", "forms"],
+     "additionalProperties": false,
+     "properties": {
+      "object": {"description": "A catalog object that holds the value set, as `<schema>.<table>`.", "$ref": "#/$defs/text"},
+      "column": {"$ref": "#/$defs/text"},
+      "value": {"description": "The value kept: the one more rows carry.", "$ref": "#/$defs/text"},
+      "forms": {"description": "Its other spellings.", "type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/text"}}
+     }
+    },
+    "origin": {"$ref": "#/$defs/origin"}
+   }
+  },
+  "names_entry": {
+   "description": "The names of a master list's records, by the record's key.",
+   "type": "object",
+   "required": ["names", "origin"],
+   "additionalProperties": false,
+   "properties": {
+    "names": {
+     "type": "object",
+     "required": ["object", "column", "values"],
+     "additionalProperties": false,
+     "properties": {
+      "object": {"description": "The master list, as `<schema>.<table>`.", "$ref": "#/$defs/text"},
+      "column": {"description": "The list's key column.", "$ref": "#/$defs/text"},
+      "values": {"description": "Key of a record -> its name.", "type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/text"}}
+     }
+    },
+    "origin": {"$ref": "#/$defs/origin"}
+   }
+  }
+ }
+}

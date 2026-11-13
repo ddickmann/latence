@@ -1,7 +1,7 @@
 # 2 · Extraction and privacy
 
-*Chunks arrive: retrieval-sized, screened, each one carrying the exact character span and page
-it came from. This chapter is what happens to them before the pipeline is allowed to look at
+*Chunks arrive: sized to fit the extraction model's window, screened, each one carrying the exact
+character span and page it came from. This chapter is what happens to them before the pipeline is allowed to look at
 the corpus as a whole — what types to look for, what to pull out, and what must never leave.*
 
 Four stages live here, and they are deliberately **siblings, not a chain**. `extract` and
@@ -31,7 +31,7 @@ different ones.
 
 The extraction stage is the exception: it consumes chunks and returns a `FusedExtraction`
 dataclass holding both lists together
-(`packages/latence-core/src/latence_core/capability.py:255`), which the Runner routes to *both*
+(`packages/latence-core/src/latence_core/capability.py:253`), which the Runner routes to *both*
 downstream consumers without running a second entity stage.
 
 Three invariants hold across all of it, and each is enforced by a validator rather than by
@@ -39,12 +39,12 @@ convention:
 
 - **A mention's offsets are document offsets, not chunk offsets.** `EntityMention` refuses to
   validate without `char_start`, `char_end`, `page_start` and `page_end` on its Provenance
-  (`contracts.py:1304`). A Provider that forgets to resolve them cannot emit a record at all.
+  (`contracts.py:1202`). A Provider that forgets to resolve them cannot emit a record at all.
 - **A PII span never stores the value it found.** `PIISpan` carries the type, the offsets, the
-  action and the derived placeholder — never the surface string (`contracts.py:1666`). The
+  action and the derived placeholder — never the surface string (`contracts.py:1543`). The
   audit trail is not itself a leak.
 - **The clean `content` is never overwritten.** Redaction writes a *second* field,
-  `masked_content`, and leaves `content` byte-identical (`contracts.py:1214`). Which of the two
+  `masked_content`, and leaves `content` byte-identical (`contracts.py:1112`). Which of the two
   a downstream stage reads is a decision, made once, in one place — see §6.
 
 ---
@@ -70,7 +70,7 @@ The split is not per-pipeline taste. It is one line in the generator: a dataset 
 schema if and only if it went through OCR
 (`packages/latence-benchmark/src/latence_benchmark/campaign/ocr_stage.py:64` lists
 `ohr_bench`, `vidoseek`, `uda`), and the generator branches on exactly that
-(`packages/latence-benchmark/src/latence_benchmark/campaign/s3_lib.py:313`).
+(`packages/latence-benchmark/src/latence_benchmark/campaign/s3_lib.py:312`).
 
 The reasoning is legible once stated. For a Wikipedia or news corpus you already know what is
 in it — people, organisations, places, works, dates — and a hand-authored list is not a
@@ -132,11 +132,11 @@ this subsection closely and §7 for the summary.
 
 **What it sends.** One chat-completions request per unit of induction, containing exactly two
 messages: a fixed system prompt and a user message holding **the chunk's text verbatim**
-(`packages/latence-schema-inducer/src/latence_schema_inducer/provider.py:903`). There is no
+(`packages/latence-schema-inducer/src/latence_schema_inducer/provider.py:899`). There is no
 sampling, no summarisation, no redaction in between — the raw chunk goes to the endpoint. That
 is unavoidable for the task and it is the reason the substrate is a config line: the same
 Provider talks to OpenAI, to OpenRouter, or to a vLLM box inside your own network, because all
-three speak the same API and only `base_url` changes (`provider.py:188`).
+three speak the same API and only `base_url` changes (`provider.py:184`).
 
 **What it asks for.** A single JSON object of exactly three arrays:
 
@@ -156,11 +156,11 @@ layers between it and a label reaching a model. None of them can crash the run.
 |---|---|---|---|
 | 1 | `response_format={"type":"json_object"}` | free prose | — |
 | 2 | truncation detect (`finish_reason == "length"`) | reply cut mid-JSON | one retry at **double** `max_tokens`, then fall back |
-| 3 | parse-and-repair | malformed JSON | peel a Markdown fence or surrounding prose, re-run the **strict** parser; then one corrective re-prompt; then fall back (`provider.py:1070`) |
-| 4 | schema validation | wrong shape (missing slot, list of ints, string not list) | reject → fall back (`provider.py:1094`) |
-| 5 | label sanitisation | control chars, over-long labels, duplicates, count overflow, **value-shaped strings** | drop + tally, never silently (`provider.py:996`) |
-| 6 | empty-induction recovery | parsed and valid but sanitised to nothing | one sharper re-prompt at double budget, then fall back **loudly** (`provider.py:741`) |
-| 7 | fail-open | anything at all — network, auth, terminal 4xx | `induced_labels` stays `None`, the extractors use their config labels, the run continues (`provider.py:770`) |
+| 3 | parse-and-repair | malformed JSON | peel a Markdown fence or surrounding prose, re-run the **strict** parser; then one corrective re-prompt; then fall back (`provider.py:1066`) |
+| 4 | schema validation | wrong shape (missing slot, list of ints, string not list) | reject → fall back (`provider.py:1090`) |
+| 5 | label sanitisation | control chars, over-long labels, duplicates, count overflow, **value-shaped strings** | drop + tally, never silently (`provider.py:992`) |
+| 6 | empty-induction recovery | parsed and valid but sanitised to nothing | one sharper re-prompt at double budget, then fall back **loudly** (`provider.py:737`) |
+| 7 | fail-open | anything at all — network, auth, terminal 4xx | `induced_labels` stays `None`, the extractors use their config labels, the run continues (`provider.py:761`) |
 
 Net 3 is worth a note for its restraint: it looks in more *places* for a JSON object (inside a
 fence, between the first `{` and the last `}`) but it never loosens the parser. Every candidate
@@ -176,15 +176,16 @@ patterns. Two borderline cases are pinned in the source as tests of the threshol
 opt-in and only the induced path opts in — a hand-authored config label is never shape-checked,
 because an operator's deliberate type name is not a hallucination.
 
-**Cost, and how it is bounded.** Per-chunk induction on a 242,141-chunk corpus is a lot of
-calls, so three layers sit in front of the fan-out (`provider.py:642`):
+**Cost, and how it is bounded.** Per-chunk induction on a 220,129-chunk corpus (`uda`, in the
+August 2026 run) is a lot of calls, so three layers sit in front of the fan-out
+(`provider.py:638`):
 
 1. **Text dedup** (`dedup: true` by default) — jobs collapse to distinct texts in first-seen
    order; one induction per distinct text; duplicates receive the identical `InducedLabels`.
    Lossless at temperature 0, and the single largest lever on a real corpus full of
    boilerplate.
 2. **A call budget** (`max_induction_calls`) — the campaign sets 15,299 / 2,677 / 242,141 for
-   the three datasets. Jobs past the budget make no call and fail open, setting
+   the three datasets: each dataset's measured chunk count plus 10% headroom. Jobs past the budget make no call and fail open, setting
    `induction_budget_exhausted` and emitting **one** aggregate warning. The budget cuts a
    deterministic *input-order prefix*, never "whichever finished first", so a budgeted run is
    still byte-reproducible.
@@ -195,11 +196,11 @@ calls, so three layers sit in front of the fan-out (`provider.py:642`):
 Cost is *reported*, not estimated: `induction_calls`, `induction_cache_hits`,
 `induction_prompt_tokens` and `induction_completion_tokens` are read defensively off each
 response's `usage` block, and an endpoint that reports no usage leaves them at zero — an honest
-"unknown" rather than a fabricated figure (`provider.py:953`).
+"unknown" rather than a fabricated figure (`provider.py:949`).
 
 Deliberately absent: a *token* budget. Which jobs a mid-flight token budget would cut depends
 on completion order, and that would make the run's output non-deterministic. Tokens are
-reported; only calls are enforced (`provider.py:225`).
+reported; only calls are enforced (`provider.py:222`).
 
 **Granularity.** Three modes, and the campaign uses the first:
 
@@ -212,7 +213,7 @@ reported; only calls are enforced (`provider.py:225`).
 The corpus mode's ranking detail is a bug fix worth knowing: capping an *alphabetically* sorted
 union silently discarded a corpus's most explicit high-frequency relations (`obsoletes`,
 `updates`, `references` — all sorting late) in favour of alphabetically-early rare noise.
-Ranking by document frequency keeps what the corpus most agrees on (`provider.py:604`).
+Ranking by document frequency keeps what the corpus most agrees on (`provider.py:600`).
 
 **The domain hint.** An operator can supply `domain: "..."` free text, which is folded into
 every call as a fenced `<domain_context>` block explicitly framed as reference material, not
@@ -283,7 +284,7 @@ ability to pick the best entity model and the best relation model independently.
 keeps that door open — see §3.6 — but the blessed stack takes the fused deal.
 
 One requirement is non-negotiable: `include_spans=True` is always passed
-(`provider.py:791`). Without it gliner2 returns entity *strings* and relation head/tail *text*
+(`provider.py:792`). Without it gliner2 returns entity *strings* and relation head/tail *text*
 only, which the framework contract cannot ground. It is not a knob.
 
 ### 3.2 The forward pass: bucket, micro-batch, scatter
@@ -332,8 +333,7 @@ What it does in practice:
 - **Graph density is the real lever it moves.** Every accepted mention is a candidate node, and
   the relation slot compounds it: a relation survives only if **both** its endpoints cleared the
   threshold. Lowering it therefore grows the edge set super-linearly, and a denser graph is not
-  automatically a better one — chapter 3's hyperedges and centrality features are computed over
-  whatever this stage admits.
+  automatically a better one — chapter 3 resolves and assembles whatever this stage admits.
 
 A relation's own score is not reported by the model at the relation level. The Provider derives
 it as the **weakest link** — the minimum of its head and tail confidences — falling back to 1.0
@@ -431,7 +431,7 @@ unmasked**. Making redaction a chunk → chunk transform is what closed it
 chunk is ≤ the window, each chunk is scanned in full, nothing is truncated.
 
 The document-level path still exists as `redact_documents` and is marked deprecated
-(`packages/latence-core/src/latence_core/stages/redaction.py:530`).
+(`packages/latence-core/src/latence_core/stages/redaction.py:539`).
 
 ### 4.2 The configured control
 
@@ -461,7 +461,7 @@ the two Providers cannot drift on bucket order or index order
 The checkpoint is a **guardrails+PII** model, so with the flag on, guard categories ride the
 *same* forward pass as the PII types — one call covers both
 (`pii-gliner2/provider.py:726`). The universal guard floor is two labels
-(`packages/latence-core/src/latence_core/redaction_policy.py:410`):
+(`packages/latence-core/src/latence_core/redaction_policy.py:411`):
 
 | Label sent to the model | `RiskMarker.category` recorded |
 |---|---|
@@ -472,12 +472,12 @@ Four things about this are worth reading carefully:
 
 - **A guard hit is flagged, never masked.** It marks the chunk's *content* as risky and emits a
   `RiskMarker` that survives into the exported corpus so a RAG consumer can exclude the chunk.
-  Masking it would silently corrupt the text (`pii-gliner2/provider.py:812`).
+  Masking it would silently corrupt the text (`pii-gliner2/provider.py:815`).
 - **The category vocabulary is deliberately the same one `screening.content_keyword` emits**, so
   a consumer filters one set regardless of which control caught it.
 - **A marker never echoes the matched text.** Its `reason` carries the category and the hit
   count and says so explicitly — a marker that quoted the injected string would re-publish
-  exactly what was flagged (`pii-gliner2/provider.py:890`).
+  exactly what was flagged (`pii-gliner2/provider.py:905`).
 - **A label claimed by both sets is read back as a guard hit.** Dropping a security screen is
   worse than losing one mask. A config-level collision between `guard_labels` and `pii_labels`
   is already a `ConfigError`, so this only arbitrates *induced* overlap.
@@ -487,7 +487,7 @@ list (`pii-gliner2/provider.py:432`).
 
 One honest gap, verified in the source: **no shipped inducer produces `guard_types`.** Both
 `label_inducer.llm` and `label_inducer.lexicon` emit only the three slots
-`entity_types` / `relation_types` / `pii_types` (`schema-inducer/provider.py:150`). The
+`entity_types` / `relation_types` / `pii_types` (`schema-inducer/provider.py:156`). The
 `InducedLabels.guard_types` slot and the redactor's read of it are wired and tested, but nothing
 in the current roster fills them, so in practice the guard set is exactly the two-label floor
 plus any operator `guard_labels`.
@@ -507,7 +507,7 @@ Redaction Provider funnels through
 | `iban` | `iban` |
 
 Because the floor runs in `finalize_redacted_chunk`
-(`redaction_policy.py:568`) rather than inside any one Provider, it is **non-bypassable by
+(`redaction_policy.py:569`) rather than inside any one Provider, it is **non-bypassable by
 model or backend choice** and impossible to forget when writing a new Redactor. Before this,
 only the in-core rule Provider recognised these types and the three learned ones inherited only
 their model's coverage.
@@ -526,7 +526,7 @@ used to weld table cells together, so `| Industrial drives | 410 | 455 | 470 |` 
 detector as `Industrial drives410455470` — an innocent numeric row masked as an SSN. A fixed-width
 negative lookbehind rejects a digit run fused to a Unicode letter, with an explicit exception for
 the one letter-glued form that *is* a real presentation: `SSN123456789`
-(`redaction_policy.py:346`).
+(`redaction_policy.py:347`).
 
 The weld is gone (chapter 1, pattern 13). The same fix showed that the guard had been doing more
 than sparing innocent rows: on a welded `Ada Lovelace123 45 6789` it refused a *genuine* SSN, so
@@ -560,7 +560,7 @@ Four actions, resolved per document sensitivity (`redaction_policy.py:112`):
 All three non-`TAG` surrogates are derived from `sha256(salt:type:value)`. The value is mixed
 into the digest and **never returned in the clear or persisted**, so a `replace`/`hash` corpus
 is deterministically joinable without storing what was joined on. `PIISpan` refuses to validate
-a non-`TAG` span with an empty placeholder (`contracts.py:1695`) — a masking action that wrote
+a non-`TAG` span with an empty placeholder (`contracts.py:1593`) — a masking action that wrote
 nothing cannot be recorded as if it had.
 
 Masking is applied **right-to-left** over the ordered non-overlapping span list, so replacing one
@@ -582,7 +582,7 @@ span overlapping an accepted one by a single character is discarded wholesale, s
 nothing else covered is exported verbatim (an audit found 12 digits of an already-masked card
 re-exposed this way). Clipping to the covered prefix instead makes the resolution
 **coverage-preserving**: every character covered by any input interval stays covered
-(`redaction_policy.py:432`). A companion rule falls out of the same fix — masking spans outrank
+(`redaction_policy.py:433`). A companion rule falls out of the same fix — masking spans outrank
 `TAG` spans, because `TAG` is the one action `apply_masking` skips, and an earlier-starting
 `TAG` span must never displace a real mask.
 
@@ -643,7 +643,7 @@ Every campaign pipeline carries this at the top level:
 extract_on: unmasked
 ```
 
-It is `ExtractOn.UNMASKED` by default (`packages/latence-core/src/latence_core/pipeline.py:173`),
+It is `ExtractOn.UNMASKED` by default (`packages/latence-core/src/latence_core/pipeline.py:197`),
 so writing it changes nothing — it is written to make the posture explicit rather than implied.
 
 ### What it actually does, in code
@@ -651,7 +651,7 @@ so writing it changes nothing — it is written to make the posture explicit rat
 Exactly one thing, in one place:
 
 ```python
-# packages/latence-core/src/latence_core/runner.py:1818
+# packages/latence-core/src/latence_core/runner.py:1853
 masked = pipeline.extract_on is ExtractOn.MASKED
 for chunk in chunks:
     if masked and chunk.masked_content is not None:
@@ -666,8 +666,8 @@ That is the entire mechanism. A chunk without `masked_content` falls back to its
 so the mode never fabricates or drops text.
 
 It applies to precisely three Capability kinds — `entity_extraction`, `relation_extraction`,
-`fused_entity_relation` (`pipeline.py:108`) — because they, and only they, read chunk text to
-find mentions. Redaction, screening, enrichment and export are untouched.
+`fused_entity_relation` (`pipeline.py:131`) — because they, and only they, read chunk text to
+find mentions. Redaction, screening and export are untouched.
 
 ### Why it is a flag and not a default
 
@@ -683,9 +683,8 @@ The two postures answer different questions:
 `masked` is the stricter posture some regulated deployments require: PII never reaches
 extraction, so it never reaches the knowledge graph, so it cannot be reconstructed from the
 graph even if the corpus is perfectly masked. The cost is stated without hedging — a knowledge
-graph of `[PERSON]` nodes is a knowledge graph about nobody. Entity resolution, disambiguation
-and the graph-rescue retrieval of chapter 5 all degrade in proportion to how much of the corpus
-was masked.
+graph of `[PERSON]` nodes is a knowledge graph about nobody. Disambiguation can only resolve
+what extraction still sees, so it degrades in proportion to how much of the corpus was masked.
 
 Defaulting to `unmasked` is therefore a real decision, not an oversight, and the framework
 refuses to let `masked` fail quietly. Turning it on without wiring the DAG for it is a
@@ -694,27 +693,32 @@ refuses to let `masked` fail quietly. Turning it on without wiring the DAG for i
 - no redaction stage at all → `ValueError` naming the problem;
 - an extraction stage that does not transitively depend on a redaction stage → `ValueError`
   telling the operator to route `depends_on` through `redact`
-  (`pipeline.py:197`).
+  (`pipeline.py:220`).
 
 Without that check the mode would silently read unmasked text — a privacy hole that looks
 exactly like a working configuration. And in the guided setup, `extract_on: masked` with PII
-redaction off is rejected up front (`setup/recipe.py:568`).
+redaction off is rejected up front (`setup/recipe.py:717`).
 
-### One caveat specific to these five pipelines
+### One caveat specific to the five committed pipeline files
 
 The generated header comment on every campaign YAML reads:
 
 > `extract_on unmasked (extraction reads raw chunks; masking applies to the exported corpus)`
 
-The first half is right. **The second half is not true of these files.** Each one also sets
-`unsafe_unmasked_corpus: true` on `export_corpus`, which makes the exported and embedded text
-the raw `content` as well. So in the campaign stack, masking applies to *neither* extraction
-*nor* the exported corpus — only the detection evidence is kept, in `pii_spans` and
-`masked_content`, as metadata. The reason is measured and recorded in the YAML (82% of
-2Wiki/MultiHop-RAG rows carried placeholders including the article titles the questions target)
-and the export logs a warning once per run naming the risk. It is the right call for a
-retrieval benchmark and the wrong one for a production corpus; the point here is that the header
-comment describes the flag's general behaviour, not this file's.
+For a pipeline the generator writes today, both halves hold: the generator does not set
+`unsafe_unmasked_corpus`, so the corpus export writes `masked_content`.
+
+**The second half is not true of the five files committed under
+`benchmark/sota-campaign/stages/s3-pipeline/pipelines/`.** They are the record of the August 2026
+run, and each one sets `unsafe_unmasked_corpus: true` on `export_corpus`, which makes the
+exported and embedded text the raw `content` as well. So in that run masking applied to
+*neither* extraction *nor* the exported corpus; only the detection evidence was kept, in
+`pii_spans` and `masked_content`. The reason is recorded in those files as a comment: with
+masking on, 82% of 2Wiki/MultiHop-RAG rows carried placeholders, including the article titles
+the questions target. That was measured on the earlier pipeline, for a retrieval benchmark that
+was removed by
+[ADR-0068](../adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md).
+With the flag on, the export logs a warning once per run naming the risk.
 
 ---
 
@@ -763,5 +767,4 @@ labels it may be `organization` in one and `org` in the next.
 Reconciling that is the corpus phase's job, and it is where the pipeline stops looking at one
 chunk at a time. Chapter 3, `03-corpus-to-knowledge-graph.md`, picks up exactly here: type
 consolidation canonicalises the drifted vocabulary, disambiguation merges mentions into single
-canonical entities, and graph assembly turns the surviving relations into evidence-linked edges
-and hyperedges.
+canonical entities, and graph assembly turns the surviving relations into evidence-linked edges.

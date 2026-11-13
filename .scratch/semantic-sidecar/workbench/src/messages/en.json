@@ -1,0 +1,306 @@
+{
+  "workbench": {
+    "label": "Resolution"
+  },
+  "tabs": {
+    "review": "Review",
+    "graph": "Graph",
+    "synthetic": "Synthetic data"
+  },
+  "verdict": {
+    "same": "Same",
+    "different": "Different",
+    "unsure": "Not sure"
+  },
+  "field": {
+    "name": "Name",
+    "city": "City",
+    "postcode": "Postcode",
+    "country": "Country",
+    "industry": "Industry",
+    "reg_id": "Registration id",
+    "source_system": "Source system"
+  },
+  "type": {
+    "organisation": "Organisation",
+    "city": "City",
+    "country": "Country",
+    "industry": "Industry",
+    "source_system": "Source system"
+  },
+  "review": {
+    "loading": "Loading the review queue…",
+    "failed": "The review queue could not be loaded. Reload the page to try again.",
+    "pick": "Choose a pair from the queue. J and K move through it.",
+    "unknown": "This pair is not in the queue any more. Choose another one.",
+    "position": "Position in the queue",
+    "back": "Queue",
+    "of": "{{n}} of {{total}}"
+  },
+  "queue": {
+    "title": "Review queue",
+    "show": "Show",
+    "status": {
+      "open": "Open",
+      "decided": "Decided",
+      "all": "All"
+    },
+    "system": "Source system",
+    "anySystem": "Any system",
+    "conflictsOnly": "Only pairs with a conflicting field",
+    "emptyOpen": "Nothing left to decide with these filters.",
+    "empty": "No pairs match these filters.",
+    "groupLabel": "Group around {{name}}",
+    "groupMeta_one": "{{count}} record",
+    "groupMeta_other": "{{count}} records",
+    "groupProgress": "{{decided}} of {{total}} pairs decided"
+  },
+  "evidence": {
+    "question": "Do these two records describe the same organisation?",
+    "and": "and",
+    "probability": "calibrated probability",
+    "scaleLabel": "Calibrated probability {{p}}. The machine rejects below {{lo}} and accepts from {{hi}}.",
+    "bands": "The machine rejects below {{lo}} and accepts from {{hi}}",
+    "whyUnsure": "Why the machine could not decide",
+    "vetoed": "A hard rule also blocks an automatic merge of these two records.",
+    "records": "The two records",
+    "field": "Field",
+    "recordA": "Record A",
+    "recordB": "Record B",
+    "noValue": "no value",
+    "openInGraph": "In the graph",
+    "weighed": "What the matcher weighed",
+    "sum": "The matcher starts at {{prior}}, because two records picked at random rarely match. The fields add {{fields}}, which gives {{total}}. The probability above is that total after calibration."
+  },
+  "why": {
+    "for": "Speaks for a match",
+    "against": "Speaks against",
+    "missing": "No evidence from"
+  },
+  "lean": {
+    "for": "for a match",
+    "against": "against",
+    "missing": "no evidence",
+    "neutral": "says little"
+  },
+  "agree": {
+    "same": "the records agree",
+    "differ": "the records differ",
+    "missing": "a value is missing"
+  },
+  "explain": {
+    "same": "Both records say “{{left}}”.",
+    "sameButCommon": "Both records say “{{left}}”, yet the matcher counts this against a match.",
+    "close": "“{{left}}” and “{{right}}” are close enough to count for a match.",
+    "differ": "“{{left}}” and “{{right}}” differ.",
+    "neutral": "“{{left}}” and “{{right}}” say little either way.",
+    "missingBoth": "Neither record has a value, so this says nothing.",
+    "missingLeft": "Record A has no value, so this says nothing.",
+    "missingRight": "Record B has no value, so this says nothing."
+  },
+  "cluster": {
+    "title_one": "The group around this pair: {{count}} record",
+    "title_other": "The group around this pair: {{count}} records",
+    "bridge": "This pair is the only link between two parts of the group: {{a}} records on one side, {{b}} on the other. Calling it different splits the group there.",
+    "drawing": "{{count}} records and {{links}} links between them; the list beside the drawing names the records.",
+    "accepted": "Accepted by the machine",
+    "open": "In review, not decided",
+    "same": "You said: same",
+    "different": "You said: different"
+  },
+  "decide": {
+    "title": "Decide this pair",
+    "same": "Same",
+    "different": "Different",
+    "unsure": "Not sure",
+    "skip": "Skip",
+    "recordTitle": "Recorded for this pair",
+    "none": "No decision yet.",
+    "superseded": "replaced",
+    "withdrawn": "withdrawn",
+    "byGroup": "by group decision"
+  },
+  "reason": {
+    "legal_entity": "A different legal entity",
+    "location": "A different location or site",
+    "business": "A different line of business",
+    "related": "Related, but not the same (parent, subsidiary, division)",
+    "other": "Something else (say what)",
+    "group_split": "Split off by a decision about the whole group",
+    "as_suggested": "As suggested"
+  },
+  "sheet": {
+    "cancel": "Cancel",
+    "close": "Close",
+    "title": {
+      "same": "Record: the same organisation",
+      "different": "Record: different organisations",
+      "unsure": "Record: not sure",
+      "change": "Change the recorded decision"
+    },
+    "confirm": {
+      "same": "Record as same",
+      "different": "Record as different",
+      "unsure": "Record as not sure"
+    },
+    "replaces": "This replaces the decision in force. The earlier one stays in the history:",
+    "reason": "What tells them apart?",
+    "note": "Note (optional)",
+    "noteRequired": "Note (needed here)"
+  },
+  "keys": {
+    "title": "Keys",
+    "same": "Same",
+    "different": "Different (asks why)",
+    "unsure": "Not sure",
+    "skip": "Next undecided pair",
+    "next": "Down the queue",
+    "previous": "Up the queue",
+    "close": "Back to the queue",
+    "confirm": "Record what a dialog asks",
+    "merge": "Whole group: all one organisation",
+    "split": "Whole group: split it",
+    "take": "Take the suggestion"
+  },
+  "notice": {
+    "same": "Recorded: same",
+    "different": "Recorded: different",
+    "unsure": "Recorded: not sure",
+    "failed": "The decision could not be recorded. Try again.",
+    "undone_one": "Undone: {{count}} pair is open again",
+    "undone_other": "Undone: {{count}} pairs are open again"
+  },
+  "qa": {
+    "open": "Open",
+    "decided": "Decided",
+    "pace": "Pace",
+    "perHour": "{{n}} an hour",
+    "band": "Review band",
+    "bandValue": "{{pairs}} pairs in {{groups}} groups; the {{loaded}} groups that settle most are loaded",
+    "audit": "Audit the {{count}} auto-accepted pairs",
+    "agreed": "With the suggestion",
+    "agreedValue": "{{agreed}} of {{of}}"
+  },
+  "audit": {
+    "title_one": "A sample of {{count}} pair the machine accepted on its own",
+    "title_other": "A sample of {{count}} pairs the machine accepted on its own",
+    "help": "Drawn at random from everything above the accept band. Read-only in this prototype.",
+    "simulated": "{{right}} of {{total}} are the same organisation in the generator's truth. A real estate has no such column; there a reviewer's audit takes its place.",
+    "probability": "Probability",
+    "truth": "Truth (synthetic)",
+    "table": "The sampled pairs"
+  },
+  "graph": {
+    "loading": "Loading the graph…",
+    "headline": "{{records}} records from {{systems}} source systems describe {{organisations}} organisations",
+    "tile": {
+      "records": "Source records",
+      "organisations": "Organisations after resolution",
+      "multi": "Backed by more than one record",
+      "open": "Pairs waiting for a decision"
+    },
+    "toReview": "Review them",
+    "schemaTitle": "What is in the graph, and how it connects",
+    "schemaDeclared": "The schema is declared for this synthetic estate: it follows the source columns. Proposing a schema from the data is designed, not built.",
+    "schemaInduced": "The schema was proposed from the data and approved.",
+    "relations": "Relations between the concepts",
+    "attributes": "How often each attribute has a value",
+    "filled": "{{pct}}% filled",
+    "largest": "Largest first",
+    "sampleNote": "{{shown}} shown. This preview carries {{sample}} of the {{total}} organisations in full.",
+    "shownOf": "{{shown}} of {{total}} shown",
+    "find": "Find something",
+    "searchLabel": "Name of an organisation, city or industry",
+    "searchHint": "For example: Clearline",
+    "noHits": "Nothing in this preview has that in its name.",
+    "back": "Graph",
+    "position": "Where this is",
+    "unknown": "This preview does not carry that node.",
+    "neighbourhood": "What it connects to",
+    "more": "{{n}} more",
+    "size": {
+      "records_one": "{{n}} record",
+      "records_other": "{{n}} records",
+      "organisations_one": "{{n}} organisation",
+      "organisations_other": "{{n}} organisations"
+    },
+    "orgSummary_one": "Backed by {{n}} record from {{systems}} source system",
+    "orgSummary_other": "Backed by {{n}} records from {{systems}} source systems",
+    "refSummary": "{{n}} organisations in the estate; {{listed}} of them are carried in this preview",
+    "systemSummary": "{{n}} records in the estate; {{listed}} organisations with a record here are carried in this preview",
+    "valuesTitle": "What its records say",
+    "valuesHelp": "Each value with the number of records that give it. More than one value in a row means the records disagree.",
+    "ofRecords": "{{n}} of {{total}}",
+    "showRecords_one": "Show the {{count}} record",
+    "showRecords_other": "Show the {{count}} records",
+    "openHelp": "The review band has not decided these. Until someone does, they stay separate organisations.",
+    "pairsDecided": "{{decided}} of {{total}} pairs decided",
+    "review": "Review"
+  },
+  "group": {
+    "title": "The whole group",
+    "help_one": "One decision for the {{count}} record of this group. It decides the pairs that are still open; a pair you already decided stays as it is.",
+    "help_other": "One decision for all {{count}} records of this group. It decides the pairs that are still open; a pair you already decided stays as it is.",
+    "merge": "All one organisation",
+    "split": "Split the group",
+    "mergeTitle_one": "Decide this {{count}} record as one organisation",
+    "mergeTitle_other": "Decide all {{count}} records as one organisation",
+    "mergeConfirm_one": "Record {{count}} pair as same",
+    "mergeConfirm_other": "Record {{count}} pairs as same",
+    "mergeOutcome_one": "{{count}} open pair becomes Same.",
+    "mergeOutcome_other": "{{count}} open pairs become Same.",
+    "nothingOpen": "No pair in this group is open, so there is nothing to decide.",
+    "kept_one": "{{count}} pair already has a decision and stays as it is.",
+    "kept_other": "{{count}} pairs already have a decision and stay as they are.",
+    "disagree_one": "{{count}} of those decisions says otherwise. If it is wrong, change it on the pair itself.",
+    "disagree_other": "{{count}} of those decisions say otherwise. If they are wrong, change them on the pairs themselves.",
+    "separates_one": "This split separates {{count}} pair the machine accepted on its own. That pair is not in the review queue, so it is recorded with the split as an objection and not decided here.",
+    "separates_other": "This split separates {{count}} pairs the machine accepted on its own. Those pairs are not in the review queue, so they are recorded with the split as objections and not decided here.",
+    "splitTitle_one": "Split this {{count}} record into organisations",
+    "splitTitle_other": "Split these {{count}} records into organisations",
+    "splitHelp": "Give each record a letter. Records with the same letter are one organisation. The starting point follows the links the machine accepted and the pairs you called the same.",
+    "partOf": "Which organisation {{name}} belongs to",
+    "splitConfirm_one": "Record {{count}} pair",
+    "splitConfirm_other": "Record {{count}} pairs",
+    "splitOutcome": "{{parts}} organisations. Open pairs that become Same: {{same}}. Open pairs that become Different: {{different}}.",
+    "onePart": "Every record has the same letter. Give at least one record another letter, or use “All one organisation”.",
+    "recorded": {
+      "merge_one": "Group decided as one organisation: {{count}} pair recorded",
+      "merge_other": "Group decided as one organisation: {{count}} pairs recorded",
+      "split_one": "Group split: {{count}} pair recorded",
+      "split_other": "Group split: {{count}} pairs recorded"
+    },
+    "recordedSeparates_one": "It separates {{count}} pair the machine had accepted; recorded as an objection.",
+    "recordedSeparates_other": "It separates {{count}} pairs the machine had accepted; recorded as objections.",
+    "undo_one": "Undo ({{count}} pair)",
+    "undo_other": "Undo ({{count}} pairs)",
+    "undoShort": "Undo",
+    "undone": "Undone, or decided again since: no pair still rests on this group decision."
+  },
+  "suggest": {
+    "title": "Suggestion",
+    "record": {
+      "same": "Among pairs already decided that look like this one, {{agree}} of {{total}} were the same. What they have in common:",
+      "different": "Among pairs already decided that look like this one, {{agree}} of {{total}} were different. What they have in common:"
+    },
+    "trust": "Checked on {{pairs}} decided pairs the suggestion had not seen: right in {{right}} of 100.",
+    "baseline": "Calling every pair the same would be right in {{right}} of 100.",
+    "synthetic": "On this synthetic data the generator's truth stands in for recorded decisions.",
+    "take": {
+      "same": "Take it: same",
+      "different": "Take it: different"
+    },
+    "taken": "Taken"
+  },
+  "condition": {
+    "agrees": "agrees",
+    "differs": "differs",
+    "missing on one side": "missing on one side",
+    "differs or is missing": "differs or is missing",
+    "not the same, or missing": "not the same, or missing",
+    "not the same": "not the same",
+    "close, not the same": "close, not the same",
+    "close or the same": "close or the same",
+    "present on both sides": "present on both sides"
+  }
+}

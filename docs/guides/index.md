@@ -14,7 +14,7 @@ framework? Start with [Getting Started](../getting-started/index.md) and
 
 - :material-file-refresh: **[Incremental ingest](incremental-ingest.md)**
   Document churn without a full rebuild: `latence delta` / `retract` / `purge`, O(changed)
-  extraction, exact corpus-level recompute — equivalence to a full rebuild proven on real data.
+  extraction, exact corpus-level recompute — equivalence to a full rebuild held by a test.
 
 - :material-tune: **[Tune a stack per device](../tuning.md)**
   Auto-tune batch sizes and device knobs per host with `latence tune`.
@@ -23,8 +23,8 @@ framework? Start with [Getting Started](../getting-started/index.md) and
   Compare Providers on a Capability — quality, throughput, license, and cost in one table.
 
 - :material-flag-checkered: **[The e2e campaign wizard](benchmark-campaign.md)**
-  `latence-campaign`: gated, resumable benchmark stages from corpus acquisition through the
-  full pipeline to measured retrieval — byte-identical configs, license lanes enforced.
+  `latence-campaign`: gated, resumable benchmark stages from corpus acquisition through OCR
+  to the full pipeline — byte-identical configs, license lanes enforced.
 
 </div>
 
@@ -44,21 +44,8 @@ framework? Start with [Getting Started](../getting-started/index.md) and
 
 <div class="grid cards" markdown>
 
-- :material-database-import: **[Retrieval-engine input specification](../RETRIEVAL-ENGINE-INPUT-SPEC.md)**
-  The exact contract a downstream retrieval engine consumes from a Latence run — the shape
-  of the RAG-ready corpus and knowledge graph.
-
-- :material-graph: **[Graph-rescue retrieval](graph-rescue-retrieval.md)**
-  The production graph-at-query-time architecture: base dense+BM25, a policy-gated graph
-  lane that appends (never fuses), and a token-budget selector — measured defaults, zero
-  LLM calls online.
-
-- :material-database-search: **[Serving with Qdrant](serving-qdrant.md)**
-  The verified Export → collection → served-queries path: pinned compose, `distance: dot`,
-  `hnsw_ef: 512` — recall parity with brute force measured on the full query sets.
-
 - :material-vector-combine: **[Embedders](../embedders.md)**
-  The opt-in RAG-corpus vector augmentation and how it plugs into Export.
+  The Embedder Capability as a resolution signal, and where each Stage names one.
 
 </div>
 

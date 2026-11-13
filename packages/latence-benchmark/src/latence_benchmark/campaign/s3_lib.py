@@ -20,8 +20,8 @@ network — so the offline suite proves the exact bytes the stage will write:
   cards (verified 2026-08-04); estimates are recorded as such in metrics.
 * **The generator** renders one dataset's full-feature pipeline.yaml from the campaign's
   :class:`~latence_benchmark.campaign.wizard.S3Answers` — the gpu-sota spine + per-chunk
-  schema induction + hyperedges + graph features + context enrichment + the retrieval-signal
-  exports, wired exactly as the blessed stacks wire them (see the inline stage comments).
+  schema induction + the KG and corpus exports, wired exactly as the blessed stacks wire them
+  (see the inline stage comments).
 """
 
 from __future__ import annotations
@@ -122,8 +122,9 @@ def induction_call_budgets(
     2. A dataset NOT in the estimates falls back to an even share of the budget the known
        datasets leave over (never a share of the whole cap, which would double-spend it).
     3. If the estimated total spend (allocated calls × the model's per-call estimate)
-       exceeds ``budget_usd_cap``, EVERY allocation is scaled down proportionally — the cap
-       is the hard bound; generation is never blocked and the cap is never exceeded.
+       exceeds ``budget_usd_cap``, EVERY allocation is scaled down proportionally.
+       Generation is never blocked, and the ESTIMATED spend never exceeds the cap. The actual
+       spend depends on what each call really costs and is not checked against it.
 
     Floor division throughout, so the summed spend estimate never exceeds the cap.
     """
@@ -305,11 +306,9 @@ def generate_pipeline_yaml(
     → redact off the same chunk stream (extract_on: unmasked — extraction reads raw text,
     masking applies to the exported corpus; guardrails per config) → profiling →
     type_consolidation.exact_surface → disambiguation.exact_surface (the linear full-corpus
-    path — the cascade walls past ~10⁴ surfaces, the M6 lesson) → graph.canonical with
-    hyperedges (graph.canonical ONLY carries the block) + degree graph_features → context
-    enrichment off [redact, graph] (masked AND enriched corpus rows) → KG export with the
-    hyperedge KV sidecar + corpus export with the cuda sentence-transformers embedder,
-    context columns and the BM25 artifact.
+    path — the cascade walls past ~10⁴ surfaces, the M6 lesson) → graph.canonical → KG export
+    + corpus export off redact (masked corpus rows) with the cuda sentence-transformers
+    embedder.
     """
     if induce:
         entity_floor = list(INDUCED_FLOOR_ENTITY)
@@ -444,40 +443,22 @@ def generate_pipeline_yaml(
             "graph_assembly",
             "graph.canonical",
             depends_on=["disambiguate"],
-            config={
-                "corpus_id": f"s3-{dataset}",
-                "hyperedges": {
-                    "weak_hyperedges": True,
-                    "max_arity": 12,
-                    "min_tokens": 25,
-                    "max_tokens": 180,
-                    "max_window_sentences": 3,
-                },
-                "graph_features": {"provider": "graph_features.degree"},
-            },
-        ),
-        _stage(
-            "enrich",
-            "context_enrichment",
-            "context.kg_header",
-            depends_on=["redact", "graph"],
-            config={"max_neighbors_per_entity": 4, "max_triples": 6},
+            config={"corpus_id": f"s3-{dataset}"},
         ),
         _stage(
             "export_kg",
             "export",
             "export.knowledge_graph",
             depends_on=["graph"],
-            config={"basename": "graph", "hyperedge_kv": True},
+            config={"basename": "graph"},
         ),
         _stage(
             "export_corpus",
             "export",
             "export.jsonl_parquet",
-            depends_on=["enrich"],
+            depends_on=["redact"],
             config={
                 "basename": "corpus",
-                "context_columns": True,
                 "embedder": {
                     "provider": "embedding.sentence_transformers",
                     "config": {
@@ -486,7 +467,6 @@ def generate_pipeline_yaml(
                         "device": "cuda",
                     },
                 },
-                "bm25": {"provider": "tokenizer.regex"},
             },
         ),
     ]
@@ -537,7 +517,7 @@ def dataset_metrics_from_report(
 ) -> dict[str, Any]:
     """The gate numbers of one dataset run, read from its ``quality-report.json``.
 
-    Chunks / mentions / relations / entities / hyperedges / PII come from the report's typed
+    Chunks / mentions / relations / entities / PII come from the report's typed
     sections; guardrail RiskMarkers are not rolled up by the Quality Report (they live on
     the exported chunk rows), so the honest byte-backed neighbour — flagged chunks after
     screening — is recorded alongside an explicit pointer instead of a fabricated count.
@@ -545,7 +525,6 @@ def dataset_metrics_from_report(
     does not carry the model id); unknown/empty prices at the conservative fallback card.
     """
     graph = _section(report, "graph")
-    hyper = graph.get("hyperedges")
     induction: dict[str, Any] | None = None
     for stage in report.get("stages", []):
         if isinstance(stage, dict) and stage.get("capability") == "schema_induction":
@@ -569,9 +548,6 @@ def dataset_metrics_from_report(
         "relations": int(_section(report, "relations").get("relations_total", 0)),
         "entities": int(graph.get("nodes_total", 0)),
         "edges": int(graph.get("edges_total", 0)),
-        "hyperedges": (
-            int(hyper.get("hyperedges_total", 0)) if isinstance(hyper, dict) else 0
-        ),
         "pii_total": int(_section(report, "redaction").get("pii_total", 0)),
         "pii_per_type": dict(_section(report, "redaction").get("per_type", {})),
         "guardrail_note": (

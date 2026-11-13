@@ -48,16 +48,17 @@ docs/ASSET-INVENTORY.md
 docs/PITCH-SLIDES.md
 docs/audits/
 benchmark/enterprise-gold/store/
-# official eval data: dataset-derived artifacts stay local (HotpotQA CC BY-SA share-alike,
-# ticket 02); judgments/maps/results are committed, corpora+exports+gold regenerate via
-# benchmark scripts + the pod runbooks.
+# official eval data: dataset-derived artifacts stay local (HotpotQA CC BY-SA share-alike);
+# judgments/maps/results are committed as dated records. The scripts that wrote the ignored
+# files below were removed with the retrieval layer on 2026-11-10, so nothing in the tree
+# regenerates them; the patterns stay so an old local copy is never committed.
 benchmark/official-data/*/export/
 benchmark/official-data/*/*-dev.jsonl
 benchmark/official-data/*/*-test.jsonl
 benchmark/official-data/*/query-surfaces.jsonl
 benchmark/official-data/*/calibration-sample.jsonl
 # e2e-sota-run campaign corpus (S1): raw acquisitions + downloaded archives stay local —
-# every dataset lane except MuSiQue's attribution lane forbids redistribution
+# every dataset lane keeps its corpus on the machine that fetched it
 # (see latence_benchmark/campaign/corpus_stage.py CORPUS_PLAN).
 benchmark/sota-corpus/*/raw/
 benchmark/sota-corpus/**/*.zip

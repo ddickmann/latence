@@ -150,13 +150,13 @@ claimed 25 packages / 56 distributions / 58 assets against a tree that had none 
 
 | measured | value | derivation |
 | --- | --- | --- |
-| packages built | 34 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
-| distributions | 68 | one sdist + one wheel per package (every package builds with `hatchling`) |
-| assets checksummed | 70 | the 68 distributions + `sbom.cdx.json` + `VERIFY.md` |
+| packages built | 30 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
+| distributions | 60 | one sdist + one wheel per package (every package builds with `hatchling`) |
+| assets checksummed | 62 | the 60 distributions + `sbom.cdx.json` + `VERIFY.md` |
 
-`shasum -a 256 -c SHA256SUMS` verified all 70. The CycloneDX 1.6 SBOM was generated from
-`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 207 components — 173 pinned
-third-party requirements plus 34 workspace path entries (see below). Running
+`shasum -a 256 -c SHA256SUMS` verified all 62. The CycloneDX 1.6 SBOM was generated from
+`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 203 components — 173 pinned
+third-party requirements plus 30 workspace path entries (see below). Running
 `scripts/generate-sbom.sh` twice produced a byte-identical `sbom.cdx.json`
 (`--output-reproducible`), so the release is reproducible from the same lockfile.
 
@@ -168,7 +168,13 @@ third-party requirements plus 34 workspace path entries (see below). Running
 > moved (205→207, 171→173 pinned, 24→26 folded-in pins) because those two became DECLARED
 > requirements of the excluded package's own lock. The three table rows did not move.
 >
-> Those 34 components are emitted as `unknown`: they are the `./packages/...` path
+> **Re-measured 2026-11-09** on the commit that removed the four retrieval packages
+> (`latence-retrieval`, `latence-sink-qdrant`, `latence-splade`, `latence-muvera` — ADR-0068).
+> The previous block recorded 34 / 68 / 70 assets and 207 components (173 + 34) against a
+> 34-package tree; the numbers above are again a fresh local rehearsal of the same three
+> commands. The pinned third-party count read 173 before and after.
+>
+> Those 30 components are emitted as `unknown`: they are the `./packages/...` path
 > requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
 > cannot resolve to a name or version. They are inert for CVE matching — the third-party
 > surface an adopter scans is the 173 pinned components — but they do pad the component
@@ -183,7 +189,7 @@ third-party requirements plus 34 workspace path entries (see below). Running
 > `sentence-transformers` and the rest, while still being stamped, checksummed and
 > Sigstore-signed as evidence. Recorded during the pre-release supply-chain audit.
 >
-> **One of the 34 is not a workspace member** (ADR-0064). `latence-gliner25` pins
+> **One of the 30 is not a workspace member** (ADR-0064). `latence-gliner25` pins
 > `gliner2[local]>=2.0,<3` while `latence-extract-gliner2` / `latence-pii-gliner2` pin
 > `gliner2[local]>=1.3,<2`; a uv workspace is ONE resolved environment, so `uv lock`
 > refuses the set — correctly — and the root `pyproject.toml` excludes it under

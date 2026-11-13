@@ -21,10 +21,9 @@ Every command is copy-pasteable. Where a claim comes from a real pod run it is s
 >   honesty) — the config still validates, but a real run needs CUDA. Deployment topologies
 >   (Docker Compose, K8s/Helm, air-gapped, the Blackwell note) live in
 >   [`docs/deployment.md`](deployment.md).
-> - **This is the ingest/AI-ready-data product, not a query engine.** It emits a RAG corpus + a
->   knowledge graph **as files** — the retrieval/query engine that consumes them is a separate
->   product. The exact build contract for that consumer is
->   [`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
+> - **This is the ingest/AI-ready-data product, not a query engine.** It emits a corpus + a
+>   knowledge graph **as files**. A retrieval/query engine that consumes them is a separate
+>   product: the framework ships no query-time tooling (ADR-0068).
 > - **Full-corpus GLiNER2 + GLinker is validated at small scale.** The composed enterprise stack is
 >   pod-validated end-to-end on a small corpus; it is the SOTA half of every seam, not a
 >   throughput-at-1M-docs benchmark.
@@ -37,18 +36,15 @@ Point the pipeline at a folder of messy enterprise files (PDF, scans, Office doc
 and it emits, per corpus run, three deliverables as **plain files** (JSONL / Parquet / RDF / JSON) on
 any fsspec backend — never a live database (ADR-0017):
 
-- **A chunk-level RAG corpus** — `records.jsonl` + `records.parquet`: retrieval text + full
-  `Provenance` (source + offsets) + `Classification` + per-chunk `induced_labels` + a KG
-  `context_header` + a dense Granite r2 `embedding` vector. With PII ON the text is the
+- **A chunk-level corpus** — `records.jsonl` + `records.parquet`: the processed text + full
+  `Provenance` (source + offsets) + `Classification` + per-chunk `induced_labels` + a dense
+  Granite r2 `embedding` vector. With PII ON the text is the
   **masked** (PII-safe) variant.
 - **An evidence-linked knowledge graph** — `graph-nodes.parquet`, `graph-edges.parquet`,
   `graph.ttl`, `graph.graphml`: typed entities + relations (asserted **and** ULTRA-completed),
   every edge citing the mentions/documents that justify it.
 - **A Quality Report** — `quality-report.json` + `quality-report.md`: per-Stage counts, KG
   statistics, the disambiguation merge audit, contract-completeness, no-PII-leak check.
-
-The full field reference for consumers lives in
-[`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
 
 ---
 
@@ -200,9 +196,10 @@ PY
 ## 2. Serve the LightOn-OCR vLLM endpoint (the OCR prereq)
 
 The enterprise parse Stage is `parser.lighton_vllm` — it does **not** run OCR in-process; it POSTs
-each rasterised page to a **running vLLM server**. Pod-measured, vLLM at concurrency is
-~**2.7× faster than optimised in-process transformers**, which is why production OCR is a warm
-server (the full recipe + tuning is [`docs/serving-lighton-vllm.md`](serving-lighton-vllm.md)).
+each rasterised page to a **running vLLM server**. Production OCR is a warm server by decision
+(ADR-0030). The served and the in-process path have not been measured against each other on one
+machine: `PERF-RESULTS.md` lists that comparison as pending. The full recipe + tuning is
+[`docs/serving-lighton-vllm.md`](serving-lighton-vllm.md).
 
 Stand it up on the pod (LightOn's official, optimal-throughput config):
 
@@ -281,8 +278,8 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 ```text
 source → intake_screen → parse[lighton_vllm] → chunk[768] → content_screen
   → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-  → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
-  → enrich(context) → export_kg + export_corpus[Granite r2, context_columns, bm25]
+  → profiling → consolidate_types → disambiguate[glinker] → graph → complete[ultra, skip_if_unavailable]
+  → export_kg + export_corpus[Granite r2]
 ```
 
 **Deterministic + scriptable (CI/repro).** `--non-interactive` takes every answer from flags, and
@@ -309,31 +306,24 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
 >   `[person, organization]`, `compile` on by default on GPU — T7) and **redact → `redaction.gliner2`**
 >   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
->   model library; chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus`
+>   model library; chunk-level, financial-PII floor — the W16 `redact → export_corpus`
 >   dataflow).
 > - **disambiguate → `disambiguation.glinker`** — the neural GLinker entity-linker + audited resolver
 >   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the **IBM Granite r2**
 >   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy edit-distance rung +
 >   distinguishing-token guard ON) ride the provider defaults — the config stays minimal and the ER
 >   is precise out of the box.
-> - **graph → `graph.canonical`** with the ADR-0051 **`graph_features: graph_features.pagerank`**
->   block — PageRank `centrality` + label-propagation `community` stamped on every node, promoted to
->   `graph-nodes.parquet` columns and projected onto each chunk. These are what the retrieval
->   Expander's graph bonuses and the Knapsack packer's centrality/cluster inputs read; without the
->   block they are absent/`0.0`.
+> - **graph → `graph.canonical`** — content-addressed nodes and edges, every edge carrying its
+>   Evidence.
 > - **→ complete → `graph_completion.ultra`** (`skip_if_unavailable: true` — no vendored checkpoint
 >   means a graceful skip, never a failed run) → **`export.knowledge_graph`**
->   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors **and the ADR-0049
->   `bm25: tokenizer.regex` block** — the index-time term statistics (`bm25-stats.json` +
->   `bm25-postings.parquet`) the query-side sparse rescorer runs on. Without it the stack ships
->   dense-only and the hybrid fuser has no sparse leg.
+>   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors.
 
 > **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it consumes
 > the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the model window,
-> so no PII is truncated), and `enrich` reads THAT redacted chunk stream
-> (`redact → enrich → export_corpus`). The corpus Export materializes `masked_content`, so the
-> exported RAG corpus is **both masked (PII-safe) AND context-enriched** — the per-chunk
-> `context_header`/`induced_labels` and the masking compose, with no trade-off.
+> so no PII is truncated), and `export_corpus` reads THAT redacted chunk stream
+> (`redact → export_corpus`). The corpus Export materializes `masked_content`, so the
+> exported corpus is **masked (PII-safe)** and still carries the per-chunk `induced_labels`.
 
 > **Redaction floor + mask-before-extract (W18, ADR-0044).** (1) A **universal financial-PII floor** —
 > `credit_card` / `iban` / `ssn` are ALWAYS masked at the shared redaction seam no matter which
@@ -349,7 +339,7 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 
 The wizard above generates this file for you. Author it by hand when you want to see — and tune —
 every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise-sota spine (the
-`stacks/gpu-sota-glinker.yaml` shape with the full induce → enrich → complete spine).
+`stacks/gpu-sota-glinker.yaml` shape with the full induce → complete spine).
 
 > **Why this config matters more than the model.** With generic English labels, a low threshold, and
 > no schema induction, the output is noisy — pronouns/laws/products get mistyped as entities and the
@@ -380,8 +370,8 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 # stacks/my-corpus.yaml — the enterprise-SOTA stack:
 #   source → intake_screen → parse[lighton_vllm] → chunk[768] → content_screen
 #     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-#     → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
-#     → enrich(context) → export_kg + export_corpus[Granite r2 + bm25]
+#     → profiling → consolidate_types → disambiguate[glinker] → graph → complete[ultra]
+#     → export_kg + export_corpus[Granite r2]
 #
 # {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §4.1 before `latence run`.
 name: my-corpus-stack
@@ -469,8 +459,8 @@ stages:
   #    remains supported and drops in here unchanged, but it is not what the guided setup blesses.)
   #    W16 (ADR-0042): redact is a CHUNK→CHUNK transform — it consumes the induced CHUNK stream and
   #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
-  #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
-  #    redacted chunk stream, so export_corpus is masked AND enriched.
+  #    depends_on induce so the induced pii_types UNION onto this floor; export_corpus then reads
+  #    THIS redacted chunk stream, so the exported corpus is masked.
   #    T2: the `pii_labels` floor is UNIVERSAL — applied to every chunk, never subsetted by what a
   #    chunk induced (a leaked card in an "irrelevant" chunk must still be masked); only the induced
   #    pii_types are per chunk. `guardrails: true` turns on the GUARDRAILS half of the same
@@ -537,24 +527,14 @@ stages:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
 
-  # 11) Assemble the canonical, evidence-linked knowledge graph — WITH the ADR-0051 graph-feature
-  #     enrichment. `graph_features` resolves the PageRank computer and stamps a `centrality` score
-  #     + a label-propagation `community` id onto every node; export_kg promotes them to
-  #     graph-nodes.parquet columns and `enrich` projects them onto each chunk
-  #     (kg_node_centrality / kg_node_community). Those are the signals the retrieval Expander's
-  #     graph bonuses and the Knapsack packer's centrality/cluster inputs read — WITHOUT this block
-  #     they are all absent/0.0 and the graph half of the stack is wired but dead.
-  #     Pure Python, CPU-only, deterministic, zero extra deps, and additive: omit the block and the
-  #     emitted graph is byte-identical to before.
+  # 11) Assemble the canonical, evidence-linked knowledge graph: content-addressed nodes and
+  #     edges, every edge carrying its Evidence. Pure Python, CPU-only, deterministic.
   - name: graph
     capability: graph_assembly
     provider: graph.canonical
     depends_on: [disambiguate]
     config:
       corpus_id: my-corpus-stack
-      graph_features:
-        provider: graph_features.pagerank
-        config: {}
 
   # 12) ULTRA graph completion (zero-shot inductive link prediction). skip_if_unavailable: true —
   #     the checkpoint is not vendored, so on a host without it the Stage skips-with-flag (no
@@ -570,60 +550,34 @@ stages:
       target_precision: 0.9
       skip_if_unavailable: true
 
-  # 13) W13 context enrichment: project the assembled KG back onto each chunk as a compact, capped,
-  #     confidence-gated context_header (its canonical entities + top-k neighbor triples).
-  #     W16 (ADR-0042): its chunk input is the REDACTED induced stream (redact set masked_content),
-  #     so the enriched chunks carry induced_labels + context_header AND masked_content — the corpus
-  #     row is masked (PII-safe) AND enriched. (With no redact stage, wire this back to `induce`.)
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [redact, graph]
-    config:
-      max_neighbors_per_entity: 4     # hub-entity guard: per entity keep only its top-k relations
-      max_triples: 6                  # overall cap on the header's triples
-      min_entity_confidence: 0.0
-      min_edge_confidence: 0.0
-
-  # 14a) KG export (nodes/edges Parquet + TTL + GraphML), asserted + ULTRA-completed edges.
+  # 13a) KG export (nodes/edges Parquet + TTL + GraphML), asserted + ULTRA-completed edges.
   - name: export_kg
     capability: export
     provider: export.knowledge_graph
     depends_on: [graph, complete]
     config: {basename: graph}
 
-  # 14b) RAG-corpus export from the REDACTED+ENRICHED chunk stream: masked_content (materialized as
-  #      the corpus text, W16) + provenance + classification + induced_labels + context_header + a
-  #      dense Granite r2 embedding. context_columns: true → the two W13 Parquet columns.
-  #      `bm25` (ADR-0049) adds the INDEX-TIME sparse signal: it materializes bm25-stats.json +
-  #      bm25-postings.parquet next to the corpus — the corpus statistics the query-side BM25
-  #      rescorer runs on. WITHOUT this block no such files are written at all and the hybrid
-  #      fuser's sparse leg is dead (dense-only retrieval). `tokenizer.regex` is the reference
-  #      tokenizer (lowercase Unicode alphanumeric runs) the query side applies, so accented and
-  #      non-Latin terms match; it is not a word segmenter — an unspaced script (zh/ja/th) should
-  #      plug its own segmenter in behind the Tokenizer seam. Deterministic, CPU-only, additive.
+  # 13b) Corpus export from the REDACTED chunk stream: masked_content (materialized as the corpus
+  #      text, W16) + provenance + classification + induced_labels + a dense Granite r2
+  #      embedding. (With no redact stage, wire this back to `induce`.)
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [enrich]
+    depends_on: [redact]
     config:
       basename: records
-      context_columns: true
       embedder:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
-      bm25:
-        provider: tokenizer.regex
-        config: {}
 ```
 
-> **Masked and enriched in one file (W16, ADR-0042).** `redact` is a **chunk→chunk transform**: it
-> sets each chunk's `masked_content`, and `enrich` reads THAT redacted chunk stream
-> (`redact → enrich → export_corpus`). The corpus Export materializes `masked_content` as the row's
-> text, so the exported RAG corpus carries **masked (PII-safe) content AND** `induced_labels` +
-> `context_header` + `embedding` — masking and the per-chunk headers **compose in one file**. The
+> **Masked in one file (W16, ADR-0042).** `redact` is a **chunk→chunk transform**: it
+> sets each chunk's `masked_content`, and `export_corpus` reads THAT redacted chunk stream
+> (`redact → export_corpus`). The corpus Export materializes `masked_content` as the row's
+> text, so the exported corpus carries **masked (PII-safe) content AND** `induced_labels` +
+> `embedding`. The
 > structured `pii_spans` ride the same `ChunkRecord` (the raw PII value is never stored). With PII
-> OFF there is no `redact` Stage, so wire `enrich` back to `induce`.
+> OFF there is no `redact` Stage, so wire `export_corpus` back to `induce`.
 
 ### 4.1 Fill the placeholders
 
@@ -812,7 +766,7 @@ for l in open("$CK/redact.jsonl"):
           sorted({s["pii_type"] for s in spans}))
 PY
 # W16 (ADR-0042): redact is chunk→chunk — each ChunkRecord gains masked_content (the spans replaced)
-# + pii_spans, so enrich/export carry the masked text forward. look for: financial types firing
+# + pii_spans, so the export carries the masked text forward. look for: financial types firing
 # (iban, credit card number, tax id) — not just person/email/phone. The raw PII value is NEVER stored.
 ```
 
@@ -878,25 +832,6 @@ PY
 [ -s $CK/complete.jsonl ] && peek $CK/complete.jsonl || echo "ULTRA skipped (skip_if_unavailable) — no inferred edges; check quality-report.md 'skipped'."
 ```
 
-### 5.11 `enrich` → `enrich.jsonl` (chunks + `context_header`)
-```bash
-python - <<PY
-import json
-withhdr=0
-for l in open("$CK/enrich.jsonl"):
-    ch=json.loads(l).get("context_header")
-    if ch:
-        withhdr+=1
-        if withhdr<=3:
-            print("entities:", ch["entities"])
-            print("triples :", ch["neighbor_triples"])
-            print("neighbor_node_ids:", ch["neighbor_node_ids"]); print("---")
-print(withhdr, "chunks got a context header")
-PY
-# look for: each header = the chunk's canonical entities + a few "A —label→ B" triples, capped
-# (≤ max_triples). A chunk with no gated entity has context_header=null (that's fine).
-```
-
 ---
 
 ## 6. Run end-to-end
@@ -946,8 +881,7 @@ Everything lands under `export/`:
 
 ```bash
 ls -la /workspace/out/_latence/runs/run-0001/export/
-#   records.jsonl        records.parquet          ← RAG corpus
-#   bm25-stats.json      bm25-postings.parquet    ← sparse (BM25) index-time signal
+#   records.jsonl        records.parquet          ← the corpus
 #   graph-nodes.parquet  graph-edges.parquet
 #   graph.ttl            graph.graphml            ← knowledge graph
 EX=/workspace/out/_latence/runs/run-0001/export
@@ -961,10 +895,9 @@ The JSONL carries the **full** `ChunkRecord` dump (every field, nested objects i
 peek $EX/records.jsonl 1
 ```
 
-Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
-`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md` §2.1):
+Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`):
 
-- **`content`** — the retrieval text (markup-stripped). W16 (ADR-0042): with the `redact` Stage on,
+- **`content`** — the chunk text (markup-stripped). W16 (ADR-0042): with the `redact` Stage on,
   the Export materializes each chunk's **`masked_content`** here, so `content` is the **PII-safe
   (masked)** text — never the raw variant.
 - **`provenance`** — `source_uri`, `file_name`, `file_type`, `file_size`, `document_id`, and the
@@ -973,19 +906,14 @@ Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
 - **`classification`** — `language`, `category`, `sensitivity`.
 - **`induced_labels`** — the LLM-discovered `{entity_types, relation_types, pii_types}` for the corpus
   (the schema induction payoff), plus the `model_id` that induced it.
-- **`context_header`** — the KG projected onto this chunk: `entities` + aligned `entity_types`,
-  `neighbor_triples` (`A —label→ B`, capped), `kg_node_ids` (the chunk's own entities) and
-  `neighbor_node_ids` (query-time KG-expansion join keys). `null` for a chunk with no gated entity.
-- **`embedding`** — the dense **Granite r2 311m** vector (dimension 768, bf16 + FA2). It was computed
-  over `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and,
-  under W16, over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
+- **`embedding`** — the dense **Granite r2 311m** vector (dimension 768, bf16 + FA2), computed
+  over the **PII-safe (masked)** corpus text under W16, consistent with the stored `content`.
 - **`record_id`** (primary key), `document_record_id` (join key), `index`, `token_count`,
   `page_slice`/`offset_map`, `risk_markers`.
 
-The **Parquet** is a flat, retrieval-DB-friendly projection (nested fields as JSON strings). With
-`context_columns: true` it has: `record_id, schema_version, provenance, classification, content,
-media_type, embedding` **plus** `context_header` (JSON string) and `neighbor_entity_ids`
-(`list<string>` — the KG-expansion keys). Read it:
+The **Parquet** is a flat projection (nested fields as JSON strings):
+`record_id, schema_version, provenance, classification, content, media_type`, plus `embedding`
+when an `embedder:` is wired. Read it:
 
 ```bash
 python - <<PY
@@ -994,19 +922,15 @@ t = pq.read_table("$EX/records.parquet")
 print("rows:", t.num_rows, "| columns:", t.column_names)
 row0 = {k: t.column(k)[0].as_py() for k in t.column_names}
 print("embedding dim:", len(row0.get("embedding") or []))
-print("neighbor_entity_ids[0]:", row0.get("neighbor_entity_ids"))
 PY
 ```
 
-> If `context_header` / `neighbor_entity_ids` columns are missing, you forgot `context_columns: true`
-> on `export_corpus` (the JSONL always carries `context_header` via the record dump; the two extra
-> **Parquet** columns are opt-in). If `embedding` is missing, no `embedder:` was wired.
+> If `embedding` is missing, no `embedder:` was wired.
 
 ### 7.2 The knowledge graph
 
 ```bash
 # nodes: node_id, type (entity type), canonical_name, confidence, source_document_ids
-# + centrality (PageRank) and community (label-propagation) when `graph_features` is wired (§4 §11)
 python -c "import pyarrow.parquet as pq; t=pq.read_table('$EX/graph-nodes.parquet'); print(t.column_names); print(t.to_pylist()[:5])"
 # edges: edge_id, source_node_id, target_node_id, label, confidence (+ evidence)
 python -c "import pyarrow.parquet as pq; t=pq.read_table('$EX/graph-edges.parquet'); print(t.column_names); print(t.to_pylist()[:5])"
@@ -1024,8 +948,6 @@ python -c "import networkx as nx; g=nx.read_graphml('$EX/graph.graphml'); print(
 ### 7.3 The Quality Report
 
 `quality-report.md` (human) + `quality-report.json` (machine) — the per-run scorecard from §6.
-
-**Full field reference for downstream consumers:** [`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
 
 ---
 
@@ -1125,9 +1047,12 @@ The retracted records still live in the version that preceded the retraction —
 
 ### 8.4 `latence purge` — hard delete (GDPR / right-to-be-forgotten)
 
-The irreversible one. Unlike a retraction, **nothing is retained**: the on-disk source file, every
-derived record across **all** Corpus Versions (and any abandoned WAL residue), and the run artifacts
-are physically erased. Because it is destructive and non-recoverable, `purge` prompts for
+The irreversible one. Unlike a retraction, **nothing of the document is retained**: the on-disk
+source file, every derived record across **all** Corpus Versions (and any abandoned WAL residue),
+the run artifacts, and the file name and content hash each Corpus Version listed it under are
+physically erased. One thing stays on purpose: the document's content-addressed id, a one-way hash
+of the erased bytes, kept as a suppression tombstone so a Source that still serves the file cannot
+bring it back. Because it is destructive and non-recoverable, `purge` prompts for
 confirmation; pass `--yes` to skip it in a script.
 
 ```bash
@@ -1165,7 +1090,6 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | `complete` (ULTRA) reports `skipped` | no ULTRA checkpoint is vendored; `skip_if_unavailable: true` skips gracefully | expected — supply an ULTRA `.pth` via `complete.config.checkpoint` to enable inferred edges. |
 | Tail entities/relations missing; offsets look off on long chunks | chunk tokenised past the gliner `max_len` and was silently truncated | the wizard derives `max_len` from `--chunk-max-tokens` (~1.2× chunker→mdeberta): 768 → `max_len: 960`. A hand-edited stack must keep the pair (§4 callout). |
 | GPU Stages report `skipped` / `skip_reason` in the report | CPU-only host (device honesty — skipped-with-flag, never faked) | run on a real CUDA pod with a vLLM OCR endpoint up; the CPU-reachable spine still validates. |
-| `context_header` / `neighbor_entity_ids` absent from `records.parquet` | `context_columns` not set on `export_corpus`, or the corpus was exported from `redact` not `enrich` | set `context_columns: true` and wire `export_corpus → enrich` (§4). |
 | A re-run didn't pick up a config change to an early Stage | resume is keyed by **stage name**; an existing checkpoint under the same name is skipped | delete that Stage's checkpoint (`rm $CK/<stage>.jsonl`) or use a fresh `--run-id`. |
 | `latence delta` committed no new Version | the source folder is unchanged — a delta over an identical corpus is an idempotent no-op | change the folder before the delta; nothing to commit is correct behaviour (§8.1). |
 | `retract`/`purge` says the id `does not look like a document id` | the id isn't `sha256:<64 hex>` | get a real `document_id` from `records.jsonl` (`provenance.document_id`) or by hashing the file (§8.2). |

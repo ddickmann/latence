@@ -253,3 +253,50 @@ def test_xcom_backend_gathers_parents_in_order() -> None:
 
     gathered = xcom.gather(cast(Stage, _Stage()))
     assert gathered == cast(list[StageOutput], ["a1", "a2", "b1"])
+
+
+def test_a_template_pipeline_is_refused_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Pipeline with an unfilled ``{STORAGE_URI}`` is a config error under this Runner too.
+
+    The adapter never calls the local Runner's ``run()``, so the refusal the local Runner makes
+    does not cover it. Executed as written, the template would create a directory literally named
+    ``{STORAGE_URI}`` under the working directory and report an empty corpus. ``build_dag`` refuses
+    as well, and before it needs Airflow: a DAG built from a template would only fail (or, worse,
+    not fail) once scheduled.
+    """
+    from latence_core.errors import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    template = _pipeline("'{STORAGE_URI}'", Path("{CORPUS_DIR}"))
+    with pytest.raises(ConfigError, match=r"\{STORAGE_URI\}"):
+        AirflowRunner().run(template, run_id="af")
+    with pytest.raises(ConfigError, match=r"\{STORAGE_URI\}"):
+        AirflowRunner().build_dag(template)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_pipeline_with_a_removed_config_key_is_refused_before_anything_is_written(
+    docs_dir: Path, tmp_path: Path
+) -> None:
+    """A config key ADR-0068 removed is a config error under this Runner too.
+
+    ``export.jsonl_parquet`` no longer reads ``context_columns``, so without the refusal this run
+    completes and the corpus carries none of the columns the key asks for. The refusal names the
+    key, the Stage and the ADR, and comes before the storage root exists. ``build_dag`` refuses as
+    well, before it needs Airflow.
+    """
+    from latence_core.errors import ConfigError
+
+    store = tmp_path / "store"
+    pipeline = _pipeline(f"file://{store}", docs_dir)
+    next(s for s in pipeline.stages if s.name == "export").config["context_columns"] = True
+
+    with pytest.raises(ConfigError, match="'context_columns'") as excinfo:
+        AirflowRunner().run(pipeline, run_id="af")
+    assert "Stage 'export'" in str(excinfo.value)
+    assert "ADR-0068" in str(excinfo.value)
+    with pytest.raises(ConfigError, match="'context_columns'"):
+        AirflowRunner().build_dag(pipeline)
+    assert not store.exists()

@@ -1,0 +1,513 @@
+{
+ "source": "eloukas/edgar-corpus:2020/test.jsonl",
+ "filings_read": 685,
+ "characters_read": 59694574,
+ "filings_with_a_definition": 568,
+ "definitions": 6852,
+ "acronyms": 6037,
+ "short_names": 815,
+ "most_frequent_short_forms": [
+  [
+   "SEC",
+   191
+  ],
+  [
+   "ASC",
+   105
+  ],
+  [
+   "FASB",
+   93
+  ],
+  [
+   "FDA",
+   63
+  ],
+  [
+   "PPP",
+   61
+  ],
+  [
+   "ASU",
+   58
+  ],
+  [
+   "SBA",
+   45
+  ],
+  [
+   "LIBOR",
+   40
+  ],
+  [
+   "U.S.",
+   37
+  ],
+  [
+   "SG&A",
+   37
+  ],
+  [
+   "EU",
+   35
+  ],
+  [
+   "NYSE",
+   34
+  ],
+  [
+   "GAAP",
+   34
+  ],
+  [
+   "CARES",
+   30
+  ],
+  [
+   "GDPR",
+   26
+  ],
+  [
+   "CMS",
+   26
+  ],
+  [
+   "FDIC",
+   25
+  ],
+  [
+   "EPA",
+   24
+  ],
+  [
+   "IND",
+   22
+  ],
+  [
+   "ESG",
+   22
+  ],
+  [
+   "R&D",
+   21
+  ],
+  [
+   "CFPB",
+   21
+  ],
+  [
+   "IRS",
+   21
+  ],
+  [
+   "CDC",
+   20
+  ],
+  [
+   "HIPAA",
+   19
+  ]
+ ],
+ "sample": [
+  {
+   "filing": "907471_2020.htm",
+   "short": "EIPs",
+   "long": "Economic Impact Payments"
+  },
+  {
+   "filing": "907254_2020.htm",
+   "short": "NAREIT",
+   "long": "National Association of Real Estate Investment Trusts"
+  },
+  {
+   "filing": "1262039_2020.htm",
+   "short": "Forcepoint",
+   "long": "Forcepoint LLC"
+  },
+  {
+   "filing": "1797768_2020.htm",
+   "short": "UC",
+   "long": "urothelial carcinoma"
+  },
+  {
+   "filing": "907471_2020.htm",
+   "short": "H&R Block",
+   "long": "H&R Block, Inc."
+  },
+  {
+   "filing": "1103795_2020.htm",
+   "short": "EOR",
+   "long": "enhanced oil recovery"
+  },
+  {
+   "filing": "1022505_2020.htm",
+   "short": "SDK",
+   "long": "Software Development Kit"
+  },
+  {
+   "filing": "1745999_2020.htm",
+   "short": "HSPCs",
+   "long": "hematopoietic stem and progenitor cells"
+  },
+  {
+   "filing": "1293310_2020.htm",
+   "short": "BCMA",
+   "long": "B-cell maturation antigen"
+  },
+  {
+   "filing": "1081316_2020.htm",
+   "short": "DRP",
+   "long": "Distributed Resource Plans"
+  },
+  {
+   "filing": "1826000_2020.htm",
+   "short": "ASC",
+   "long": "Accounting Standards Codification"
+  },
+  {
+   "filing": "26076_2020.htm",
+   "short": "Delerrok",
+   "long": "Delerrok Inc."
+  },
+  {
+   "filing": "1484769_2020.htm",
+   "short": "Vigtory",
+   "long": "Vigtory, Inc."
+  },
+  {
+   "filing": "928576_2020.htm",
+   "short": "ED1",
+   "long": "Electricity Distribution 1"
+  },
+  {
+   "filing": "1476963_2020.htm",
+   "short": "NSCLC",
+   "long": "Non-Small Cell Lung Cancer"
+  },
+  {
+   "filing": "1293310_2020.htm",
+   "short": "IP",
+   "long": "Intellectual property"
+  },
+  {
+   "filing": "1384195_2020.htm",
+   "short": "RCRA",
+   "long": "Recovery Act"
+  },
+  {
+   "filing": "1165002_2020.htm",
+   "short": "CTFs",
+   "long": "Common Trust Funds"
+  },
+  {
+   "filing": "100493_2020.htm",
+   "short": "FDA",
+   "long": "Food and Drug Administration"
+  },
+  {
+   "filing": "1441683_2020.htm",
+   "short": "CSF",
+   "long": "Common Security Framework"
+  },
+  {
+   "filing": "1361658_2020.htm",
+   "short": "NZD",
+   "long": "New Zealand dollars"
+  },
+  {
+   "filing": "1520006_2020.htm",
+   "short": "PHMSA",
+   "long": "Pipeline and Hazardous Materials Safety Administration"
+  },
+  {
+   "filing": "1081316_2020.htm",
+   "short": "OCAT",
+   "long": "Oregon Corporate Activity Tax"
+  },
+  {
+   "filing": "926660_2020.htm",
+   "short": "FFO",
+   "long": "Funds From Operations"
+  },
+  {
+   "filing": "879407_2020.htm",
+   "short": "NASH",
+   "long": "nonalcoholic steatohepatitis"
+  },
+  {
+   "filing": "1137774_2020.htm",
+   "short": "RBC",
+   "long": "Risk-Based Capital"
+  },
+  {
+   "filing": "1295810_2020.htm",
+   "short": "SEC",
+   "long": "Securities and Exchange Commission"
+  },
+  {
+   "filing": "1453593_2020.htm",
+   "short": "X-spine",
+   "long": "X-spine Systems, Inc."
+  },
+  {
+   "filing": "907471_2020.htm",
+   "short": "BSA/AML",
+   "long": "Bank Secrecy Act/anti-money laundering"
+  },
+  {
+   "filing": "1484612_2020.htm",
+   "short": "CMS",
+   "long": "Centers for Medicare and Medicaid Services"
+  },
+  {
+   "filing": "1376321_2020.htm",
+   "short": "EIT",
+   "long": "Enterprise Income Tax"
+  },
+  {
+   "filing": "928576_2020.htm",
+   "short": "CPST",
+   "long": "Customer Price Stability Tariff"
+  },
+  {
+   "filing": "1392545_2020.htm",
+   "short": "NIGC",
+   "long": "National Indian Gaming Commission"
+  },
+  {
+   "filing": "1578776_2020.htm",
+   "short": "CRO",
+   "long": "Compliance Risk Officer"
+  },
+  {
+   "filing": "314227_2020.htm",
+   "short": "USDA",
+   "long": "United States Department of Agriculture"
+  },
+  {
+   "filing": "51644_2020.htm",
+   "short": "IPG,",
+   "long": "Interpublic Group of Companies, Inc. and its subsidiaries"
+  },
+  {
+   "filing": "1171155_2020.htm",
+   "short": "Marvir",
+   "long": "Marvir Logistics, Inc.,"
+  },
+  {
+   "filing": "1721484_2020.htm",
+   "short": "ODE",
+   "long": "orphan drug exclusivity"
+  },
+  {
+   "filing": "1708035_2020.htm",
+   "short": "TCJA",
+   "long": "Tax Cuts and Jobs Act of 2017"
+  },
+  {
+   "filing": "1321741_2020.htm",
+   "short": "KeyBank",
+   "long": "KeyBank National Association"
+  },
+  {
+   "filing": "1099219_2020.htm",
+   "short": "CRO",
+   "long": "Chief Risk Officer"
+  },
+  {
+   "filing": "96869_2020.htm",
+   "short": "CUP",
+   "long": "Conditional Use Permits"
+  },
+  {
+   "filing": "1214816_2020.htm",
+   "short": "U.S.",
+   "long": "United States"
+  },
+  {
+   "filing": "1205922_2020.htm",
+   "short": "MDSCs",
+   "long": "myeloid-derived suppressor cells"
+  },
+  {
+   "filing": "1462418_2020.htm",
+   "short": "TCPA",
+   "long": "Telephone Consumer Protection Act"
+  },
+  {
+   "filing": "1262039_2020.htm",
+   "short": "IoT",
+   "long": "Internet of Things"
+  },
+  {
+   "filing": "88205_2020.htm",
+   "short": "Cues",
+   "long": "Cues, Inc."
+  },
+  {
+   "filing": "1426800_2020.htm",
+   "short": "GDPR",
+   "long": "General Data Protection Regulation"
+  },
+  {
+   "filing": "47307_2020.htm",
+   "short": "FPI",
+   "long": "Fluorescent Penetrant Inspection"
+  },
+  {
+   "filing": "1716621_2020.htm",
+   "short": "DOJ",
+   "long": "Department of Justice"
+  },
+  {
+   "filing": "850209_2020.htm",
+   "short": "ROIC",
+   "long": "Return on Invested Capital"
+  },
+  {
+   "filing": "1083743_2020.htm",
+   "short": "PPP",
+   "long": "Paycheck Protection Program"
+  },
+  {
+   "filing": "1437107_2020.htm",
+   "short": "SEC",
+   "long": "Securities and Exchange Commission"
+  },
+  {
+   "filing": "1108426_2020.htm",
+   "short": "ETA",
+   "long": "Energy Transition Act"
+  },
+  {
+   "filing": "810509_2020.htm",
+   "short": "SBA",
+   "long": "Small Business Administration"
+  },
+  {
+   "filing": "850460_2020.htm",
+   "short": "FIFO",
+   "long": "first-in, first-out"
+  },
+  {
+   "filing": "1823945_2020.htm",
+   "short": "Owl Rock",
+   "long": "Owl Rock Capital Group"
+  },
+  {
+   "filing": "1759425_2020.htm",
+   "short": "ALGS",
+   "long": "Alagille syndrome"
+  },
+  {
+   "filing": "896878_2020.htm",
+   "short": "EBITDA",
+   "long": "earnings before interest, taxes, depreciation and amortization"
+  },
+  {
+   "filing": "944745_2020.htm",
+   "short": "CFPB",
+   "long": "Consumer Financial Protection Bureau"
+  },
+  {
+   "filing": "1484612_2020.htm",
+   "short": "MS-DRG",
+   "long": "Medicare Severity Diagnosis Related Group"
+  },
+  {
+   "filing": "15615_2020.htm",
+   "short": "FCC",
+   "long": "Federal Communications Commission"
+  },
+  {
+   "filing": "704172_2020.htm",
+   "short": "NWTL",
+   "long": "Natural Well Technical Ltd."
+  },
+  {
+   "filing": "1521332_2020.htm",
+   "short": "Dynawave",
+   "long": "Dynawave Inc."
+  },
+  {
+   "filing": "1165320_2020.htm",
+   "short": "USPTO",
+   "long": "United States Patent and Trademark Office"
+  },
+  {
+   "filing": "1013880_2020.htm",
+   "short": "GDPR",
+   "long": "General Data Protection Regulation"
+  },
+  {
+   "filing": "1529113_2020.htm",
+   "short": "IPIN",
+   "long": "Indoor Positioning and Indoor Navigation"
+  },
+  {
+   "filing": "13372_2020.htm",
+   "short": "RRA",
+   "long": "Regulatory Reconciliation Adjustment"
+  },
+  {
+   "filing": "1059784_2020.htm",
+   "short": "TNF-a",
+   "long": "Tumor Necrosis Factor Alpha"
+  },
+  {
+   "filing": "230557_2020.htm",
+   "short": "NPL",
+   "long": "National Priorities List"
+  },
+  {
+   "filing": "97210_2020.htm",
+   "short": "SAB",
+   "long": "Staff Accounting Bulletin"
+  },
+  {
+   "filing": "1390162_2020.htm",
+   "short": "CRE",
+   "long": "Commercial real estate"
+  },
+  {
+   "filing": "1462418_2020.htm",
+   "short": "RESPA",
+   "long": "Real Estate Settlement Procedures Act"
+  },
+  {
+   "filing": "1792789_2020.htm",
+   "short": "STEM",
+   "long": "science, technology, engineering, and mathematics"
+  },
+  {
+   "filing": "1376231_2020.htm",
+   "short": "CSA",
+   "long": "Controlled Substance Act"
+  },
+  {
+   "filing": "879169_2020.htm",
+   "short": "AD",
+   "long": "atopic dermatitis"
+  },
+  {
+   "filing": "1030469_2020.htm",
+   "short": "NYSE",
+   "long": "New York Stock Exchange"
+  },
+  {
+   "filing": "1645260_2020.htm",
+   "short": "Toledo",
+   "long": "Toledo Advisors, LLC"
+  },
+  {
+   "filing": "1030469_2020.htm",
+   "short": "MGIC",
+   "long": "Mortgage Guaranty Insurance Corporation"
+  },
+  {
+   "filing": "810509_2020.htm",
+   "short": "Alseres",
+   "long": "Alseres Pharmaceuticals, Inc."
+  }
+ ]
+}

@@ -1,0 +1,152 @@
+{
+  "data": "data/text_2k",
+  "arm": {
+    "mentions": "gold",
+    "embedder": false,
+    "scorer": "rerank",
+    "decide": "none",
+    "aliases": true
+  },
+  "anchors": 2125,
+  "mentions": 4106,
+  "nil_mentions": 612,
+  "extraction": null,
+  "candidates_per_mention": 5.685582075012177,
+  "retrieval_recall_in_kb": 0.9962793360045793,
+  "top1_accuracy_in_kb": 0.8803663423010876,
+  "labels_used": {
+    "calibration": 800,
+    "ltt": 1500
+  },
+  "features": {
+    "top1_score": 1.1654492494897124,
+    "margin": 1.13593032399293,
+    "top1_lexical": 2.222526517853585,
+    "short_form": 2.1870265186379365,
+    "short_top1_score": 0.367393122439278,
+    "short_margin": 0.1321731162970784
+  },
+  "bands": {
+    "accept_at": 0.875,
+    "reject_below": null,
+    "share": {
+      "accept": 0.5684364344861179,
+      "review": 0.43156356551388214,
+      "reject": 0.0
+    },
+    "auto_link_precision_realised": 0.9627249357326478,
+    "auto_link_precision_wilson_lower": 0.9542479480693874,
+    "rejected_but_linkable_rate": NaN
+  },
+  "by_variant": {
+    "abbreviated": {
+      "n": 412,
+      "top1_accuracy": 0.9538834951456311,
+      "auto_linked_share": 0.6601941747572816
+    },
+    "acronym": {
+      "n": 276,
+      "top1_accuracy": 0.36594202898550726,
+      "auto_linked_share": 0.0036231884057971015
+    },
+    "canonical": {
+      "n": 1077,
+      "top1_accuracy": 0.9832869080779945,
+      "auto_linked_share": 0.8746518105849582
+    },
+    "lower_case": {
+      "n": 182,
+      "top1_accuracy": 0.9560439560439561,
+      "auto_linked_share": 0.7692307692307693
+    },
+    "no_legal_form": {
+      "n": 732,
+      "top1_accuracy": 0.9043715846994536,
+      "auto_linked_share": 0.76775956284153
+    },
+    "stem_only": {
+      "n": 355,
+      "top1_accuracy": 0.6845070422535211,
+      "auto_linked_share": 0.23380281690140844
+    },
+    "typo": {
+      "n": 460,
+      "top1_accuracy": 0.9652173913043478,
+      "auto_linked_share": 0.5717391304347826
+    }
+  },
+  "short_forms": {
+    "mentions": 331,
+    "ranker_weights": {
+      "score": 0.45076921624563543,
+      "in_thread": 0.0,
+      "defined": 0.0,
+      "alias_column": 0.0,
+      "popularity": -0.13862887300879997,
+      "context_doc": 0.1808504453653515,
+      "context_thread": 0.1808504453653515
+    },
+    "by_route": {
+      "initials": {
+        "n": 268,
+        "top1_accuracy": 0.376865671641791,
+        "auto_linked_share": 0.0037313432835820895,
+        "auto_link_precision": 1.0
+      },
+      "none": {
+        "n": 7,
+        "top1_accuracy": 0.0,
+        "auto_linked_share": 0.0,
+        "auto_link_precision": NaN
+      },
+      "scope": {
+        "n": 1,
+        "top1_accuracy": 0.0,
+        "auto_linked_share": 0.0,
+        "auto_link_precision": NaN
+      }
+    },
+    "by_signal": {}
+  },
+  "assignment": {
+    "machine_only": {
+      "pairwise_precision": 0.9123307198859587,
+      "pairwise_recall": 0.38929440389294406,
+      "pairwise_f1": 0.5457258580260073,
+      "bcubed_precision": 0.9839056665043026,
+      "bcubed_recall": 0.6938382854359474,
+      "bcubed_f1": 0.8137969085074914,
+      "predicted_clusters": 3153,
+      "gold_clusters": 2055,
+      "nil_precision": NaN,
+      "nil_recall": 0.0
+    },
+    "machine_plus_expert": {
+      "pairwise_precision": 0.9431746031746032,
+      "pairwise_recall": 0.9035888077858881,
+      "pairwise_f1": 0.9229574401988195,
+      "bcubed_precision": 0.9767628093614455,
+      "bcubed_recall": 0.9519124162085683,
+      "bcubed_f1": 0.964177517909606,
+      "predicted_clusters": 2161,
+      "gold_clusters": 2055,
+      "nil_precision": 1.0,
+      "nil_recall": 0.8839869281045751
+    }
+  },
+  "review_items": 1772,
+  "throughput": {
+    "scored_pairs": 23345,
+    "pairs_per_s": 183.7697068093416
+  },
+  "timings_s": {
+    "retrieve": 0.31,
+    "aliases": 0.11,
+    "score": 127.03,
+    "total": 127.6
+  },
+  "hardware": {
+    "cpus": 48,
+    "gpu": "NVIDIA RTX PRO 4000 Blackwell"
+  }
+}

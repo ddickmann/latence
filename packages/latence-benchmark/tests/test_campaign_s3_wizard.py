@@ -86,7 +86,7 @@ class TestGeneratorAndParser:
     def test_s3_block_round_trips(self) -> None:
         answers = CampaignAnswers(
             campaign_root="/camp",
-            datasets=("musique", "ohr_bench"),
+            datasets=("wiki2multihop", "ohr_bench"),
             s3=S3Answers(
                 induction_mode="doc",
                 induction_budget_usd_cap=42.5,
@@ -122,7 +122,7 @@ class TestGeneratorAndParser:
     def test_a_non_bool_reasoning_value_is_rejected(self) -> None:
         text = (
             "campaign:\n  root: /c\n  pod_ssh: ''\n"
-            "corpus:\n  datasets: [musique]\n"
+            "corpus:\n  datasets: [wiki2multihop]\n"
             "s3:\n  induction:\n    reasoning: 'false'\n"
         )
         with pytest.raises(CampaignConfigError, match="reasoning"):
@@ -130,14 +130,14 @@ class TestGeneratorAndParser:
 
     def test_an_s1_era_config_without_s3_parses_to_the_defaults(self) -> None:
         # Backward compat: the operator's existing campaign.yaml predates the s3 block.
-        text = "campaign:\n  root: /c\n  pod_ssh: ''\ncorpus:\n  datasets: [musique]\n"
+        text = "campaign:\n  root: /c\n  pod_ssh: ''\ncorpus:\n  datasets: [wiki2multihop]\n"
         parsed = parse_campaign_config(text)
         assert parsed.s3 == S3Answers()
 
     def test_a_partial_s3_block_fills_the_rest_with_defaults(self) -> None:
         text = (
             "campaign:\n  root: /c\n  pod_ssh: ''\n"
-            "corpus:\n  datasets: [musique]\n"
+            "corpus:\n  datasets: [wiki2multihop]\n"
             "s3:\n  induction:\n    mode: none\n    budget_usd_cap: 0\n"
         )
         parsed = parse_campaign_config(text)
@@ -147,7 +147,7 @@ class TestGeneratorAndParser:
     def test_a_typoed_s3_key_is_loud_not_silently_defaulted(self) -> None:
         text = (
             "campaign:\n  root: /c\n  pod_ssh: ''\n"
-            "corpus:\n  datasets: [musique]\n"
+            "corpus:\n  datasets: [wiki2multihop]\n"
             "s3:\n  induction:\n    budget_usd_gap: 10\n"
         )
         with pytest.raises(CampaignConfigError, match="budget_usd_gap"):
@@ -156,7 +156,7 @@ class TestGeneratorAndParser:
     def test_a_wrongly_typed_s3_value_is_rejected(self) -> None:
         text = (
             "campaign:\n  root: /c\n  pod_ssh: ''\n"
-            "corpus:\n  datasets: [musique]\n"
+            "corpus:\n  datasets: [wiki2multihop]\n"
             "s3:\n  chunk:\n    max_tokens: many\n"
         )
         with pytest.raises(CampaignConfigError, match="max_tokens"):
@@ -165,7 +165,7 @@ class TestGeneratorAndParser:
     def test_contradictions_in_the_file_are_rejected_at_parse(self) -> None:
         text = (
             "campaign:\n  root: /c\n  pod_ssh: ''\n"
-            "corpus:\n  datasets: [musique]\n"
+            "corpus:\n  datasets: [wiki2multihop]\n"
             "s3:\n  chunk:\n    max_tokens: 64\n    overlap_tokens: 64\n"
         )
         with pytest.raises(CampaignConfigError, match="overlap"):

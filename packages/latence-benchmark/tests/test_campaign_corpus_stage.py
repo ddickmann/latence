@@ -19,7 +19,6 @@ import pytest
 from latence_benchmark.campaign.corpus_stage import (
     CORPUS_PLAN,
     KIND_HF_SNAPSHOT,
-    KIND_LOCAL_REFERENCE,
     KIND_URL,
     LANE_STRICTLY_LOCAL,
     STAGE_NAME,
@@ -27,7 +26,6 @@ from latence_benchmark.campaign.corpus_stage import (
     DatasetPlan,
     FetchResult,
     corpus_done_probe,
-    fetch_local_reference,
     fetch_urls,
     license_gate,
     run_corpus_stage,
@@ -60,12 +58,8 @@ def permissive_license() -> DatasetLicense:
 
 
 def make_repo(tmp_path: Path) -> Path:
-    """A minimal fixture checkout: the incumbents' dirs + the REAL manifest tool."""
+    """A minimal fixture checkout: the REAL manifest tool and nothing else."""
     repo = tmp_path / "repo"
-    for incumbent in ("musique-full", "hotpot-full"):
-        d = repo / "benchmark" / "official-data" / incumbent
-        d.mkdir(parents=True)
-        (d / "data.jsonl").write_text('{"q": 1}\n')
     manifest_dst = repo / "benchmark" / "corpus" / "manifest.py"
     manifest_dst.parent.mkdir(parents=True)
     # The REAL repo tool, reused verbatim — the integration under test is ours, not a fake's.
@@ -96,10 +90,7 @@ def writing_fetchers(files_per_dataset: int = 2) -> Mapping[str, Fetcher]:
             (dest / f"{plan.name}-{i}.json").write_text("{}")
         return FetchResult(fetched=files_per_dataset, skipped=0)
 
-    def local(plan: DatasetPlan, dest: Path) -> FetchResult:
-        return FetchResult(fetched=0, skipped=0, note="referenced")
-
-    return {KIND_HF_SNAPSHOT: fake, KIND_URL: fake, KIND_LOCAL_REFERENCE: local}
+    return {KIND_HF_SNAPSHOT: fake, KIND_URL: fake}
 
 
 class TestPlanTable:
@@ -120,12 +111,6 @@ class TestPlanTable:
                 assert len(plan.revision) == 40, f"{plan.name} is not pinned"
                 assert plan.repo_id
 
-    def test_incumbents_are_local_references(self) -> None:
-        for name in ("musique", "hotpotqa"):
-            plan = CORPUS_PLAN[name]
-            assert plan.kind == KIND_LOCAL_REFERENCE
-            assert plan.local_source.startswith("benchmark/official-data/")
-
     def test_uda_excludes_the_html_subsets(self) -> None:
         plan = CORPUS_PLAN["uda"]
         joined = " ".join(plan.allow_patterns)
@@ -137,12 +122,12 @@ class TestPlanTable:
 class TestLicenseGate:
     def test_unclassified_dataset_is_refused(self) -> None:
         with pytest.raises(StageBlockedError, match="NO license-lane classification"):
-            license_gate(["musique"], accept_non_commercial=False, plan={})
+            license_gate(["wiki2multihop"], accept_non_commercial=False, plan={})
 
     def test_unverified_license_is_refused_with_no_override(self) -> None:
         plan = {
-            "musique": DatasetPlan(
-                name="musique",
+            "wiki2multihop": DatasetPlan(
+                name="wiki2multihop",
                 lane=LANE_STRICTLY_LOCAL,
                 license=DatasetLicense(
                     dataset_license=UNVERIFIED,
@@ -152,12 +137,11 @@ class TestLicenseGate:
                     verified_on="",
                     source_url="https://example.test",
                 ),
-                kind=KIND_LOCAL_REFERENCE,
-                local_source="x",
+                kind=KIND_URL,
             )
         }
         with pytest.raises(StageBlockedError, match="UNVERIFIED"):
-            license_gate(["musique"], accept_non_commercial=True, plan=plan)
+            license_gate(["wiki2multihop"], accept_non_commercial=True, plan=plan)
 
     def test_ohr_bench_requires_the_explicit_acknowledgement(self) -> None:
         with pytest.raises(StageBlockedError, match="accept-non-commercial"):
@@ -167,9 +151,9 @@ class TestLicenseGate:
 
     def test_permissive_selection_passes_without_acknowledgement(self) -> None:
         cleared = license_gate(
-            ["musique", "uda", "multihop_rag"], accept_non_commercial=False
+            ["wiki2multihop", "uda", "multihop_rag"], accept_non_commercial=False
         )
-        assert [p.name for p in cleared] == ["musique", "uda", "multihop_rag"]
+        assert [p.name for p in cleared] == ["wiki2multihop", "uda", "multihop_rag"]
 
     def test_gate_runs_before_any_fetcher(self, tmp_path: Path) -> None:
         calls: list[str] = []
@@ -178,38 +162,16 @@ class TestLicenseGate:
             calls.append(plan.name)
             return FetchResult(fetched=0, skipped=0)
 
-        ctx = make_ctx(tmp_path, ("musique", "ohr_bench"))  # no acknowledgement
-        fetchers: Mapping[str, Fetcher] = {
-            KIND_LOCAL_REFERENCE: spy, KIND_HF_SNAPSHOT: spy, KIND_URL: spy
-        }
+        ctx = make_ctx(tmp_path, ("wiki2multihop", "ohr_bench"))  # no acknowledgement
+        fetchers: Mapping[str, Fetcher] = {KIND_HF_SNAPSHOT: spy, KIND_URL: spy}
         with pytest.raises(StageBlockedError, match="accept-non-commercial"):
             run_corpus_stage(ctx, fetchers=fetchers)
-        # musique is classified BEFORE ohr_bench in the selection, yet no byte moved:
+        # wiki2multihop is classified BEFORE ohr_bench in the selection, yet no byte moved:
         # the whole selection is gated before the first fetcher runs.
         assert calls == []
 
 
 class TestFetchers:
-    def test_local_reference_verifies_presence_without_touching_dest(
-        self, tmp_path: Path
-    ) -> None:
-        repo = make_repo(tmp_path)
-        plan = CORPUS_PLAN["musique"]
-        dest = repo / "benchmark" / "sota-corpus" / "musique" / "raw"
-        result = fetch_local_reference(plan, dest, repo_root=repo)
-        assert "referenced in place" in result.note
-        assert not dest.exists()  # nothing copied — one copy of the incumbents, ever
-
-    def test_local_reference_blocks_when_the_dataset_is_missing(
-        self, tmp_path: Path
-    ) -> None:
-        repo = make_repo(tmp_path)
-        shutil.rmtree(repo / "benchmark" / "official-data" / "hotpot-full")
-        with pytest.raises(StageBlockedError, match="missing or empty"):
-            fetch_local_reference(
-                CORPUS_PLAN["hotpotqa"], tmp_path / "dest", repo_root=repo
-            )
-
     def test_url_fetcher_skips_existing_files(self, tmp_path: Path) -> None:
         source = tmp_path / "served.json"
         source.write_text('{"payload": true}')
@@ -247,7 +209,11 @@ class TestFetchers:
 
 class TestStageRun:
     def test_full_run_writes_manifest_and_metrics(self, tmp_path: Path) -> None:
-        ctx = make_ctx(tmp_path, ("musique", "hotpotqa", "uda"))
+        ctx = make_ctx(tmp_path, ("wiki2multihop", "multihop_rag", "uda"))
+        # One file is already on disk before the run; the fake fetch reports 2 per dataset.
+        earlier = ctx.repo_root / "benchmark" / "sota-corpus" / "wiki2multihop" / "raw"
+        earlier.mkdir(parents=True)
+        (earlier / "already-here.json").write_text("{}")
         note = run_corpus_stage(ctx, fetchers=writing_fetchers())
         assert "3 dataset(s)" in note
 
@@ -255,18 +221,19 @@ class TestStageRun:
         manifest = json.loads((out / "manifest.json").read_text())
         assert (out / "MANIFEST.md").is_file()
         by_name = {s["name"]: s for s in manifest["sources"]}
-        assert set(by_name) == {"musique", "hotpotqa", "uda"}
-        # Measured, not claimed: the incumbents' referenced dirs hold 1 file each, the
-        # fake hub fetch landed 2 for uda.
-        assert by_name["musique"]["file_count"] == 1
+        assert set(by_name) == {"wiki2multihop", "multihop_rag", "uda"}
+        # Measured, not claimed: the count is what is on disk (3 for the dataset that
+        # already held a file), not the 2 the fetch reported.
+        assert by_name["wiki2multihop"]["file_count"] == 3
         assert by_name["uda"]["file_count"] == 2
-        # Only the attribution lane is publishable.
-        assert by_name["musique"]["publishable"] is True
-        assert by_name["hotpotqa"]["publishable"] is False
+        # Every lane in the plan keeps its corpus local, so no source is publishable.
+        assert [s["publishable"] for s in manifest["sources"]] == [False, False, False]
 
         metrics = json.loads((out / "metrics.json").read_text())
         assert metrics["stage"] == STAGE_NAME
         assert metrics["accept_non_commercial"] is False
+        assert metrics["datasets"]["wiki2multihop"]["fetched"] == 2
+        assert metrics["datasets"]["wiki2multihop"]["file_count"] == 3
         assert metrics["datasets"]["uda"]["lane"] == "share-alike-local"
         assert metrics["datasets"]["uda"]["provenance"].startswith("hf:qinchuanhui/UDA-QA@")
         assert UDA_HTML_RULING in metrics["rulings"]
@@ -289,7 +256,7 @@ class TestStageRun:
             run_corpus_stage(ctx, fetchers={KIND_HF_SNAPSHOT: broken})
 
     def test_done_probe_tracks_the_selection(self, tmp_path: Path) -> None:
-        ctx = make_ctx(tmp_path, ("musique",))
+        ctx = make_ctx(tmp_path, ("wiki2multihop",))
         assert corpus_done_probe(ctx) is False
         run_corpus_stage(ctx, fetchers=writing_fetchers())
         assert corpus_done_probe(ctx) is True
@@ -299,7 +266,7 @@ class TestStageRun:
             campaign_root=ctx.campaign_root,
             repo_root=ctx.repo_root,
             answers=CampaignAnswers(
-                campaign_root=str(ctx.campaign_root), datasets=("musique", "hotpotqa")
+                campaign_root=str(ctx.campaign_root), datasets=("wiki2multihop", "multihop_rag")
             ),
         )
         assert corpus_done_probe(wider) is False

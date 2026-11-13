@@ -1,0 +1,6 @@
+duckdb==1.5.4
+PyYAML==6.0.3
+jsonschema==4.25.1
+pytest==8.4.2
+rdflib==7.6.0  # tests only: the Turtle export is parsed back
+# openai==3.49.0  # only for `build --hosted-model`; tests use a stand-in client

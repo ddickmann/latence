@@ -366,7 +366,7 @@ def test_mention_context_uses_offset_map_inverse_resolution() -> None:
 
 def test_apply_linking_results_carries_the_link_score() -> None:
     """The linker has always computed a link score and then dropped it (the ticket-01
-    finding); v20 carries it onto the mention so Hyperedge gamma has a data source."""
+    finding); v20 carries it onto the mention so the link confidence is a durable record."""
     from latence_disambig_glinker.backends import LinkedEntity
     from latence_disambig_glinker.linker import _apply_linking_results
     from latence_disambig_glinker.models import MentionRecord

@@ -1,5 +1,10 @@
 # The SPLADE sparse signal is a structured composition — model term-weights ⊕ confidence-gated NER entities ⊕ metadata — redacted by default
 
+!!! warning "Superseded by [ADR-0068](0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md) (2026-11-08)"
+    **This decision is no longer in force.** Query-time retrieval tooling, hyperedges and
+    Context Enrichment leave the product (ADR-0068, following the re-scope in ADR-0067). This
+    page stays as the dated record of what was decided and why.
+
 The sparse-retrieval signal is not plain `SPLADE(text)`. It is an **intelligent composition** that fuses
 the learned multilingual SPLADE term-weights with the **structured signals the pipeline already
 produces** — NER-extracted entities and selected metadata — into one enriched sparse vector. This

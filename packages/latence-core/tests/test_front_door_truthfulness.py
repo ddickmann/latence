@@ -59,7 +59,24 @@ _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 # commands precisely because that is what makes it useful. So it is held to the same gate — and
 # the gate resolving through the git index rather than the working tree is exactly the failure
 # mode the page itself warns agents about.
-_FRONT_DOOR = ("README.md", "CONTEXT.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")
+#
+# ``RELEASE-GATES.md`` is in the set because the README sends readers to it as the release
+# checklist, and no gate walked it: it linked a GPU runbook under ``issues/e2e-extended/`` that was
+# never in the tree, on ``main`` and here, until a rewrite of the gates happened to delete the
+# sentence.
+#
+# ``ROADMAP.md`` is in the set because it sits at the repository root and ``issues/README.md``
+# sends readers to it for the forward-looking picture. Its links and anchors resolved on the day
+# it joined; nothing had been checking that they did.
+_FRONT_DOOR = (
+    "README.md",
+    "CONTEXT.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "RELEASE-GATES.md",
+    "ROADMAP.md",
+)
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 # A backticked reference to a concrete file in one of the two trees a published page sends
@@ -682,3 +699,27 @@ def test_readme_does_not_promise_a_meta_package() -> None:
         "README promises a meta-package; only per-Provider distributions are publishable "
         "(ADR-0016). Point the reader at latence-demo instead."
     )
+
+
+_RUFF_LINE = re.compile(r"^\s*(?:uv run )?ruff check (?P<args>[^#\n]+)", re.MULTILINE)
+
+
+def _stale_ruff_targets(pages: list[Path]) -> list[str]:
+    """Documented ``ruff check`` lines that name a directory the tree no longer has."""
+    stale: list[str] = []
+    for page in pages:
+        for m in _RUFF_LINE.finditer(page.read_text()):
+            for arg in m.group("args").split():
+                if arg.startswith("-") or "$" in arg or "<" in arg:
+                    continue
+                if not (_REPO_ROOT / arg).exists():
+                    stale.append(f"{page.relative_to(_REPO_ROOT)}: `ruff check` names missing path {arg!r}")
+    return stale
+
+
+def test_documented_lint_commands_name_only_paths_that_exist() -> None:
+    """A front-door page told readers to lint ``benchmark/s5`` and ``benchmark/serving`` after
+    both directories had been removed; the command it printed fails as written. A lint command
+    is a claim about the tree, so every path it names must exist."""
+    stale = _stale_ruff_targets(_front_door_docs())
+    assert not stale, "documented lint commands name paths that do not exist:\n" + "\n".join(stale)

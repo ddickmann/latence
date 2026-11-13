@@ -113,3 +113,38 @@ def test_committed_json_declares_the_schema_version() -> None:
     )
     assert committed["schema"] == 1
     assert committed["entry_point_group"] == "latence.providers"
+
+
+def test_the_capability_help_example_names_real_capabilities() -> None:
+    """Every name `latence contracts --capability` offers as an example is one it accepts.
+
+    The help once offered ``'tokenizer'`` as its signal-seam example after that seam had left the
+    tree, so following the help ended in ``unknown capability``. The examples are read out of the
+    option's own help text and each is run through the command.
+    """
+    import re
+    from typing import get_args, get_type_hints
+
+    from latence_core.cli import app, contracts
+    from typer.models import OptionInfo
+    from typer.testing import CliRunner
+
+    annotation = get_type_hints(contracts, include_extras=True)["capability"]
+    options = [meta for meta in get_args(annotation) if isinstance(meta, OptionInfo)]
+    assert len(options) == 1
+    examples = re.findall(r"'([a-z_]+)'", options[0].help or "")
+    assert examples, "the --capability help carries no quoted example to check"
+
+    reference = build_reference(workspace_provider_packages(_REPO_ROOT))
+    kinds = {entry["kind"] for entry in reference["capabilities"]}
+    seams = {entry["prefix"] for entry in reference["signal_seams"]}
+    assert set(examples) <= kinds | seams, sorted(set(examples) - kinds - seams)
+    # The help presents one example as a signal-seam prefix; at least one must be one.
+    assert set(examples) & seams, "no example names a signal seam, but the help says one does"
+
+    runner = CliRunner()
+    for example in examples:
+        result = runner.invoke(
+            app, ["contracts", "--capability", example, "--repo-root", str(_REPO_ROOT)]
+        )
+        assert result.exit_code == 0, (example, result.output)

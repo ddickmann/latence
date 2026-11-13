@@ -12,7 +12,8 @@ the vLLM throughput is explicitly **"pending pod validation"**, never fabricated
 > **The whole point of W10: the vLLM throughput number.** W8 measured the in-process transformers
 > ladder (bf16 → page-batch → FA2) but could NOT measure the vLLM head-to-head (that pod's driver was
 > too old for the cu126+ torch a LightOnOCR-2 vLLM needs). This script closes that gap on a pod that
-> meets the driver bar. Record `pages/second at concurrency C` — that is the ~2.7× claim's evidence.
+> meets the driver bar. Record `pages/second at concurrency C`: that is the row `PERF-RESULTS.md`
+> lists as pending. No ratio between the two paths is on record until it is filled.
 
 These steps are turnkey on a single ≥16 GB CUDA GPU (an H100 slice, an A10, an RTX 4090/2000 Ada, a
 RunPod pod, …) whose **driver is ≥ 12.6** (LightOnOCR-2 vLLM needs cu126+ torch).
@@ -110,11 +111,11 @@ PY
 NOT prompt/chat scaffolding, and NOT truncated mid-page (that is why `max_tokens` defaults to 4096,
 not 1024 — 1024 truncated ~25% of dense LBBW pages in W8). Record a sample.
 
-## 4. The concurrency throughput sweep (the ~2.7× evidence)
+## 4. The concurrency throughput sweep (the pending comparison)
 
 Re-time the same document at several concurrencies to show the collapse from `N × latency` to
 `ceil(N / C) × latency` — and compare pages/second against the W8 in-process transformers ladder in
-`PERF-RESULTS.md` (the ~2.7× claim):
+`PERF-RESULTS.md` (the comparison that page lists as pending):
 
 ```bash
 python - <<'PY'
@@ -162,7 +163,7 @@ evidence.)
 
 - The extracted-markdown sample + the offset round-trip result from step 3.
 - The **concurrency throughput sweep** from step 4 (pages/second at 1/2/4/8/16) → `PERF-RESULTS.md`,
-  and the vLLM-vs-transformers ratio (the ~2.7× claim's real number).
+  and the vLLM-vs-transformers ratio, which has no recorded value yet.
 - Whether `--enforce-eager` was needed (Blackwell) or cudagraphs ran (mainstream).
 - The live conformance verdict from step 5.
 

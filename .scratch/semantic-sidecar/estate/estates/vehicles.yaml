@@ -1,0 +1,80 @@
+# The vehicle and warranty estate, as the local DuckDB mirror names it.
+# In Unity Catalog the schemas carry the prefix below (nhtsa_clean, nhtsa_internal, nhtsa_marts).
+name: vehicles
+title: Vehicle and warranty estate
+schema_prefix: nhtsa_
+schemas: [clean, internal, marts, partner]  # `partner` exists only in the mirror with the seed
+# Labels the rule for a table name gets wrong (it reads the last word as an English plural and
+# knows no abbreviations). Keyed on the table's name.
+labels:
+  mfr_communications: Manufacturer communication
+# The language the catalog's comments are written in.
+language: en
+# Objects computed from the others. Where the catalog records lineage this is read from it.
+derived_schemas: [marts]
+# Load and lineage columns: they carry no meaning and are never keys or references.
+ignore_columns: [source_line, source_file, layout_version, added_date]
+# Columns the catalog classes as personal. They are never queried, and no row of an object
+# that has one is exported, unless the object is named under without_personal_columns.
+sensitive:
+  - internal.owners.name
+  - internal.owners.street
+  - internal.owners.postcode
+  - internal.owners.city
+  - internal.dealers.contact_name
+  - internal.dealers.contact_email
+  - internal.dealers.contact_phone
+  - internal.claims.vin
+  - internal.vehicles.vin
+  - internal.warranty_contracts.vin
+  - clean.complaints.vin
+# Objects whose rows are about a person. They give no instance, whatever their columns.
+personal_objects: [internal.owners, internal.vehicles, internal.warranty_contracts, internal.claims]
+# Objects about an organisation that also carry a contact person's columns. Their rows are
+# exported without those columns. This is a decision per estate; the default is to withhold.
+without_personal_columns: [internal.dealers]
+# Value sets whose values are names of organisations: spellings that may be the same are listed for review.
+resolve: [manufacturer]
+# The seeded second source (`python -m estate seed`): accounts of a partner portal, generated
+# from the dealers below into the schema `partner` of a copy of the mirror. Generated data,
+# marked as such in the catalog, in the export and on the screen.
+seeded:
+  from: internal.dealers
+  id: dealer_id
+  name: name
+  city: city
+  market: market
+seeded_objects: [partner.service_accounts]
+# Records of a second source linked to a master list by the resolution engine. The first
+# object is the master. A source named under duplicate_free holds no duplicates: no two of its
+# records are ever the same thing. The labels are what a reviewer would have to give.
+link:
+  duplicate_free: [dealer master]
+  labels: {fit: 400, test: 900}
+  records:
+    - {object: internal.dealers, id: dealer_id, name: name, city: city, country: market, country_map: {UK: GB}, source: dealer master}
+    - {object: partner.service_accounts, id: account_id, name: account_name, city: city, country: country, source: partner portal (seeded)}
+# What kind of thing each concept is (estate/classes.py). A hosted language model may be shown
+# the names, types and comments of this estate's objects and columns, never a row or a value.
+# This estate is synthetic and public, so it is allowed; for a client's estate it is a decision.
+classes:
+  hosted_model: true
+  # The model the builder asks, how hard it is told to think, and the languages of its definitions.
+  model: gpt-6-luna
+  effort: low
+  languages: [en, de]
+  # List prices in USD per million tokens, for the limit on a call and for what a call is said
+  # to have cost. Read on 2026-11-11 from third-party price listings; the provider's own price
+  # page could not be opened from where this was written. Reasoning tokens are output tokens.
+  prices: {input_per_1m: 0.10, output_per_1m: 0.50, read_on: "2026-11-11", source: third-party listings}
+# What a host's semantic layer may be handed in a proposal file (`python -m estate propose`),
+# from approved decisions only and never from the seeded source.
+# `names`: the master lists whose rows carry a name a question may use. A list that is not
+# named here gives no names, whatever a reviewer approved.
+# `spellings_on` (optional, by column): the object a value set's decided spellings are stated
+# on, where it should not be the one that holds the most values of the set.
+propose:
+  names: [internal.dealers]
+# The address under which the Turtle export names its elements. Identifiers below it are opaque.
+export:
+  base_iri: "https://example.invalid/estate/vehicles/"

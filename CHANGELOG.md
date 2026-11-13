@@ -15,8 +15,62 @@ history. It is large for that reason. When the first tag is cut (`docs/RELEASING
 becomes that release's section and the cadence starts from there; until then there is no cadence to
 report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
 
+### Removed
+
+- **The query-time retrieval tooling is gone (ADR-0068).** Four distributions leave the
+  workspace — `latence-retrieval`, `latence-sink-qdrant`, `latence-splade` and `latence-muvera`
+  — and with them everything in `latence-core` that existed only to feed them: Hyperedges
+  (`GraphHyperedge`, `HyperedgeRelation`, `HyperedgeSourceRef`, `GraphScope.HYPEREDGE`, the
+  hyperedge KV sidecar), the Context Enrichment Stage and `ContextHeader`, the graph-feature
+  computers, the BM25 / sparse / multi-vector / FDE export signals and their Capability
+  Protocols (`ContextEnricher`, `GraphFeatureComputer`, `SparseEmbedder`,
+  `ComposingSparseEmbedder`, `MultiVectorEmbedder`, `FdeConverter`, `Tokenizer`), the
+  `latence retrieval` CLI group, the `context_columns` / `sparse_embedder` /
+  `multivector_embedder` / `fde_converter` / `keep_multivectors` / `bm25` Export keys, the
+  `graph_features` / `hyperedges` Graph Assembly keys and the `hyperedge_kv` KG Export key, the
+  three retrieval-only stacks, the S5 retrieval matrix and the Qdrant serving lane.
+  **`SCHEMA_VERSION` is 22 and `QUALITY_SCHEMA_VERSION` is 21**: both are removals from
+  `extra="forbid"` models, so a v21 chunk record (which always carries a `context_header` key)
+  and a v20 Quality Report that carries `context_enrichment` or `graph.hyperedges` no longer
+  validate. Graph Assembly emits nodes and edges exactly as before — same ids, same fields, same
+  order. Embedder Providers stay, as a signal of the resolution phase; the corpus Export still
+  accepts an opt-in `embedder` block.
+- **`musique` and `hotpotqa` left the benchmark campaign's dataset registry.** The campaign had
+  no pipeline for either. `KNOWN_DATASETS` now holds five names, and a test requires each of them
+  to have an acquisition plan in `s1-corpus` and a pipeline in `s3-pipeline`. A `campaign.yaml`
+  that lists either removed name is rejected as an unknown dataset. Gone with them: the
+  `local-reference` acquisition kind, the `attribution` lane and the `not_processed` list in the
+  `s3-pipeline` metrics. The committed records under `benchmark/sota-campaign/stages/` are
+  unchanged and still name both.
+- **Eight benchmark scripts that could no longer run.** The four under `benchmark/official/` and
+  `benchmark/musique-subset/run_eval_final.py` imported `latence_retrieval`; the three under
+  `benchmark/official-data/` read a hyperedge export the current pipeline does not write. Their
+  result files, question sets and export data stay as dated records, and each folder carries a
+  note saying so.
+- **Seven more benchmark scripts that could no longer run, and the four test files of four of
+  them.** Under `benchmark/rfc/`: `run_benchmark.py` and `build_questions.py` imported
+  `latence_retrieval`, `sparse_terms.py` served only those two, and `make_report.py` rendered a
+  result file nothing writes any more. Under `benchmark/enterprise-gold/`: `run_eval.py`
+  imported `latence_retrieval`, and `run_pipeline.py` and `make_judgments.py` read a hyperedge
+  export the current pipeline does not write. The corpus, the gold set, the judgment and result
+  files and the pipeline configuration stay as dated records; each folder has a `README.md`
+  that says what was removed and what remains.
+
 ### Changed
 
+- **The front door says what the code does today, then the direction, marked as not built.**
+  `README.md` and the docs-site home page now run in one order: what it is, quick start, what is
+  built, status, and a section *Where this is going* that opens with "Nothing in this section is
+  built" and states the re-scope of ADR-0067 and ADR-0069 to ADR-0073. The README no longer lists
+  the G1 crash test as reproducible from the tree (its harness was never committed; it is cited
+  as the dated record it is), no longer says `verify-local.sh` exits 0 where `RELEASE-GATES.md`
+  keeps that box open, and drops the bullet on retrieval-era necessity gates. `CONTEXT.md` gains
+  a section *Decided, not yet in code* with the vocabulary ADR-0069 fixed (Ledger, Assertion,
+  Locator, Decision, Actor, Concept, Entity, Binding, accept band), each marked, and says how the
+  new Entity sits beside the existing uses of the word. It says the review and reject bands are
+  not fixed by an accepted decision. `llms.txt` and `docs/agent-briefing.md` follow. A new test
+  holds the order, the sentence and the markers, and fails when the first record type of the
+  re-scope appears in the source tree; the five pages also join the removed-capability page rule.
 - **The repository moved to `ddickmann/latence`, and 200 references to the old slug moved with
   it.** Publication is from a repository created clean rather than from one whose history had been
   rewritten, so no unreachable-but-uncollected objects survive anywhere. Two of the 71 files
@@ -87,6 +141,53 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Fixed
 
+- **A Stage config key that ADR-0068 removed is refused instead of ignored.** A stack that still
+  carried `hyperedges`, `context_columns` or `hyperedge_kv` ran to completion and produced none
+  of what the key asked for; `latence stack check` reported only `graph_features` and `bm25`,
+  and only when written as a `{provider, config}` block. The nine removed keys are now one list,
+  `REMOVED_CONFIG_KEYS` in `latence_core.pipeline`, each under the Stage kind that used to read
+  it. `latence stack check` reports every one, and `Pipeline.require_runnable()` — the call the
+  local, Delta and Airflow Runners and the CLI loader make before writing anything — raises a
+  `ConfigError` naming the key, the Stage and the ADR. Unknown keys in general are still
+  accepted.
+- **`latence tune` sweeps the endpoint entity extractor.** The tuner's knob mapping named
+  `ner.endpoint`; the package registers `entity.endpoint`, so that Provider was skipped. A test
+  now requires every name in the mapping to be an entry point a workspace package declares.
+  `PERF-RESULTS.md` carried the same wrong name, and `embedder.endpoint` for
+  `embedding.endpoint`.
+- **`latence tune --sample` says what it is.** The help read "Records to time each candidate on"
+  and the report labelled its figures `r/s`. The probe never sized a run by that number: it
+  times the whole stack over the bundled validation corpus and the tuner divides `--sample` by
+  the median wall time. The behaviour is unchanged. The help text, the report's field
+  descriptions and table header, `docs/tuning.md` and `scripts/tune-on-gpu.md` now say that a
+  figure compares settings on one device and is not records per second.
+- **`latence-campaign run <stage> --fresh` redoes the stage.** It reset the recorded status, then
+  the done-probe found the earlier artifacts and the stage was marked done again without
+  running. With `--fresh` the entry probe is now skipped and the stage's `run` is called; the
+  probe still decides `done` afterwards, and a redone stage needs approving again. `--fresh`
+  deletes nothing: units of work a stage finds already written are still skipped.
+- **The campaign wizard's budget prompt describes the cap as the stage applies it.** The prompt
+  and the `--s3-budget-usd-cap` help called it a hard cap at which the run blocks. The stage
+  turns the cap into a per-dataset limit on induction calls from an estimated price per call; a
+  chunk past the limit gets no call and keeps the configured labels, and the run continues. The
+  behaviour is unchanged; the prompt, the help text and the campaign guide now say this.
+- **The two failing tests of `benchmark/corpus/test_manifest.py` were stale, and are corrected.**
+  `manifest.py` states the modern-OOXML limit per format (`docx`, `xlsx`, `pptx`, each thin
+  below 1,000 files), which is the threshold `fetch_corpus.sh` sizes its axes against. The tests
+  still described one combined bucket: one required a mention of a source the tree names
+  nowhere else, the other expected no limit for a corpus with no `.pptx` at all. The module is
+  unchanged. The tests now assert the per-format wording, the negative control uses a corpus
+  that holds all three formats, and two tests pin the per-format rule and its threshold. No
+  gate runs this file; it is run by hand.
+- **The served-OCR speedup figure is gone from the pages that still stated it.** "About 2.7×
+  faster" (LightOn-OCR served by vLLM against in-process `transformers`) has no measurement
+  record: `PERF-RESULTS.md` lists that comparison as pending. `docs/serving-lighton-vllm.md`,
+  `docs/TUTORIAL-fresh-pod-walkthrough.md`, `docs/anatomy/01-ingest-and-document-understanding.md`,
+  `scripts/validate-lighton-vllm-on-gpu.md` and the `latence-parser-lighton-vllm` package
+  (README, `pyproject.toml`, two docstrings) now say what is recorded, as `docs/deployment.md`
+  does. A third-party throughput figure quoted beside it, with no source in the tree, went with
+  it, as did the sentences that referred to a head-to-head run that never took place. A test
+  refuses the figure on any page while the comparison is pending.
 - **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
   list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
   `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept

@@ -1,0 +1,66 @@
+{
+  "name": "resolution-workbench",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Prototype of the expert review workbench and the graph view (ticket 22). A React component a Carbon host mounts in its own router, and a standalone app around the same component. Synthetic data only.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/resolution-workbench.js",
+  "module": "./dist/resolution-workbench.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/resolution-workbench.js"
+    },
+    "./styles.css": "./dist/resolution-workbench.css",
+    "./messages/en.json": "./src/messages/en.json"
+  },
+  "files": [
+    "dist",
+    "src/messages"
+  ],
+  "sideEffects": [
+    "**/*.css",
+    "**/*.scss"
+  ],
+  "scripts": {
+    "dev": "vite --config vite.standalone.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build:lib": "vite build && tsc -p tsconfig.types.json",
+    "build:standalone": "vite build --config vite.standalone.config.ts",
+    "build:preview": "vite build --config vite.standalone.config.ts --mode preview && node scripts/make-preview.mjs",
+    "build": "npm run typecheck && npm run build:lib && npm run build:standalone",
+    "e2e": "node e2e/smoke.cjs"
+  },
+  "peerDependencies": {
+    "@carbon/icons-react": "^11.64.0",
+    "@carbon/react": "1.92.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-router": "7.18.4"
+  },
+  "devDependencies": {
+    "@carbon/icons-react": "11.90.0",
+    "@carbon/react": "1.92.0",
+    "@carbon/styles": "1.91.0",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "24.7.2",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.1",
+    "@vitejs/plugin-react": "5.0.4",
+    "axe-core": "4.14.0",
+    "jsdom": "27.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-router": "7.18.4",
+    "sass": "1.93.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "4.1.11"
+  }
+}

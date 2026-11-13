@@ -87,8 +87,7 @@ Fields, and who consumes each:
     Corpus-level AND its own output is bounded by the knowledge graph rather than by the corpus,
     so the executor materializes its whole input and holds the result (ADR-0033). This is a
     strictly narrower fact than `level is CORPUS`: an `EXPORT` is a sink (nothing downstream
-    holds its output) and `CONTEXT_ENRICHMENT` re-emits the entire chunk stream (its output is
-    corpus-sized, so treating it as an accumulator would defeat the streaming release).
+    holds its output).
 `entry_point_prefixes`
     The `latence.providers` entry-point name prefixes that name this Capability
     (`entity.gliner` → `entity`). A dotted prefix discriminates on the second segment:
@@ -136,9 +135,9 @@ the Stage rather than reading `CapabilityDescriptor.level` directly.
 
 **Input shapes** (how the Runner delivers a Stage's input):
 
-HOW the Runner delivers a Stage's input — the executor's four-way input decision, declared.
+HOW the Runner delivers a Stage's input — the executor's input decision, declared.
 
-The Runner used to decide this in a four-way `if` chain over two hand-maintained frozensets,
+The Runner used to decide this in an `if` chain over two hand-maintained frozensets,
 and the dispatch then re-decided it a second time to know whether `incoming` was safe to
 materialize. It is a fact about the Capability, so it is declared here with its siblings:
 
@@ -151,11 +150,6 @@ materialize. It is a fact about the Capability, so it is declared here with its 
     The Protocol is `Iterable`-in and the Provider consumes it exactly ONCE, so the parents'
     checkpoints are read record-by-record into the Provider: the input transient is O(1)
     records rather than O(corpus-slice) (audit R2).
-`PER_CARRIER`
-    The Stage reads MORE than one carrier out of one `depends_on` set (Context Enrichment:
-    chunks + graph), and its Provider consumes each exactly once in its own order — so one
-    `incoming` stream cannot serve it and partitioning one would buffer a side whole-corpus.
-    It receives one INDEPENDENT lazy stream per carrier instead (dogfood-3).
 `ACCUMULATOR`
     A corpus-level accumulator (ADR-0033) whose input IS the whole doc-level output: it streams
     each carrier from the parents' checkpoints, so nothing corpus-sized is ever a list. Exactly
@@ -546,8 +540,8 @@ The S6 Redaction Capability, made **chunk-level** in W16 to fix the document-lev
 leak. Before W16 a Provider scanned the WHOLE parsed
 `DocumentRecord`, feeding it into a fixed PII model window (768
 tokens for the gliner-family) — so any PII past that window was SILENTLY truncated and leaked
-unmasked into the corpus. Redaction is now a **chunk→chunk transform** (the Content-Screening /
-Context-Enrichment shape): a Provider consumes the run's
+unmasked into the corpus. Redaction is now a **chunk→chunk transform** (the Content-Screening
+shape): a Provider consumes the run's
 `ChunkRecord`s and yields the SAME chunks with
 `masked_content` +
 `pii_spans` populated. Each chunk's text (≤ the model
@@ -893,73 +887,6 @@ label) is dropped, not emitted.
 | `graph_completion.reference` | `latence-core` |
 | `graph_completion.ultra` | `latence-linkpred-ultra` |
 
-### `context_enrichment` — ContextEnricher
-
-- **Register as**: `context.<variant>` under `latence.providers`
-- **Level**: `corpus` — **DAG node**: `true` — **accumulates**: `false`
-- **Receives** (input shape): `per_carrier`
-- **Emits** (checkpoint carrier): `ChunkRecord`
-- **An Export above it re-emits**: `ChunkRecord`
-- **Quality Report section**: `context_enrichment`
-- **Conformance case**: `context_enrichment`
-
-**Wiring rules** (violations raise exactly these typed errors):
-
-- requires `ChunkRecord` (subclass accepted):
-  > Stage {stage} (context_enrichment) received no ChunkRecords (got: {got}). A Context-Enrichment Stage must depend on the Chunk (or Content-Screening / Schema-Induction) Stage — the chunks it enriches. Check the Pipeline's depends_on wiring.
-- requires `GraphRecord` (subclass accepted):
-  > Stage {stage} (context_enrichment) received no GraphRecords (got: {got}). A Context-Enrichment Stage must also depend on the Graph Assembly Stage — the assembled KG it projects onto each chunk. Check the Pipeline's depends_on wiring.
-
-#### Protocol `ContextEnricher`
-
-Projects the assembled KG back onto each chunk as a compact header (W13 context enrichment).
-
-The W13 **context-enrichment** Capability (ADR-0039): an OPTIONAL Stage placed AFTER Graph
-Assembly that stamps each `ChunkRecord` with a compact
-`ContextHeader` — its canonical entities + top-k KG-neighbor
-triples — which the Export prepends to the EMBEDDING input ONLY. The connections a chunk needs
-for retrieval relevance are ALREADY computed as the KG; this surfaces them into the vector + a
-metadata column, without inflating the stored chunk text (the LLM window stays the clean chunk).
-
-Shaped like `LabelInducer` (a chunk→chunk transform that yields the SAME chunks with an
-additive field populated via `chunk.model_copy(update=...)`) but corpus-level and multi-input,
-like `Disambiguator`: it consumes the run's `ChunkRecord`s
-(what it enriches + passes through), `EntityMention`s (a chunk's
-canonical entities, via `EntityMention.chunk_record_id`) AND the assembled
-`GraphRecord`s (NODE + EDGE — the entities' KG neighbors). It
-yields the SAME chunks, 1:1 and order-stable, with `context_header` populated (or left
-`None`
-for a chunk with no gated canonical entity — nothing to add). Genuinely optional +
-contract-preserving: offsets/provenance/content are untouched, so a stack without the Stage is
-byte-identical (the field stays `None` and the Export prepends nothing).
-
-Deterministic + seeded (the CPU reference `context.kg_header` is pure-Python, no model, no
-key)
-→ byte-identical: every collection in the header is sorted, and the neighbor triples are
-confidence-sorted then CAPPED (`max_neighbors_per_entity` top-k per entity + an overall
-`max_triples`) so a corpus-wide hub entity contributes only its TOP relations — the mandatory
-anti-bloat + hub-entity guard (ADR-0039). The optional LLM situating-sentence mode is a
-documented follow-on (deterministic=False), not the default.
-
-```python
-enrich(self, chunks: Iterable[ChunkRecord], mentions: Iterable[EntityMention], graph_records: Iterable[GraphRecord]) -> Iterator[ChunkRecord]
-```
-
-Consume the run's chunks + mentions + assembled graph; yield the SAME chunks enriched.
-
-The chunk stream is threaded 1:1 and order-stable (never dropped or reordered): a chunk with
-at least one confidence-gated canonical entity carries a populated
-`ContextHeader`; a chunk with none flows through with
-`context_header` still `None` (byte-identical to no-stage for that chunk). Deterministic
-+
-seeded → byte-reproducible (sorted + capped + content-addressed, the Baseline bar).
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `context.kg_header` | `latence-core` |
-
 ### `embedding` — Embedder
 
 - **Register as**: `embedding.<variant>` under `latence.providers`
@@ -972,14 +899,15 @@ seeded → byte-reproducible (sorted + capped + content-addressed, the Baseline 
 
 #### Protocol `Embedder`
 
-Optionally embeds RAG-corpus text into vectors (CONTEXT — an opt-in Export augmentation).
+Maps text to fixed-width vectors — a resolution signal (ADR-0068).
 
-The S9 **opt-in** Embedder Capability (ADR-0017: "embeddings are optional (an opt-in
-Embedder Provider) so any vector DB can ingest it"). It is **not required for Export** —
-the RAG-ready corpus exports its cleaned/chunked/PII-handled text with full
-Provenance/Classification whether or not an embedder is wired. When a Pipeline opts in, an
-Embedder maps each text to a fixed-width vector so the exported corpus carries embeddings a
-vector DB can ingest directly.
+An Embedder is a nested sub-Provider, never a Stage of its own. The resolution phase is its
+consumer: the embedding rung of the neural resolvers (`disambiguation.embedding`, and the
+STS merge of `disambiguation.glinker`) and the semantic rung of Type Consolidation each
+name one under `config['embedder']`. The corpus Export additionally accepts the same block
+as an opt-in augmentation (ADR-0017) and then writes one vector per exported row; it is
+**not required for Export** — the corpus exports its cleaned/chunked/PII-handled text with
+full Provenance/Classification whether or not an embedder is wired.
 
 The reference embedder in core is a deterministic, dependency-free hashing embedder (no
 model, no weights, no license to verify — ADR-0012/0016), so the seam is exercised end to
@@ -1047,264 +975,7 @@ Write records to `out_dir` on `storage`; return the output URIs.
 
 These Capabilities register under the same `latence.providers` group and pass the same
 conformance gate, but they are not DAG Stages: no `CapabilityKind`, no checkpoint of
-their own. They are resolved from a Stage's config (an Export's embedders and
-tokenizer, Graph Assembly's `graph_features`) or by the engine (the delta processor).
-
-### `sparse` — SparseEmbedder
-
-- **Register as**: `sparse.<variant>` under `latence.providers`
-- **Conformance case**: `sparse`
-
-#### Protocol `SparseEmbedder`
-
-Encodes corpus text into a sparse term-weight vector (a `Signal generator`; ADR-0053).
-
-The index-time SPLADE-family sibling of `Embedder` for the shape a dense vector cannot
-express: a variable-support term-weight map over a fixed vocabulary, emitted at Export as the
-parallel `sparse_indices` / `sparse_values` columns a store's sparse index ingests directly
-(ADR-0050). Like every signal generator it is a **pure transform** that holds nothing (ADR-0048)
-and names no model — the framework names the seam.
-
-The blessed real Provider (ADR-0053) composes a multilingual SPLADE model's term-weights with
-the pipeline's confidence-gated NER entity terms + selected metadata, over the *redacted* corpus
-text by default; that composition + its license-verified model ship as a pluggable package
-(`latence-splade`), NOT in core. The in-core `sparse.hashing` reference is a deterministic,
-dependency-free hashing sparse encoder that exercises the seam + emission path offline (no
-model, no weights, no license to verify — ADR-0012/0016), exactly as `embedding.hashing` does
-for the dense seam. It is a reference, not SPLADE.
-
-```python
-encode_sparse(self, texts: Iterable[str]) -> Iterator[SparseVector]
-```
-
-Map each text to a `SparseVector` (canonical ascending indices), in input order.
-
-One vector per input text, in order (like `Embedder.embed`). Empty/degenerate text
-yields the empty `SparseVector()` (never a crash). A deterministic Provider is
-byte-reproducible (the Baseline bar).
-
-```python
-vocab_size: int
-```
-
-The size of the term-index space: every emitted index lies in `[0, vocab_size)`.
-
-#### Optional refinement — `ComposingSparseEmbedder`
-
-A `SparseEmbedder` that also composes structured per-record signals (ADR-0053).
-
-The index-time seam for the ADR-0053 **structured composition**. A plain `SparseEmbedder`
-exposes only the text-only `encode_sparse` (the model leg); a *composing*
-embedder additionally accepts, per record, the `SparseSignals` (confidence-bearing entity
-surfaces + selected metadata) and folds them into the emitted vector — so the corpus's sparse
-space carries the SAME boosted entity/metadata terms the query-side encoder injects (the
-one-composition-two-clocks guarantee). Export detects this Capability and passes each row's
-signals; an embedder that does NOT implement it (e.g. the deterministic `sparse.hashing`
-reference) is driven text-only, byte-identically to today.
-
-An implementer is also a `SparseEmbedder` (it keeps the text-only `encode_sparse` for
-the no-signal path); this Protocol declares only the additional composing method so an
-`isinstance` check cleanly discriminates the two.
-
-```python
-encode_sparse_composed(self, texts: Iterable[str], signals: Sequence[SparseSignals]) -> Iterator[SparseVector]
-```
-
-Map each `(text, signals)` pair to its composed `SparseVector`, in input order.
-
-`signals` is **parallel** to `texts` (one `SparseSignals` per text, same length +
-order). One vector per input, in order; a record whose signals are
-`EMPTY_SPARSE_SIGNALS` composes to exactly the model leg (identical to
-`SparseEmbedder.encode_sparse` on that text — the additive guarantee).
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `sparse.hashing` | `latence-core` |
-| `sparse.splade` | `latence-splade` |
-
-### `multivector` — MultiVectorEmbedder
-
-- **Register as**: `multivector.<variant>` under `latence.providers`
-- **Conformance case**: `multivector`
-
-#### Protocol `MultiVectorEmbedder`
-
-Encodes text into a variable-length multi-vector — one vector per token (ADR-0050).
-
-The index-time generator for the ColBERT-style late-interaction shape: a text becomes a
-*sequence* of fixed-width token vectors (not one pooled vector). Raw multi-vectors are heavy and
-have a different access pattern, so Export writes them to a **sidecar** `multivectors.parquet`
-(`list<list<double>>` keyed by `record_id`), never into `records.parquet` (ADR-0050). They
-also feed an `FdeConverter` to produce the dense `fde_embedding` column.
-
-Experimental and off by default (ADR-0050). The in-core `multivector.hashing` reference is a
-deterministic, dependency-free per-token hashing encoder that exercises the seam offline; a real
-ColBERT-family encoder is a pluggable package.
-
-```python
-dimension: int
-```
-
-The fixed width of every token vector in every returned multi-vector.
-
-```python
-encode_multivector(self, texts: Iterable[str]) -> Iterator[list[list[float]]]
-```
-
-Map each text to a list of `dimension`-wide token vectors, in input order.
-
-One multi-vector per input text, in order. Empty/degenerate text yields an empty list (no
-tokens, never a crash). Every token vector has width `dimension`. A deterministic
-Provider is byte-reproducible.
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `multivector.hashing` | `latence-core` |
-
-### `fde` — FdeConverter
-
-- **Register as**: `fde.<variant>` under `latence.providers`
-- **Conformance case**: `fde`
-
-#### Protocol `FdeConverter`
-
-Converts a multi-vector into one fixed-width dense vector (MUVERA FDE; ADR-0050).
-
-A **data-oblivious, training-free** reduction that maps a variable-length multi-vector to a
-single `dimension`-wide dense vector, so late-interaction quality can be approximated inside a
-customer's ordinary **dense** index with no special store — emitted at Export as the
-`fde_embedding` column (ADR-0050). Pure transform, holds nothing, names no model.
-
-Experimental and off by default (ADR-0050): the *production* converter decision (canonical
-MUVERA vs a regularizer-refined variant) is deferred, and the quality-blessed canonical MUVERA
-reference is a pluggable Provider (`fde.muvera`). The in-core `fde.reference` is a
-deterministic, dependency-free SimHash space-partition-and-sum converter that exercises the seam
-+ emission path offline — a genuine data-oblivious FDE (NOT a passthrough that lies, the
-anti-false-green bar), without claiming a MaxSim-approximation quality guarantee on any corpus.
-
-```python
-convert(self, multivectors: Iterable[list[list[float]]]) -> Iterator[list[float]]
-```
-
-Map each multi-vector to one `dimension`-wide dense vector, in input order.
-
-One dense vector per input multi-vector, in order. An empty multi-vector yields the
-zero vector of width `dimension`. A token vector whose width does not match the
-converter's declared input width is rejected with a typed error (the faithful contract a
-real converter enforces — anti-false-green). A deterministic Provider is byte-reproducible.
-
-```python
-dimension: int
-```
-
-The fixed width of the produced dense vector, independent of the multi-vector length.
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `fde.muvera` | `latence-muvera` |
-| `fde.reference` | `latence-core` |
-
-### `tokenizer` — Tokenizer
-
-- **Register as**: `tokenizer.<variant>` under `latence.providers`
-- **Conformance case**: `tokenizer`
-
-#### Protocol `Tokenizer`
-
-Splits text into lexical terms — the varying seam of the BM25 term-stats export (ADR-0048).
-
-BM25 is a *lexical* signal, so its corpus statistics (document frequency, term frequency,
-document length, average document length) are a pure function of one thing that genuinely
-**varies**: how text is split into terms. This Capability is that seam. Everything else in the
-`Bm25Accumulator` — the df/tf fold, the Robertson idf, the ascending
-canonical order — is fixed math; the tokenisation is the knob a corpus tunes. Like every
-retrieval-tooling piece it is a **pure transform that holds nothing** (ADR-0048) and names no
-model — the framework names the seam.
-
-Two in-core reference adapters ship behind it (`latence_core.bm25`), and they are
-genuinely different tokenisations (not a clone + a rename — the anti-false-green bar for a real
-seam): `tokenizer.regex` folds to lowercase *Unicode* alphanumeric runs (punctuation and the
-underscore are boundaries and are dropped, matching the dense/sparse hashing references — so
-`Müller` and `Таможенный` are whole terms, though an unspaced script like Chinese yields one
-term per whitespace run: the reference is Unicode-aware, not a word segmenter, and a corpus that
-needs segmentation plugs it in HERE), while `tokenizer.whitespace` splits
-only on whitespace and keeps punctuation attached to the token (so `"foo,"` and `"foo"` are
-distinct terms). A corpus that wants a store's exact analyzer plugs its own Tokenizer in behind
-this same seam. Both references are deterministic, so the emitted BM25 artifact is
-byte-reproducible (the Baseline bar).
-
-```python
-tokenize(self, texts: Iterable[str]) -> Iterator[list[str]]
-```
-
-Map each text to its list of terms, in input order (one token list per input text).
-
-One token list per input text, in order (like `Embedder.embed`). The terms appear in
-their order of occurrence in the text (a BM25 term frequency counts occurrences, so order is
-immaterial to the statistic but the contract is occurrence-order, not sorted). Empty or
-term-free text yields the empty list `[]` (never a crash). A deterministic Tokenizer is
-byte-reproducible (the Baseline bar).
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `tokenizer.regex` | `latence-core` |
-| `tokenizer.whitespace` | `latence-core` |
-
-### `graph_features` — GraphFeatureComputer
-
-- **Register as**: `graph_features.<variant>` under `latence.providers`
-- **Conformance case**: `graph_features`
-
-#### Protocol `GraphFeatureComputer`
-
-Computes centrality + community per node over the assembled KG (CONTEXT `Graph Assembly`).
-
-The index-time **graph-feature enrichment** Capability (ADR-0051): a pure transform that, given
-the assembled graph's `GraphNode`s and
-`GraphEdge`s, returns one `GraphFeatures` — a
-**centrality** measure (degree / PageRank) and a **community** id per node. It holds no index,
-runs no search (ADR-0048), names no model. The Graph-Assembly Stage OPTIONALLY resolves a
-computer from its `config['graph_features']` (the same `{"provider", "config"}` composition
-Export uses for its Embedder) and stamps the returned features onto each node's `properties`
-bag, so they flow into `graph-nodes.parquet` columns and — via Context Enrichment — onto each
-chunk's `ContextHeader` (the two consumers ADR-0051 names:
-graph-augmented retrieval and the Knapsack packer's `centrality` / `cluster_ids` inputs).
-Genuinely optional: a Stage that names no computer emits the graph byte-identically to today.
-
-Behaviour VARIES behind the seam, so it ships **two** in-core reference adapters
-(`latence_core.stages.graph_features`): `graph_features.degree` (degree centrality +
-connected-components community) and `graph_features.pagerank` (PageRank centrality +
-label-propagation community). Both are pure-Python, zero-dependency and DETERMINISTIC (fixed
-iteration order, rounded scores, content-addressed community ids), so a seeded run is
-byte-reproducible. They are *references*, not the blessed Louvain/Leiden community detection
-(ADR-0051), which — like SPLADE/MUVERA — ships as a pluggable, license-verified package.
-
-```python
-compute_features(self, nodes: Iterable[GraphNode], edges: Iterable[GraphEdge]) -> GraphFeatures
-```
-
-Compute one `GraphFeatures` (centrality + community per node) over the KG.
-
-Consumes the whole assembled graph (all nodes + all edges); returns a
-`GraphFeatures` covering **every** input node (never a partial map). An edge whose
-endpoint is not among `nodes` is ignored (belt-and-braces — the assembler validates
-endpoints). An empty graph yields the empty `GraphFeatures`. Deterministic → a seeded
-run is byte-reproducible (the Baseline bar).
-
-**Existing Providers**
-
-| Provider | Package |
-| --- | --- |
-| `graph_features.degree` | `latence-core` |
-| `graph_features.pagerank` | `latence-core` |
+their own. They are resolved by the engine (the delta processor).
 
 ### `delta` — DeltaProcessor
 
@@ -1440,86 +1111,6 @@ records, the current run's freshly-extracted corpus-level records, and the class
 | `edges_retracted` | `int` |
 | `affected_set_size` | `int` |
 | `corpus_record_count` | `int` |
-
-### `GraphFeatures`
-
-Per-node structural features over the assembled KG: centrality + community (ADR-0051).
-
-The result a `GraphFeatureComputer` returns: for **every** node in the assembled graph,
-a `centrality` score and a `community` id. It is a *value* the Graph-Assembly Stage stamps
-onto each `GraphNode`'s `properties` bag (`centrality` /
-`community`) — the computer holds nothing and mutates nothing (ADR-0048). Invariants (enforced
-at construction so a Provider cannot emit a half-populated result, so the downstream stamp is
-total):
-
-* `centrality` and `community` cover the **same** node-id set — every node gets both a
-  centrality and a community, never one without the other (the anti-false-green contract: a
-  computer that skips nodes fails here, not silently downstream);
-* each `centrality` value is a finite float (the normalisation is the Provider's business —
-  degree-centrality lands in `[0, 1]`, PageRank sums to ~1 — but every value is a real number,
-  never NaN/inf);
-* each `community` id is a non-empty string — the deterministic, content-addressed id of the
-  node's community (the reference Providers use the community's lexicographically-smallest
-  `node_id`), so two runs over the same corpus agree byte-for-byte (the Baseline bar).
-
-An empty graph yields the empty `GraphFeatures` (both maps empty), never an error.
-
-| Field | Type |
-| --- | --- |
-| `centrality` | `dict[str, float]` |
-| `community` | `dict[str, str]` |
-
-### `SparseVector`
-
-A sparse term-weight vector — the index-time SPLADE-family signal (ADR-0050/0053).
-
-The shape every vector DB's sparse index expects: two parallel columns, `indices` (the
-term ids that have non-zero weight) and `values` (their weights), materialised at Export as
-`sparse_indices: list<int>` + `sparse_values: list<float>` (ADR-0050). Invariants (enforced
-at construction so a Provider cannot emit a malformed vector, and so the emission is
-byte-deterministic regardless of a Provider's internal dict ordering):
-
-* `indices` and `values` are the same length;
-* `indices` are **strictly ascending** (hence unique) and non-negative — the canonical order
-  a sparse index ingests, and the order two runs must agree on for a byte-identical export;
-* a zero vector (empty text, no surviving terms) is the empty `SparseVector()` — never a
-  dense run of zeros.
-
-A `SparseEmbedder` Provider builds one via `from_terms` from its natural
-`{term_id: weight}` map, which sorts and validates in one place.
-
-| Field | Type |
-| --- | --- |
-| `indices` | `list[int]` |
-| `values` | `list[float]` |
-
-### `SparseSignals`
-
-The per-record structured signals a composing `SparseEmbedder` injects at index time.
-
-ADR-0053's sparse vector is not plain `SPLADE(text)` but the structured composition
-`SPLADE(text) ⊕ boost·entity_terms ⊕ boost·metadata_terms`. The text-only
-`SparseEmbedder.encode_sparse` seam can only build the model leg — no structured signal
-crosses it — so a `ComposingSparseEmbedder` receives this parallel per-record carrier and
-folds the chunk's own structured signals into the emitted vector. That is what makes the
-index-time and query-time sparse spaces **match** (the ADR-0053 one-composition-two-clocks
-guarantee): without it the query encoder injects boosted entity/metadata terms the corpus never
-carried, and a hybrid search on an injected term matches zero documents. A record with no
-structured signals is `EMPTY_SPARSE_SIGNALS` and composes to exactly the model leg —
-identical to the text-only path (so the additive/byte-identical guarantee is untouched when no
-signals exist).
-
-* `entities` — the chunk's `(surface, confidence)` entity mentions offered to the
-  composition. The composition confidence-gates them; the embedder's redaction gate additionally
-  drops any surface that no longer occurs in the (redacted) corpus text, so a masked PII surface
-  is never re-injected as a term (ADR-0053, REDACTION-BY-DEFAULT).
-* `metadata` — the chunk's `{field: value}` map from which the embedder's operator-selected
-  `metadata_fields` are injected (e.g. its classification category).
-
-| Field | Type |
-| --- | --- |
-| `entities` | `tuple[tuple[str, float], ...]` |
-| `metadata` | `Mapping[str, str]` |
 
 ## Record carriers
 
@@ -1702,8 +1293,7 @@ or no map), downstream degrades to the `char_start + local` shift.
 | `offset_map` | `OffsetMap \| None` | no | Stripped-content→original-markdown offset map, so a sub-chunk offset (an entity mention) resolves to its TRUE original offset, not the lower bound char_start+local. |
 | `risk_markers` | `list[RiskMarker]` | no | Content-Screening flags that propagate into the corpus. |
 | `induced_labels` | `InducedLabels \| None` | no | Per-document induced label schema the OPTIONAL schema_induction Stage attached, so a downstream extractor UNIONs these types onto its config labels (like risk_markers). None (default) ⇒ the chunk is unchanged and every extractor uses its config labels. |
-| `context_header` | `ContextHeader \| None` | no | The KG projected back onto this chunk (canonical entities + top-k neighbor triples) the OPTIONAL context_enrichment Stage attached, which the Export prepends to the EMBEDDING input ONLY — the stored content is byte-unchanged (W13, ADR-0039). None (default) ⇒ the chunk is unchanged and the Export prepends nothing (byte-identical to a run without the Stage), mirroring the risk_markers/induced_labels precedent. |
-| `masked_content` | `str \| None` | no | The PII-handled variant of this chunk's text the OPTIONAL Redaction Stage produced (W16, ADR-0042): the chunk text with every non-TAG PII span replaced by its placeholder. The clean ``content`` stays UNMASKED (so extraction still sees full entities); the Export materializes ``masked_content`` for the PII-safe RAG corpus. None (default) ⇒ no Redaction Stage ran, and the Export falls back to ``content`` (byte-identical to a run without the Stage), mirroring the context_header precedent. Redaction runs per CHUNK (each ≤ the model window) so no PII is truncated — the fix for the document-level 768-token truncation leak (ADR-0042). |
+| `masked_content` | `str \| None` | no | The PII-handled variant of this chunk's text the OPTIONAL Redaction Stage produced (W16, ADR-0042): the chunk text with every non-TAG PII span replaced by its placeholder. The clean ``content`` stays UNMASKED (so extraction still sees full entities); the Export materializes ``masked_content`` for the PII-safe RAG corpus. None (default) ⇒ no Redaction Stage ran, and the Export falls back to ``content`` (byte-identical to a run without the Stage), mirroring the induced_labels precedent. Redaction runs per CHUNK (each ≤ the model window) so no PII is truncated — the fix for the document-level 768-token truncation leak (ADR-0042). |
 | `pii_spans` | `list[PIISpan]` | no | The chunk-local PII spans the Redaction Stage detected (W16, ADR-0042): each span's ``char_start``/``char_end`` are offsets into THIS chunk's ``content`` (the coordinate system ``masked_content`` is masked in), while ``page_start``/``page_end`` resolve to the original source page through the chunk's offset_map+page_slice. Counts-only: a span never stores the raw PII value (S6 AC). Empty (default) ⇒ no Redaction Stage ran, or a clean chunk. |
 | `redaction_disabled_for_sensitive` | `bool` | no | True when this chunk's Classification.sensitivity is in the Redactor's sensitive set (confidential/restricted/…) yet the applied policy ran NO detectors (skip / empty types / empty detector set) — so an empty ``pii_spans`` here means 'the control was OFF', NOT 'no PII found' (the H-C1 §4 no-op floor carried per chunk, W16/ADR-0042). |
 
@@ -1869,18 +1459,15 @@ The scoped inter-Stage carrier for the Graph Assembly Stage, mirroring
 `DisambiguationRecord`'s scope split (ADR-0026). Exactly one of `node`/`edge`
 is populated, selected by `scope`:
 
-* `scope == NODE`: `node` holds the `GraphNode`; `edge`/`hyperedge` are
-  `None`. Its Provenance/Classification are the source canonical entity's (page-accurate).
-* `scope == EDGE`: `edge` holds the `GraphEdge`; `node`/`hyperedge` are
-  `None`. Its Provenance/Classification are the source normalized relation's.
-* `scope == HYPEREDGE`: `hyperedge` holds the `GraphHyperedge` (ADR-0057);
-  `node`/`edge` are `None`. Its Provenance is the primary span's, in original
-  coordinates.
+* `scope == NODE`: `node` holds the `GraphNode`; `edge` is `None`. Its
+  Provenance/Classification are the source canonical entity's (page-accurate).
+* `scope == EDGE`: `edge` holds the `GraphEdge`; `node` is `None`. Its
+  Provenance/Classification are the source normalized relation's.
 
 The scope/payload consistency is contract-enforced, so a Provider cannot emit a node-scope
 record with an edge payload (or leave both empty). Records are emitted deterministically
-(all NODE records in node-id order, then all EDGE records in edge-id order, then any
-HYPEREDGE records in hyperedge-id order), so a seeded run is byte-identical (Baseline bar).
+(all NODE records in node-id order, then all EDGE records in edge-id order), so a seeded
+run is byte-identical (Baseline bar).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1891,4 +1478,3 @@ HYPEREDGE records in hyperedge-id order), so a seeded run is byte-identical (Bas
 | `scope` | `GraphScope` | yes |  |
 | `node` | `GraphNode \| None` | no |  |
 | `edge` | `GraphEdge \| None` | no |  |
-| `hyperedge` | `GraphHyperedge \| None` | no |  |

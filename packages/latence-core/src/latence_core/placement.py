@@ -202,10 +202,6 @@ def _drive_embedding(provider: Any) -> None:
     list(provider.embed([_PROBE_TEXT]))
 
 
-def _drive_sparse(provider: Any) -> None:
-    list(provider.encode_sparse([_PROBE_TEXT]))
-
-
 def _drive_redaction(provider: Any) -> None:
     list(provider.redact([_probe_chunk()]))
 
@@ -229,8 +225,6 @@ def _drive_disambiguation(provider: Any) -> None:
 DRIVERS: dict[str, Callable[[Any], None]] = {
     "embedder": _drive_embedding,
     "embedding": _drive_embedding,
-    "sparse_embedder": _drive_sparse,
-    "sparse": _drive_sparse,
     "redaction": _drive_redaction,
     "fused_entity_relation": _drive_fused,
     "entity_extraction": _drive_entity_extraction,

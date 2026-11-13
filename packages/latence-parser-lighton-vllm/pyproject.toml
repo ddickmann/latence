@@ -57,8 +57,9 @@ Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
 # Registers this Provider under the framework's discovery group. Installing this package makes
 # 'parser.lighton_vllm' available to any Pipeline with no core change (ADR-0004), alongside
 # 'parser.lighton' (in-process, single-box/simple) / 'parser.endpoint' / 'parser.render'. It is the
-# PRODUCTION OCR path: a served vLLM endpoint at concurrency (~2.7x faster than optimised
-# transformers per LightOn's recommended path), same drop-in Parser Capability as parser.lighton.
+# PRODUCTION OCR path: a served vLLM endpoint called at concurrency, same drop-in Parser Capability
+# as parser.lighton. The two paths have not been measured against each other on one machine;
+# PERF-RESULTS.md lists that comparison as pending.
 [project.entry-points."latence.providers"]
 "parser.lighton_vllm" = "latence_parser_lighton_vllm.provider:LightOnVllmParser"
 

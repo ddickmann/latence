@@ -142,7 +142,6 @@ def test_a_model_loading_provider_is_covered_even_when_the_spec_declares_none(
         "redaction.gliner_pii",
         "disambiguation.glinker",
         "embedding.sentence_transformers",
-        "sparse.splade",
     }
     derived = required_components(spec, _REPO_ROOT)
     assert {name for name, kind in derived.items() if kind == "learned_provider"} == shipped
@@ -177,7 +176,6 @@ def test_the_model_runtime_markers_cover_the_committed_workspace() -> None:
             "redaction.gliner_pii",
             "disambiguation.glinker",
             "embedding.sentence_transformers",
-            "sparse.splade",
         },
         "gpu-learned": {
             "fused_entity_relation.gliner2",

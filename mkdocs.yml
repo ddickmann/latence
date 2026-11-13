@@ -161,19 +161,16 @@ nav:
       # the five tutorials landed from the docs-quickstart lane, so their nav entries are now
       # real files and `mkdocs build --strict` resolves them. Slugs are the filenames that
       # actually shipped (`tutorials/01-…` … `tutorials/05-…`, not the guessed `1-…`).
-      - Quickstart — from a folder to a queryable corpus: quickstart.md
+      - Quickstart — from a folder to a corpus and a knowledge graph: quickstart.md
       - Tutorials:
           - tutorials/index.md
           - Your first pipeline: tutorials/01-your-first-pipeline.md
           - Understanding the output: tutorials/02-understanding-the-output.md
-          - "Retrieval: four signals, fused": tutorials/03-retrieval.md
           - Bringing your own Provider: tutorials/04-bringing-your-own-provider.md
           - Production: tutorials/05-production.md
       - Read the results — the run console: getting-started/run-console.md
       - Long-form walkthroughs:
           - Fresh GPU pod → AI-ready data: TUTORIAL-fresh-pod-walkthrough.md
-          - RFC corpus → fused-retrieval proof: TUTORIAL-rfc-retrieval-proof.md
-          - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
           - GPU testing guide: GPU-TESTING-GUIDE.md
 
   # --- The evaluator's entry point -----------------------------------------------------------
@@ -182,17 +179,15 @@ nav:
       - Architecture: concepts/architecture.md
       - Domain language: concepts/domain-language.md
       - Pipeline Stages: pipeline/index.md
-      - "Deep dive: messy data → knowledge-graph retrieval": DEEP-DIVE.md
-      # The anatomy guide: the same territory as the deep dive, but exhaustive and grounded in
-      # the pipeline that actually produced the benchmark results. The index is readable alone;
-      # the five chapters are the zoom-in, in DAG order.
+      # The anatomy guide: exhaustive and grounded in the pipeline that actually produced the
+      # benchmark results. The index is readable alone; the three chapters are the zoom-in, in
+      # DAG order.
       - Pipeline anatomy:
           - anatomy/index.md
           - "1 · Ingest & document understanding": anatomy/01-ingest-and-document-understanding.md
           - "2 · Extraction & privacy": anatomy/02-extraction-and-privacy.md
           - "3 · Corpus → knowledge graph": anatomy/03-corpus-to-knowledge-graph.md
-          - "4 · Enrichment & export": anatomy/04-enrichment-and-export.md
-          - "5 · Retrieval": anatomy/05-retrieval.md
+          - "4 · The knowledge-graph export": anatomy/04-knowledge-graph-export.md
 
   # --- The Provider author's entry point -----------------------------------------------------
   - Providers:
@@ -219,11 +214,7 @@ nav:
           - Secrets handling: secrets.md
           - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
           - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
-      - Feed a retrieval engine:
-          - Retrieval-quality tooling — scope & boundary: retrieval-tooling.md
-          - Graph-rescue retrieval: guides/graph-rescue-retrieval.md
-          - "Serving with Qdrant: measured parity": guides/serving-qdrant.md
-          - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+      - Export:
           - Iceberg-table Export (optional): iceberg-export.md
       - Measure it:
           - Public benchmark results: BENCHMARKS.md
@@ -239,10 +230,7 @@ nav:
           - "G1 profound-testing gate — signed results": evidence/G1-RESULTS.md
           - The G1 gate specification: evidence/G1-profound-testing-gate.md
           - GPU SOTA sweep results: evidence/GPU-SOTA-SWEEP-RESULTS.md
-          - "Graph latency at scale (hypergraph index)": evidence/enterprise-serving-01-latency.md
-          - "Served on Qdrant: recall parity": evidence/enterprise-serving-02-qdrant-serving-parity.md
           - "Incremental ingest: byte-identical, O(changed)": evidence/enterprise-serving-03-incremental-ingest.md
-          - "Graph inertia: the rescue-lane study": evidence/graph-inertia.md
 
   - API Reference:
       - reference/index.md
@@ -260,6 +248,15 @@ nav:
   # Grouped exactly as docs/adr/index.md groups them, so the tab and the log agree.
   - Decision Log (ADRs):
       - adr/index.md
+      - "Re-scope: semantic-resolution and ontology engine":
+          - "0067 — Re-scope: semantic-resolution and ontology engine, standalone and as a Metis sidecar": adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md
+          - "0068 — Query-time retrieval tooling is removed": adr/0068-query-time-retrieval-tooling-is-removed-embedders-stay-only-as-a-resolution-signal.md
+          - "0069 — The semantic layer is a replay of an append-only ledger": adr/0069-the-semantic-layer-is-a-replay-of-an-append-only-ledger-of-assertions-and-decisions.md
+          - "0070 — Metis consumes the engine through one proposal file": adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md
+          - "0071 — Warehouse metadata enters the Pipeline as Sources": adr/0071-warehouse-metadata-enters-the-pipeline-as-sources-and-row-values-are-matched-inside-the-workspace.md
+          - "0072 — On Databricks the engine runs as jobs and keeps its state in Delta": adr/0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md
+          - "0073 — The schema level is induced by voting signals and exported in W3C standards": adr/0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md
+          - "0074 — A host shows the engine's export in a read-only screen of its own": adr/0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md
       - Foundations & scope:
           - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
@@ -322,7 +319,7 @@ nav:
       - Empirical choices:
           - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
           - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
-      - Retrieval-quality tooling:
+      - Retrieval-quality tooling (superseded by 0068):
           - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
           - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
           - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md

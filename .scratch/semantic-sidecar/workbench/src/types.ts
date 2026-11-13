@@ -1,0 +1,306 @@
+// The shapes the workbench reads and writes. The review and graph exports are what the engine
+// writes (`review-export/1`, `graph-export/1`); decisions and intents are what a reviewer adds.
+
+export type Band = "accept" | "review" | "reject";
+export type Scalar = string | number | null;
+
+export interface SourceRecord {
+  unique_id: string;
+  [field: string]: Scalar;
+}
+
+/** One comparison the matcher made between the two records, and what it contributed. */
+export interface EvidenceRow {
+  comparison: string;
+  label: string;
+  /** The record field the comparison was derived from. */
+  field: string;
+  /** -1: missing on at least one side; otherwise the agreement level, 0 the weakest. */
+  level: number;
+  level_label: string;
+  /** Match weight in bits: positive speaks for a match, negative against. */
+  weight: number;
+  left: Scalar;
+  right: Scalar;
+}
+
+/** One condition of a suggestion: the range of agreement levels a field has in pairs like this. */
+export interface SuggestionCondition {
+  comparison: string;
+  label: string;
+  levels: number[];
+  /** Plain words for the range, e.g. "agrees", "differs", "close or the same". */
+  text: string;
+}
+
+/**
+ * A suggested verdict with its grounds: among already decided pairs that meet the same
+ * conditions (`like_this`), how many had this verdict (`like_this_agree`).
+ */
+export interface Suggestion {
+  verdict: "same" | "different";
+  like_this: number;
+  like_this_agree: number;
+  conditions: SuggestionCondition[];
+}
+
+/** How the suggestions were made and how often they were right on pairs they had not seen. */
+export interface SuggesterSummary {
+  available: boolean;
+  how?: string;
+  labelled_pairs?: number;
+  out_of_sample_right?: number;
+  out_of_sample_share?: number;
+  /** How often "always the same" would have been right: the bar a suggestion has to beat. */
+  always_same_share?: number;
+  labels?: string;
+  reason?: string;
+}
+
+export interface ReviewItem {
+  id: string;
+  group: string | null;
+  band: Band;
+  probability: number;
+  match_weight: number;
+  prior_weight: number;
+  left: SourceRecord;
+  right: SourceRecord;
+  evidence: EvidenceRow[];
+  why_unsure: string;
+  vetoed: boolean;
+  suggestion?: Suggestion | null;
+  /** The generator's truth. Present on synthetic data only. */
+  gold_same?: boolean;
+}
+
+export interface GroupEdge {
+  left: string;
+  right: string;
+  band: Band;
+  probability: number;
+}
+
+/** A connected set of review pairs: one cluster a reviewer settles together. */
+export interface ReviewGroup {
+  id: string;
+  rank: number;
+  priority: number;
+  records: string[];
+  labels: Record<string, string>;
+  edges: GroupEdge[];
+  items: string[];
+}
+
+export interface ReviewMeta {
+  source: string;
+  kind: string;
+  synthetic: boolean;
+  records: number;
+  candidate_pairs: number;
+  bands: { accept_at: number | null; reject_below: number | null };
+  counts: Record<Band, number>;
+  review_groups_total: number;
+  review_groups_exported: number;
+  record_fields: string[];
+  comparisons: { comparison: string; label: string; field: string }[];
+  suggester?: SuggesterSummary;
+}
+
+export interface ReviewExport {
+  schema: string;
+  meta: ReviewMeta;
+  groups: ReviewGroup[];
+  items: ReviewItem[];
+  audit: ReviewItem[];
+}
+
+export type Verdict = "same" | "different" | "unsure";
+
+export interface Actor {
+  id: string;
+  name: string;
+}
+
+/** One entry in the append-only decision log. A later entry for the same item supersedes. */
+export interface Decision {
+  item: string;
+  verdict: Verdict;
+  reason?: string;
+  note?: string;
+  actor: Actor;
+  /** ISO 8601, UTC. */
+  at: string;
+  /** What the suggestion said when this was decided, if the pair had one. */
+  suggested?: "same" | "different";
+  /** Set when a group action made this entry: the id shared by every entry of that action. */
+  batch?: string;
+  /**
+   * True for an entry that takes a decision back: the pair is open again. `verdict` then names
+   * the verdict that was withdrawn. The entry it withdraws stays in the log.
+   */
+  withdraws?: boolean;
+}
+
+export interface DecisionInput {
+  item: string;
+  verdict: Verdict;
+  reason?: string;
+  note?: string;
+  suggested?: "same" | "different";
+}
+
+/**
+ * A reviewer's decision about a whole group. It decides the group's open pairs (each as its own
+ * log entry carrying `batch`), and this record says what was meant.
+ */
+export interface GroupIntent {
+  group: string;
+  intent: "merge" | "split";
+  note?: string;
+  actor: Actor;
+  at: string;
+  /** The id on every pair decision this action made. */
+  batch: string;
+  /** How many pairs it decided. */
+  decided: number;
+  /** Split only: the records of each part. */
+  parts?: string[][];
+  /**
+   * Split only: pairs the machine accepted on its own that this split puts in different parts.
+   * They are not in the review queue, so they are recorded here as objections for whoever
+   * applies the split.
+   */
+  separates_accepted?: [string, string][];
+}
+
+export interface GroupInput {
+  group: string;
+  intent: "merge" | "split";
+  /** Split only: every record of the group in exactly one part. */
+  parts?: string[][];
+  note?: string;
+}
+
+export interface Ledger {
+  decisions: Decision[];
+  intents: GroupIntent[];
+}
+
+// ---------- Graph ----------
+
+export type NodeType = "organisation" | "city" | "country" | "industry" | "source_system";
+
+export interface Concept {
+  id: NodeType;
+  label: string;
+  kind: "entity" | "reference" | "provenance";
+  count: number;
+  definition: string;
+}
+
+export interface Relation {
+  id: string;
+  from: NodeType;
+  to: NodeType;
+  label: string;
+  count: number;
+}
+
+export interface ConceptAttribute {
+  concept: NodeType;
+  id: string;
+  label: string;
+  /** Share of instances with a value, 0 to 1. */
+  filled: number;
+}
+
+export interface GraphMeta {
+  source: string;
+  synthetic: boolean;
+  /** "declared": read off the source columns. "induced": proposed by the engine and approved. */
+  schema_origin: string;
+  records: number;
+  organisations: number;
+  organisations_in_sample: number;
+  multi_record_organisations: number;
+}
+
+export interface CountedValue {
+  value: string;
+  records: number;
+}
+
+export interface GraphEntity {
+  id: string;
+  label: string;
+  records: SourceRecord[];
+  values: Record<string, CountedValue[]>;
+  city: string | null;
+  country: string | null;
+  industry: string | null;
+  systems: string[];
+  possibly_same: { entity: string; pairs: number; probability: number; items: string[] }[];
+}
+
+export interface GraphReferenceNode {
+  id: string;
+  type: Exclude<NodeType, "organisation">;
+  label: string;
+  code?: string;
+  organisations?: number;
+  records?: number;
+  in_sample: number;
+  country?: string | null;
+  cities?: string[];
+}
+
+export interface GraphExport {
+  schema: string;
+  meta: GraphMeta;
+  concepts: Concept[];
+  relations: Relation[];
+  attributes: ConceptAttribute[];
+  nodes: GraphReferenceNode[];
+  entities: GraphEntity[];
+}
+
+export interface GraphSchema {
+  meta: GraphMeta;
+  concepts: Concept[];
+  relations: Relation[];
+  attributes: ConceptAttribute[];
+}
+
+/** A node as a neighbour or a list row: enough to draw and to link to. */
+export interface NodeRef {
+  id: string;
+  type: NodeType;
+  label: string;
+  /** What makes it big: records for an organisation or a system, organisations for the rest. */
+  size: number;
+}
+
+export interface NeighbourGroup {
+  /** Stable key, e.g. "located_in" or "possibly_same". */
+  relation: string;
+  /** How the focus relates to these nodes, read as a sentence: "located in", "has organisations". */
+  label: string;
+  type: NodeType;
+  /** "asserted": the graph says so. "open": the review band has not decided. */
+  status: "asserted" | "open";
+  nodes: (NodeRef & { items?: string[]; probability?: number; pairs?: number })[];
+  /** How many there are in all; `nodes` may hold fewer. */
+  total: number;
+}
+
+export interface NodeDetail {
+  node: NodeRef;
+  groups: NeighbourGroup[];
+  /** Organisations only: the supporting records and what they say. */
+  records?: SourceRecord[];
+  values?: Record<string, CountedValue[]>;
+  /** Reference nodes only: how many organisations in all, and how many this source can list. */
+  total?: number;
+  listed?: number;
+}

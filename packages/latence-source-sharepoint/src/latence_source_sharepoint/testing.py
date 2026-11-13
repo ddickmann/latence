@@ -2,8 +2,7 @@
 
 Every offline test in this package, the framework's Provider conformance suite, and any
 adopter who wants a dry run without a tenant drive the connector through
-:class:`FakeGraphTransport`. Shipping it in ``src`` (like
-:class:`latence_retrieval.testing.FakeGraphSource`) is deliberate: the fake and the real
+:class:`FakeGraphTransport`. Shipping it in ``src`` is deliberate: the fake and the real
 client must stay in step, and a fake that lives next to the code it fakes does.
 
 **A fake that accepts what the real API rejects manufactures false green, so this one

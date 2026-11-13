@@ -1,6 +1,6 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""Stage ``s1-corpus`` — acquire the 6+2 e2e-sota-run datasets behind the license gate.
+"""Stage ``s1-corpus`` — acquire the campaign datasets behind the license gate.
 
 The order of operations is the point: the **license gate runs before any byte moves**
 (:func:`latence_benchmark.licensing.require_usable`, the ADR-0012 pattern applied to data),
@@ -8,7 +8,6 @@ so a restricted corpus can never be silently downloaded and then argued about. E
 carries a hand-verified :class:`~latence_benchmark.licensing.DatasetLicense` plus a campaign
 **lane** — what we may DO with the bytes once they land:
 
-* ``attribution``       — publishable with attribution (MuSiQue).
 * ``share-alike-local`` — CC BY-SA-derived text; kept local by campaign discipline.
 * ``strictly-local``    — permissive annotations over third-party copyrighted text
   (MultiHop-RAG news, ViDoSeek source PDFs); the raw corpus never leaves this machine.
@@ -18,8 +17,7 @@ carries a hand-verified :class:`~latence_benchmark.licensing.DatasetLicense` plu
 Fetching is idempotent and resumable at file granularity, and every fetcher sits behind ONE
 seam (:class:`Fetcher`) so the offline suite injects fakes; the real implementations ride
 ``huggingface_hub`` (the existing ``[hub]`` extra) for Hub sources and stdlib ``urllib`` for
-direct URLs. The two incumbents (musique, hotpotqa) are **referenced in place** under
-``benchmark/official-data/`` — verified present, recorded, never re-downloaded.
+direct URLs.
 
 Gate artifact: ``stages/s1-corpus/metrics.json`` + the corpus manifest rendered by the
 existing ``benchmark/corpus/manifest.py`` (measured counts, not brochure numbers).
@@ -52,12 +50,10 @@ STAGE_NAME = "s1-corpus"
 #: Repo-relative root the raw acquisitions land under (gitignored; see .gitignore).
 SOTA_CORPUS_DIR = "benchmark/sota-corpus"
 
-LANE_ATTRIBUTION = "attribution"
 LANE_SHARE_ALIKE_LOCAL = "share-alike-local"
 LANE_STRICTLY_LOCAL = "strictly-local"
 LANE_RESEARCH_ONLY = "research-only-local"
 
-KIND_LOCAL_REFERENCE = "local-reference"
 KIND_HF_SNAPSHOT = "hf-snapshot"
 KIND_URL = "url"
 
@@ -78,12 +74,10 @@ class DatasetPlan:
         :data:`~latence_benchmark.campaign.wizard.KNOWN_DATASETS` entry).
     :param lane: One of the module's ``LANE_*`` classifications.
     :param license: The separately verified corpus+toolkit license record the gate enforces.
-    :param kind: ``local-reference`` | ``hf-snapshot`` | ``url`` — selects the fetcher.
+    :param kind: ``hf-snapshot`` | ``url`` — selects the fetcher.
     :param repo_id: Hugging Face dataset repo id (``hf-snapshot`` only).
     :param revision: Full 40-hex commit SHA pin (``hf-snapshot`` only) — branches move.
     :param allow_patterns: Repo subset to fetch (``hf-snapshot``); empty = whole repo.
-    :param local_source: Repo-relative directory that must already exist
-        (``local-reference`` only). Verified present, recorded, never downloaded.
     :param urls: ``(filename, url)`` pairs (``url`` only), fetched with stdlib urllib,
         skip-if-exists per file.
     :param notes: Rulings and caveats carried into metrics + manifest.
@@ -96,7 +90,6 @@ class DatasetPlan:
     repo_id: str = ""
     revision: str = ""
     allow_patterns: tuple[str, ...] = ()
-    local_source: str = ""
     urls: tuple[tuple[str, str], ...] = ()
     notes: tuple[str, ...] = ()
 
@@ -105,8 +98,6 @@ class DatasetPlan:
         """One line saying where the bytes come from, for metrics + manifest."""
         if self.kind == KIND_HF_SNAPSHOT:
             return f"hf:{self.repo_id}@{self.revision}"
-        if self.kind == KIND_LOCAL_REFERENCE:
-            return f"local:{self.local_source}"
         return "; ".join(url for _, url in self.urls)
 
 
@@ -118,45 +109,10 @@ def _no_upstream_toolkit() -> str:
     return "not-applicable (scored by the latence harness; no upstream toolkit executed)"
 
 
-#: The 6+2 acquisition table. Lanes and handling per the S1 brief
+#: The acquisition table. Lanes and handling per the S1 brief
 #: (issues/wayfinder-e2e-sota-run/tickets/s1-…md); licenses + revisions verified against the
 #: Hugging Face API on 2026-08-02 (license tag + pinned commit SHA read per repo).
 CORPUS_PLAN: Mapping[str, DatasetPlan] = {
-    "musique": DatasetPlan(
-        name="musique",
-        lane=LANE_ATTRIBUTION,
-        license=DatasetLicense(
-            dataset_license="CC-BY-4.0",
-            code_license=_no_upstream_toolkit(),
-            commercial_use=True,
-            attribution_required=True,
-            verified_on="2026-08-02",
-            source_url="https://github.com/stonybrooknlp/musique",
-            notes="Incumbent M6-campaign dataset, already acquired locally.",
-        ),
-        kind=KIND_LOCAL_REFERENCE,
-        local_source="benchmark/official-data/musique-full",
-        notes=("Referenced in place — verified present, NOT re-downloaded.",),
-    ),
-    "hotpotqa": DatasetPlan(
-        name="hotpotqa",
-        lane=LANE_SHARE_ALIKE_LOCAL,
-        license=DatasetLicense(
-            dataset_license="CC-BY-SA-4.0",
-            code_license=_no_upstream_toolkit(),
-            commercial_use=True,
-            attribution_required=True,
-            verified_on="2026-08-02",
-            source_url="https://hotpotqa.github.io/",
-            notes=(
-                "Share-alike Wikipedia-derived text: kept local by campaign discipline "
-                "(same lane the M6 campaign already proved)."
-            ),
-        ),
-        kind=KIND_LOCAL_REFERENCE,
-        local_source="benchmark/official-data/hotpot-full",
-        notes=("Referenced in place — verified present, NOT re-downloaded.",),
-    ),
     "wiki2multihop": DatasetPlan(
         name="wiki2multihop",
         lane=LANE_SHARE_ALIKE_LOCAL,
@@ -300,23 +256,6 @@ class Fetcher(Protocol):
 # -- real fetcher implementations ------------------------------------------------------------
 
 
-def fetch_local_reference(plan: DatasetPlan, dest: Path, *, repo_root: Path) -> FetchResult:
-    """Verify a dataset that is ALREADY on disk; download nothing, record everything.
-
-    ``dest`` is deliberately untouched — the manifest points at the existing directory, so
-    there is exactly one copy of the incumbent data on the machine.
-    """
-    source = repo_root / plan.local_source
-    if not source.is_dir() or not any(source.iterdir()):
-        msg = (
-            f"{plan.name}: expected the existing local dataset at {source} "
-            "(the incumbents are referenced, never re-downloaded) but it is missing or "
-            "empty. Restore it before re-running the stage."
-        )
-        raise StageBlockedError(msg)
-    return FetchResult(fetched=0, skipped=0, note=f"referenced in place at {source}")
-
-
 def fetch_hf_snapshot(plan: DatasetPlan, dest: Path) -> FetchResult:
     """Materialise a pinned Hub snapshot into ``dest`` via ``huggingface_hub``.
 
@@ -370,14 +309,9 @@ def fetch_urls(plan: DatasetPlan, dest: Path) -> FetchResult:
     return FetchResult(fetched=fetched, skipped=skipped)
 
 
-def default_fetchers(repo_root: Path) -> Mapping[str, Fetcher]:
+def default_fetchers() -> Mapping[str, Fetcher]:
     """The real fetcher per plan ``kind``. Tests build their own mapping instead."""
-
-    def _local(plan: DatasetPlan, dest: Path) -> FetchResult:
-        return fetch_local_reference(plan, dest, repo_root=repo_root)
-
     return {
-        KIND_LOCAL_REFERENCE: _local,
         KIND_HF_SNAPSHOT: fetch_hf_snapshot,
         KIND_URL: fetch_urls,
     }
@@ -456,9 +390,7 @@ def _load_manifest_module(repo_root: Path) -> ModuleType:
 
 
 def dataset_root(ctx: CampaignContext, plan: DatasetPlan) -> Path:
-    """Where a dataset's bytes live: the raw dir, or the referenced existing dir."""
-    if plan.kind == KIND_LOCAL_REFERENCE:
-        return ctx.repo_root / plan.local_source
+    """Where a dataset's bytes live: its raw dir under ``benchmark/sota-corpus``."""
     return ctx.repo_root / SOTA_CORPUS_DIR / plan.name / "raw"
 
 
@@ -499,7 +431,7 @@ def run_corpus_stage(
     :param fetchers: Fetcher per plan ``kind``; ``None`` uses the real implementations.
         The offline suite injects fakes here — the seam the whole stage is built around.
     """
-    active = fetchers if fetchers is not None else default_fetchers(ctx.repo_root)
+    active = fetchers if fetchers is not None else default_fetchers()
 
     # 1. License gate, for the WHOLE selection, before any fetcher runs. A selection that
     #    is half-fetched and then refused would leave restricted bytes already on disk.
@@ -514,9 +446,8 @@ def run_corpus_stage(
         if fetcher is None:
             msg = f"{plan.name}: no fetcher for plan kind {plan.kind!r}."
             raise StageBlockedError(msg)
-        dest = ctx.repo_root / SOTA_CORPUS_DIR / plan.name / "raw"
-        if plan.kind != KIND_LOCAL_REFERENCE:
-            dest.mkdir(parents=True, exist_ok=True)
+        dest = dataset_root(ctx, plan)
+        dest.mkdir(parents=True, exist_ok=True)
         results[plan.name] = fetcher(plan, dest)
 
     # 3. Measure what actually landed (never what the fetch claims) + render the manifest
@@ -531,7 +462,9 @@ def run_corpus_stage(
             manifest_mod.SourceManifest(
                 name=plan.name,
                 licence=plan.license.dataset_license,
-                publishable=plan.lane == LANE_ATTRIBUTION,
+                # Every lane in the plan keeps the corpus on this machine, so no source
+                # is publishable. The field stays: the manifest tool requires it.
+                publishable=False,
                 root=str(root),
                 file_count=count,
                 total_bytes=total,
@@ -584,7 +517,7 @@ def run_corpus_stage(
 
 CORPUS_STAGE = StageSpec(
     name=STAGE_NAME,
-    title="Acquire the 6+2 corpus behind the license gate; measure + record the manifest",
+    title="Acquire the corpus behind the license gate; measure + record the manifest",
     done_probe=corpus_done_probe,
     progress_probe=corpus_progress_probe,
     run=run_corpus_stage,

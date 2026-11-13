@@ -151,7 +151,10 @@ written into the run manifest or logs.
   like a secret (`api_key`, `token`, `secret`, `password`, `credential`, and — since
   audit-R7 — the certificate-auth family `private_key`, `certificate`, `passphrase`,
   `client_cert`, …) has its **value** replaced with `***REDACTED***` before
-  `manifest.json` is written — inlined values and env-var references alike. No secret
+  `manifest.json` is written — inlined values and env-var references alike. A closed
+  list of token-count keys (`_TOKEN_BUDGET_KEYS`: `max_tokens`, `min_tokens`,
+  `overlap_tokens`, `max_new_tokens`, `microbatch_token_budget`) is exempt only while the
+  value is a number; every other key containing `token` is redacted. No secret
   is written to the manifest or logs. This scrubber, **not** a Provider-side guard, is
   what keeps a credential off disk: the Runner writes the manifest before it constructs
   any Provider, so `SharePointSource`'s `reject_inline_secrets` fails the run but cannot
