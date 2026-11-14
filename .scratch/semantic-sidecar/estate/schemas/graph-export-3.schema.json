@@ -853,6 +853,44 @@
      }
     }
    }
+  },
+  "drift": {
+   "description": "What drifted in the catalog under an element a person decided (ticket 53): the old decision is stale and no longer applied, and the element is a proposal again. Absent when nothing drifted.",
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "subject",
+     "kind",
+     "drift",
+     "decided_on",
+     "verdict",
+     "by",
+     "now"
+    ],
+    "properties": {
+     "drift": {
+      "enum": [
+       "renamed",
+       "retyped",
+       "split",
+       "dropped"
+      ]
+     },
+     "kind": {
+      "enum": [
+       "concept",
+       "relation"
+      ]
+     },
+     "now": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
   }
  },
  "$defs": {
