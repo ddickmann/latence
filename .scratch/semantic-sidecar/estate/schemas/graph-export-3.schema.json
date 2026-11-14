@@ -180,6 +180,27 @@
        "type": "boolean"
       }
      }
+    },
+    "lineage": {
+     "type": "object",
+     "required": [
+      "read",
+      "edges",
+      "outside_the_estate"
+     ],
+     "properties": {
+      "read": {
+       "const": true
+      },
+      "edges": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "outside_the_estate": {
+       "type": "integer",
+       "minimum": 0
+      }
+     }
     }
    }
   },
@@ -773,6 +794,32 @@
      }
     }
    }
+  },
+  "lineage": {
+   "description": "What the catalog's lineage says each concept is made from, between concepts of the estate. Absent where the reader keeps no lineage (a mirror).",
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "from",
+     "to",
+     "source"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "from": {
+      "type": "string",
+      "pattern": "^concept:"
+     },
+     "to": {
+      "type": "string",
+      "pattern": "^concept:"
+     },
+     "source": {
+      "const": "catalog"
+     }
+    }
+   }
   }
  },
  "$defs": {
@@ -864,6 +911,10 @@
        },
        "sensitive": {
         "type": "boolean"
+       },
+       "masked": {
+        "description": "The catalog masks the column: no statement of the engine selects it (it is sensitive too).",
+        "const": true
        }
       }
      }
@@ -886,6 +937,11 @@
     },
     "in_layer": {
      "$ref": "#/$defs/in_layer"
+    },
+    "row_filter": {
+     "description": "The function of the catalog's row filter on the object, where it has one: what the engine counted there is what its identity may see.",
+     "type": "string",
+     "minLength": 1
     }
    }
   },

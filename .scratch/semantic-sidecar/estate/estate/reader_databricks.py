@@ -7,8 +7,14 @@ What it reads and from where:
 - **tags**: one statement over ``information_schema.column_tags``. A column is sensitive when
   the estate file names it or when it carries one of the tags the estate calls sensitive. A
   sensitive column is never selected by any statement of the engine.
-- **declared keys**: each table's own entry (``GET .../tables/{full_name}``), whose
-  constraints the listing leaves out.
+- **declared keys, row filters and column masks**: each table's own entry
+  (``GET .../tables/{full_name}``), whose constraints, ``row_filter`` and column ``mask`` the
+  listing leaves out. A masked column is treated as sensitive (never selected) and labelled
+  masked; a table with a row filter is labelled with the filter's function, since what the
+  reader counts there is what its identity may see.
+- **lineage**: the table lineage endpoint (``GET /api/2.0/lineage-tracking/table-lineage``,
+  once per table), its upstream tables; an upstream outside the layers read is kept by its
+  full name and marked as outside.
 - **metric views**: the listing's entries of type ``METRIC_VIEW``. The catalog stores a
   definition without its comments and display names; those sit on the listed columns, and the
   definition is put together again from both.
@@ -40,9 +46,10 @@ from typing import Any
 import yaml
 
 from .metric_views import parse_view
-from .reader import CatalogObject, Column, DeclaredKey, MetricView
+from .reader import CatalogObject, Column, DeclaredKey, LineageEdge, MetricView
 
 TABLES = "/api/2.1/unity-catalog/tables"
+LINEAGE = "/api/2.0/lineage-tracking/table-lineage"
 STATEMENTS = "/api/2.0/sql/statements/"
 RUNNING = ("PENDING", "RUNNING")
 WHOLE = ("BYTE", "SHORT", "INT", "LONG")
@@ -78,6 +85,7 @@ class DatabricksReader:
         self.page, self.wait, self.poll_seconds, self.give_up_after, self._http = page, wait, poll_seconds, give_up_after, http
         self.name = catalog
         self._listed: list[dict[str, Any]] | None = None
+        self._entries: dict[str, dict[str, Any]] = {}
         self.statements: list[str] = []
 
     @classmethod
@@ -138,6 +146,16 @@ class DatabricksReader:
             self._listed = sorted(found, key=lambda t: (t["_layer"], t["name"]))
         return self._listed
 
+    def _full(self, t: dict[str, Any]) -> str:
+        return f"{self.catalog}.{self._schema(t['_layer'])}.{t['name']}"
+
+    def _entry(self, t: dict[str, Any]) -> dict[str, Any]:
+        """A table's own entry, read once: constraints, row filter and column masks are there."""
+        full = self._full(t)
+        if full not in self._entries:
+            self._entries[full] = self._call("GET", f"{TABLES}/{urllib.parse.quote(full, safe='')}", what=f"the table {full}")
+        return self._entries[full]
+
     # ---- the reader ---------------------------------------------------------------------------
     def ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
@@ -164,15 +182,19 @@ class DatabricksReader:
             if t.get("table_type") == "METRIC_VIEW":
                 continue
             layer, name = t["_layer"], t["name"]
+            entry = self._entry(t)
+            masked = {str(c["name"]) for c in entry.get("columns") or [] if (c.get("mask") or {}).get("function_name")}
             columns = []
             for c in t.get("columns") or []:
                 carried = tags.get((self._schema(layer), name, c["name"]), set())
-                sensitive = f"{layer}.{name}.{c['name']}" in self.sensitive or bool(carried & self.sensitive_tags)
-                columns.append(Column(c["name"], str(c.get("type_text") or c.get("type_name") or ""), str(c.get("comment") or ""), tuple(sorted(carried)), sensitive))
+                sensitive = f"{layer}.{name}.{c['name']}" in self.sensitive or bool(carried & self.sensitive_tags) or c["name"] in masked
+                columns.append(Column(c["name"], str(c.get("type_text") or c.get("type_name") or ""), str(c.get("comment") or ""), tuple(sorted(carried)), sensitive,
+                                      c["name"] in masked))
+            row_filter = str((entry.get("row_filter") or {}).get("function_name") or "")
             obj = CatalogObject(id=f"uc:{t['table_id']}", schema=layer, name=name, kind="view" if t.get("table_type") in VIEW_TYPES else "table",
-                                columns=tuple(columns), comment=str(t.get("comment") or ""))
+                                columns=tuple(columns), comment=str(t.get("comment") or ""), row_filter=row_filter)
             rows = self.query(f"SELECT count(*) FROM {self.quote(obj)}")[0][0]
-            out.append(CatalogObject(obj.id, obj.schema, obj.name, obj.kind, obj.columns, obj.comment, int(rows)))
+            out.append(CatalogObject(obj.id, obj.schema, obj.name, obj.kind, obj.columns, obj.comment, int(rows), row_filter))
         return out
 
     def declared_keys(self) -> list[DeclaredKey]:
@@ -180,8 +202,7 @@ class DatabricksReader:
         for t in self._list():
             if t.get("table_type") == "METRIC_VIEW":
                 continue
-            full = f"{self.catalog}.{self._schema(t['_layer'])}.{t['name']}"
-            one = self._call("GET", f"{TABLES}/{urllib.parse.quote(full, safe='')}", what=f"the table {full}")
+            one = self._entry(t)
             for constraint in one.get("table_constraints") or []:
                 primary, foreign = constraint.get("primary_key_constraint"), constraint.get("foreign_key_constraint")
                 if primary:
@@ -192,6 +213,25 @@ class DatabricksReader:
                     out.append(DeclaredKey(f"{t['_layer']}.{t['name']}", tuple(foreign.get("child_columns") or ()), "foreign",
                                            f"{layer}.{parent[-1]}", tuple(foreign.get("parent_columns") or ())))
         return out
+
+    def lineage(self) -> list[LineageEdge]:
+        """Every listed table's upstream tables. Of a name in one of the layers read, the
+        engine's name; of any other, the catalog's full name, marked as outside."""
+        layers = {self._schema(layer): layer for layer in self.schemas}
+        edges: set[LineageEdge] = set()
+        for t in self._list():
+            if t.get("table_type") == "METRIC_VIEW":
+                continue
+            full = self._full(t)
+            answer = self._call("GET", LINEAGE, {"table_name": full, "include_entity_lineage": "false"}, what=f"the lineage of {full}")
+            for up in answer.get("upstreams") or []:
+                info = up.get("tableInfo") or {}
+                if not info.get("name"):
+                    continue  # an upstream that is no table (a notebook, a job, a file)
+                inside = info.get("catalog_name") == self.catalog and info.get("schema_name") in layers
+                source = f"{layers[info['schema_name']]}.{info['name']}" if inside else f"{info.get('catalog_name')}.{info.get('schema_name')}.{info['name']}"
+                edges.add(LineageEdge(source, f"{t['_layer']}.{t['name']}", bool(inside)))
+        return sorted(edges, key=lambda e: (e.target, e.source))
 
     def metric_views(self) -> list[MetricView]:
         out = []

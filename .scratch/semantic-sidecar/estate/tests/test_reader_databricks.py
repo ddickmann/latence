@@ -157,3 +157,46 @@ def test_a_build_from_the_catalog_says_what_is_missing_in_the_environment(tmp_pa
     other = {**one, "concepts": [{**one["concepts"][0], "key": ["code"]}, {"id": "concept:s.b", "kind": "fact", "key": [], "status": "proposed", "label": "B"}]}
     assert compare(one, other) == {"only_in_a": [], "only_in_b": ["concept:s.b"], "same": 0,
                                    "differ": {"concept:s.a": {"a": ["entity", ["id"], "proposed", "A"], "b": ["entity", ["code"], "proposed", "A"]}}}
+
+
+FILTERS = {"demo.acme_shop.claims": "demo.acme_gov.claims_of_my_market"}
+MASKS = {("acme_shop", "parts", "system"): "demo.acme_gov.mask_system"}
+LINEAGE = [("demo.acme_shop.claims", "demo.acme_marts.claims_by_dealer"), ("demo.acme_raw.claims_feed", "demo.acme_shop.claims")]
+
+
+def test_lineage_row_filters_and_column_masks_are_read_and_labelled_and_a_masked_column_is_in_no_statement(
+        reader: DuckDBReader, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ticket 41: the catalog says which tables carry a row filter and which columns a mask, and
+    what each table is made from; the toy estate's build from the catalog labels all three, and
+    leaves the masked column out of every statement, as it does a column tagged sensitive."""
+    import estate.cli as cli
+    from tests.test_proposal import EXPORT_SCHEMA
+
+    import jsonschema
+
+    standin = StandIn(reader, tags=TAGS, metric_views=[_metric_view()], filters=FILTERS, masks=MASKS, lineage=LINEAGE)
+
+    def from_env(catalog: str, schemas: Any, **more: Any) -> DatabricksReader:
+        return DatabricksReader("https://workspace.invalid", "good", catalog, schemas, "wh1", poll_seconds=0, http=standin, **more)
+
+    monkeypatch.setattr(cli.DatabricksReader, "from_env", staticmethod(from_env))
+    cfg = tmp_path / "toy.yaml"
+    cfg.write_text(yaml.safe_dump({"name": "toy", "schemas": ["shop", "marts", "semantics"], "schema_prefix": "acme_", "sensitive_tags": ["pii"],
+                                   "ignore_columns": ["source_line"], "derived_schemas": ["marts"], "without_personal_columns": ["shop.dealers"]}))
+    cli.build(cfg, None, None, None, tmp_path / "out", catalog="demo")
+    export = json.loads((tmp_path / "out" / "ontology.json").read_text(encoding="utf-8"))
+    jsonschema.validate(export, EXPORT_SCHEMA)
+    concepts = {c["id"]: c for c in export["concepts"]}
+    assert {cid: c["row_filter"] for cid, c in concepts.items() if "row_filter" in c} == {"concept:shop.claims": "demo.acme_gov.claims_of_my_market"}
+    masked = {(cid, a["column"]): a for cid, c in concepts.items() for a in c.get("attributes") or [] if a.get("masked")}
+    assert list(masked) == [("concept:shop.parts", "system")] and masked[("concept:shop.parts", "system")]["sensitive"] is True
+    assert export["lineage"] == [{"from": "concept:shop.claims", "to": "concept:marts.claims_by_dealer", "source": "catalog"}]
+    assert export["meta"]["lineage"] == {"read": True, "edges": 1, "outside_the_estate": 1}
+    assert not [s for s in standin.statements if "`parts`" in s and "`system`" in s]  # the masked column is never selected
+    assert any("`parts`" in s for s in standin.statements)  # the table itself is read
+    ttl = (tmp_path / "out" / "ontology.ttl").read_text(encoding="utf-8")
+    assert "v:masked" in ttl
+
+
+def test_a_mirror_reads_no_lineage_and_its_export_says_nothing_of_it(reader: DuckDBReader) -> None:
+    assert reader.lineage() is None

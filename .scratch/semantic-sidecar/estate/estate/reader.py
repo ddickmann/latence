@@ -22,6 +22,7 @@ class Column:
     comment: str = ""
     tags: tuple[str, ...] = ()
     sensitive: bool = False  # never read for values, never shown as instances
+    masked: bool = False  # the catalog masks it (a column mask); a masked column is also sensitive
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class CatalogObject:
     columns: tuple[Column, ...]
     comment: str = ""
     rows: int | None = None
+    row_filter: str = ""  # the catalog's row filter on it (its function), if any: counts are what the reader may see
 
     @property
     def full_name(self) -> str:
@@ -49,6 +51,15 @@ class DeclaredKey:
     kind: str  # "primary" | "foreign"
     references: str | None = None  # full name of the referenced object
     referenced_columns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LineageEdge:
+    """One object made from another, as the catalog's lineage says. Names are full names in
+    the engine's layers, or ``catalog.schema.table`` for an object outside what is read."""
+    source: str
+    target: str
+    inside: bool  # both objects are among those read
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,11 @@ class Reader(Protocol):
     def declared_keys(self) -> list[DeclaredKey]: ...
 
     def metric_views(self) -> list[MetricView]: ...
+
+    def lineage(self) -> list[LineageEdge] | None:
+        """What each object is made from, by the catalog's lineage; ``None`` where the
+        warehouse keeps none (a mirror)."""
+        ...
 
     def query(self, sql: str) -> list[tuple[Any, ...]]:
         """Run one aggregate query inside the warehouse. Callers never select a sensitive column."""

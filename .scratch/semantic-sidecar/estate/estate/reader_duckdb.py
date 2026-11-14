@@ -73,6 +73,10 @@ class DuckDBReader:
                 f"{schema}.{ref}" if ref else None, tuple(ref_cols or ())))
         return out
 
+    def lineage(self) -> None:
+        """A mirror keeps no lineage: the export says nothing of it, rather than "none"."""
+        return None
+
     def metric_views(self) -> list[MetricView]:
         return parse_listing(self._views_text, self._prefix) if self._views_text else []
 

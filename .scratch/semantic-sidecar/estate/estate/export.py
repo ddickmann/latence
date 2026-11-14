@@ -31,12 +31,15 @@ def _claimed(kind: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_export(layer: dict[str, Any], *, source: str, title: str, verified: list[tuple[str, str]] | None = None,
                  instances: dict[str, Any] | None = None, structure: dict[str, Any] | None = None,
-                 classes: dict[str, Any] | None = None, language: str = "en", proposal_names: tuple[str, ...] = ()) -> dict[str, Any]:
+                 classes: dict[str, Any] | None = None, language: str = "en", proposal_names: tuple[str, ...] = (),
+                 lineage: list[dict[str, str]] | None = None, lineage_outside: int = 0) -> dict[str, Any]:
     """``language`` is the language the catalog's comments are written in. ``proposal_names``
     are the master lists whose records' names may go into a proposal file: each that is not
     seeded is marked ``"proposal": "names"``, so a host's page offers a decision on it like on
     an induced element. The mark is the estate file's word, not a statement about the data: it
-    is no part of the claim and no assertion."""
+    is no part of the claim and no assertion. ``lineage`` is what the catalog says each concept
+    is made from, between concepts of the estate (``None`` where the reader keeps no lineage: then
+    the export says nothing of it); ``lineage_outside`` counts the edges from outside it."""
     def offered(c: dict[str, Any]) -> dict[str, Any]:
         return {"proposal": "names"} if c.get("object_name") in proposal_names and not c.get("seeded") else {}
 
@@ -82,6 +85,7 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
                 "review_items": instances["meta"]["review_items"], "certified": instances["meta"]["certified"],
                 "nodes_per_concept": instances["meta"]["nodes_per_concept"]},
             "resolution": None if instances is None else instances["meta"].get("resolution"),
+            **({} if lineage is None else {"lineage": {"read": True, "edges": len(lineage), "outside_the_estate": lineage_outside}}),
         },
         "concepts": concepts,
         "relations": relations,
@@ -94,5 +98,6 @@ def build_export(layer: dict[str, Any], *, source: str, title: str, verified: li
         "nodes": [] if instances is None else instances["nodes"],
         "edges": [] if instances is None else instances["edges"],
         "review": [] if instances is None else _claimed("possibly_same", instances["review"]),
+        **({} if lineage is None else {"lineage": lineage}),
         "label_requests": {name: _claimed("possibly_same", sample) for name, sample in ((instances or {}).get("label_requests") or {}).items()},
     }

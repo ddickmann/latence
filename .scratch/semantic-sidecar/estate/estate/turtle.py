@@ -78,6 +78,9 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
     w.add("v:reviewStatus", [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit("review status")),
                              ("rdfs:comment", _lit("stated by the catalog, approved by a person, or proposed and not yet reviewed"))])
     w.add("v:personal", [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit("personal")), ("rdfs:comment", _lit("the column holds personal data; no value of it is exported"))])
+    if any(a.get("masked") for c in export["concepts"] for a in c.get("attributes") or []):
+        w.add("v:masked", [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit("masked")),
+                           ("rdfs:comment", _lit("the catalog masks the column; the engine reads no value of it"))])
     w.add("v:rollsUpTo", [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit("rolls up to"))])
     w.add("v:partOf", [("a", "owl:ObjectProperty"), ("rdfs:label", _lit("part of"))])
     w.add("e:ontology", [("a", "owl:Ontology"), ("rdfs:label", _lit(export["meta"]["title"])),
@@ -109,7 +112,9 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
         for a in c.get("attributes") or []:
             pairs = [("a", "owl:DatatypeProperty"), ("rdfs:label", _lit(a["label"])), ("rdfs:domain", iri), ("rdfs:range", _xsd(a["type"])),
                      ("v:reviewStatus", _lit(status))]
-            if a.get("sensitive"):
+            if a.get("masked"):
+                pairs.append(("v:masked", "true"))  # withheld by the catalog's mask, not known to be personal
+            elif a.get("sensitive"):
                 pairs.append(("v:personal", "true"))
             w.add(w.iri(f"{c['id']}#{a['column']}"), pairs)
 

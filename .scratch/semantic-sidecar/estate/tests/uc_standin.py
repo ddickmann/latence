@@ -5,6 +5,13 @@ way the real services do: it refuses a wrong token, lists two tables at a time, 
 first listing with "too many requests", lets every third statement be pending first, returns a
 result in parts of five rows, fails a statement that is not in its dialect, and returns every
 value as text. It knows nothing of the reader's code; it is written from the calls alone.
+
+It also governs (ticket 41): a table may carry a row filter and a column a mask, stated in the
+table's own entry only (the listing leaves them out, as it leaves out the constraints), and it
+answers the table lineage endpoint with what each table is made from and feeds. A statement
+that reads a masked column gets the mask's value back, not the data, as a warehouse gives it to
+an identity the mask hides it from; what such a column would tell is then wrong without an
+error, which is why the reader must never select it.
 """
 
 from __future__ import annotations
@@ -23,9 +30,12 @@ PAGE, PART = 2, 5
 
 class StandIn:
     def __init__(self, inner: DuckDBReader, *, catalog: str = "demo", prefix: str = "acme_", warehouse: str = "wh1", tags: dict[tuple[str, str, str], list[str]] | None = None,
-                 metric_views: list[dict[str, Any]] | None = None, constraints: dict[str, list[dict[str, Any]]] | None = None) -> None:
+                 metric_views: list[dict[str, Any]] | None = None, constraints: dict[str, list[dict[str, Any]]] | None = None,
+                 filters: dict[str, str] | None = None, masks: dict[tuple[str, str, str], str] | None = None,
+                 lineage: list[tuple[str, str]] | None = None) -> None:
         self.inner, self.catalog, self.prefix, self.warehouse = inner, catalog, prefix, warehouse
         self.tags, self.constraints = tags or {}, constraints or {}
+        self.filters, self.masks, self.lineage = filters or {}, masks or {}, lineage or []
         self.tables = [self._table(o) for o in inner.objects()] + (metric_views or [])
         self.statements: list[str] = []
         self.calls: list[tuple[str, str]] = []
@@ -67,7 +77,22 @@ class StandIn:
         if method == "GET" and path.startswith("/api/2.1/unity-catalog/tables/"):
             full = path.rsplit("/", 1)[-1]
             found = next((t for t in self.tables if f"{t['catalog_name']}.{t['schema_name']}.{t['name']}" == full), None)
-            return (200, {**found, "table_constraints": self.constraints.get(full, [])}) if found else (404, {"error_code": "TABLE_DOES_NOT_EXIST"})
+            if found is None:
+                return 404, {"error_code": "TABLE_DOES_NOT_EXIST"}
+            columns = [{**c, **({"mask": {"function_name": self.masks[(found["schema_name"], found["name"], c["name"])], "using_column_names": []}}
+                                if (found["schema_name"], found["name"], c["name"]) in self.masks else {})} for c in found.get("columns") or []]
+            governed = {"row_filter": {"function_name": self.filters[full], "input_column_names": ["market"]}} if full in self.filters else {}
+            return 200, {**found, "columns": columns, **governed, "table_constraints": self.constraints.get(full, [])}
+        if method == "GET" and path == "/api/2.0/lineage-tracking/table-lineage":
+            asked = query.get("table_name", "")
+            if not any(f"{t['catalog_name']}.{t['schema_name']}.{t['name']}" == asked for t in self.tables):
+                return 404, {"error_code": "TABLE_DOES_NOT_EXIST"}
+
+            def info(full: str) -> dict[str, Any]:
+                catalog, schema, name = full.split(".")
+                return {"tableInfo": {"name": name, "catalog_name": catalog, "schema_name": schema, "table_type": "TABLE", "lineage_timestamp": "2026-11-01 08:00:00.0"}}
+
+            return 200, {"upstreams": [info(s) for s, d in self.lineage if d == asked], "downstreams": [info(d) for s, d in self.lineage if s == asked]}
         if method == "POST" and path == "/api/2.0/sql/statements/":
             return 200, self._submit(body)
         if method == "GET" and (m := re.fullmatch(r"/api/2.0/sql/statements/(\w+)", path)):
@@ -106,6 +131,9 @@ class StandIn:
             kinds = ["STRING"] * 4
         else:
             local = sql.replace(f"`{self.catalog}`.", "").replace("`", '"').replace(f'"{self.prefix}', '"')
+            for (schema, table, column) in self.masks:  # what a mask gives back for every row
+                if f"`{table}`" in sql and f"`{column}`" in sql:
+                    local = local.replace(f'"{column}"', "'****'")
             local = re.sub(r"\bAS STRING\b", "AS VARCHAR", local)
             try:
                 cursor = self.inner.con.execute(local)

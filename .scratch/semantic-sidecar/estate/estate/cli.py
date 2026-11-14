@@ -80,6 +80,11 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
     else:
         raise SystemExit("give the estate to read: --duckdb FILE for a mirror, or --catalog NAME for Unity Catalog")
     names = {o.full_name for o in reader.objects()}
+    # What the catalog says each object is made from, between the estate's concepts (ticket 41).
+    read_lineage = reader.lineage()
+    lineage = None if read_lineage is None else [
+        {"from": f"concept:{e.source}", "to": f"concept:{e.target}", "source": "catalog"} for e in read_lineage if e.inside and e.source in names and e.target in names]
+    lineage_outside = 0 if read_lineage is None else sum(not e.inside for e in read_lineage)
     joins = read_verified(verified, names) if verified else []
     shown = tuple(cfg.get("without_personal_columns", ()))
     model = induce(reader, joins, tuple(cfg.get("ignore_columns", ())), tuple(cfg.get("derived_schemas", ())), shown, labels=cfg.get("labels"))
@@ -155,7 +160,8 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                  "label_requests": {name: [decisions.marked("possibly_same", item) for item in sample] for name, sample in instances.get("label_requests", {}).items()}}
     layer = {**layer, "meta": {**layer["meta"], "decisions": decisions.summary()}}
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
-                          language=cfg.get("language", "en"), proposal_names=tuple((cfg.get("propose") or {}).get("names", ())))
+                          language=cfg.get("language", "en"), proposal_names=tuple((cfg.get("propose") or {}).get("names", ())),
+                          lineage=lineage, lineage_outside=lineage_outside)
     export, taken_up = in_layer(export, read_receipts(receipts))
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")

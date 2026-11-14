@@ -227,7 +227,8 @@ def induce(
             status="declared" if view_of.get(o.full_name) else "proposed", signals=sig,
             body={"object": o.id, "object_name": o.full_name, "rows": o.rows, "definition": comment,
                   "key": list(keys.get(o.full_name, ())), "kind": "derived" if o.schema in derived else "entity",
-                  "instances": _instances_of(o, personal_key, without_personal_columns)},
+                  "instances": _instances_of(o, personal_key, without_personal_columns),
+                  **({"row_filter": o.row_filter} if o.row_filter else {})},
         )
 
     # ---- relations: declared by metric-view joins, then mined by name and inclusion ---------
@@ -387,7 +388,7 @@ def induce(
                 continue
             shown = display.get(col.name, ("", "", ()))
             attrs.append({"column": col.name, "label": shown[0] or label_of(col.name), "type": col.type,
-                          "definition": col.comment or shown[1], "sensitive": col.sensitive})
+                          "definition": col.comment or shown[1], "sensitive": col.sensitive, **({"masked": True} if col.masked else {})})
         c.body["attributes"] = attrs
 
     measures = []

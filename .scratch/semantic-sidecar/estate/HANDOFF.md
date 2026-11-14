@@ -244,7 +244,14 @@ counting statements on a SQL warehouse (`estate/reader_databricks.py`). Host, wa
 credentials come from the environment (block 7). **Proven against a stand-in server only; not
 yet run against a workspace.** The stand-in proves the protocol (pages, pending statements,
 results in parts, a refused token, a failed statement); it does not prove the warehouse's SQL.
-Lineage, row filters and column masks are not read.
+Since ticket 41 it also reads, from each table's own entry, which tables carry a row filter
+(the concept says `row_filter` with the filter's function: what was counted there is what the
+reading identity may see) and which columns a mask (the attribute says `masked`, and the column,
+treated as sensitive, is in no statement), and from the table lineage endpoint what each table
+is made from (the export's `lineage`, between the estate's concepts, and in `meta.lineage` how
+many edges come from outside it). Proven against the stand-in only, like the rest; the endpoint
+and field names (`row_filter.function_name`, a column's `mask.function_name`, the lineage
+answer's `upstreams[].tableInfo`) are the documented ones and have not met a workspace.
 
 ## What to say aloud in a demonstration
 
