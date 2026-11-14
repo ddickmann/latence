@@ -198,7 +198,7 @@ def propose(config: Path, out: Path, file: Path | None = None,
     export = json.loads((out / "ontology.json").read_text(encoding="utf-8"))
     document, report = proposal(export, read_decisions(out / "decisions.jsonl"),
                                 tuple(said.get("names", ())), said.get("spellings_on"), decided_on,
-                                version=int(said.get("version", 1)))
+                                links=bool(said.get("links", True)))
     target = file or out / "proposal.yaml"
     target.write_text(to_yaml(document, cfg["name"]), encoding="utf-8")
     return {"file": str(target), **report}

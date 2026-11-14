@@ -2,7 +2,7 @@
 
 Type: question
 Mode: HITL (the host's owner decides what enters its semantic layer)
-Status: resolved (14 Nov): yes; this side's writer built behind version 2 of the file (14 Nov); open: the host's ticket for the entry it reads
+Status: resolved (14 Nov): yes; the writer is built to the entry the host's ticket 294 reads
 Decided by the owner (14 Nov): yes: a person-decided link reaches the host's layer as a new entry shape, agreed on the host's side first (a host ticket for the entry it reads, then the writer here). Links certified on simulated labels are never written, as settled.
 Blocked by: nothing
 Emerges from: 40 ("Choices": no link between records is ever written, a person's included)
@@ -104,3 +104,40 @@ version of the file; nothing reaches the host before its tool reads the version.
 - **For the orchestrator:** the host's ticket for the entry it reads is to be written on the
   host's side from the proposal above; until it reads version 2, nothing here changes what the
   host receives.
+
+## Result, revised (14 Nov): the writer follows the host's ticket 294
+
+The host settled the entry in its ticket 294, and the writer now writes exactly that; the shape
+proposed above (`version: "2"`, `links.records` with names) is replaced and was never handed to
+the host.
+
+- **The file.** `format: layer-proposal/2` when it holds a link; a file with no link states no
+  format and is version 1, **byte for byte as before** (the vehicle estate's file of the 12 Nov
+  trial is unchanged; on the vehicle estate every link holds a seeded account, so its file stays
+  version 1). `links=False` (`propose.links: false`) keeps a file at version 1 for a host on it.
+- **The entry.** `link: {record: {object, column, key}, linked: {object, column, key},
+  evidence: [{code, params}], p}` with `origin: {element, claim, decision: {verdict, by, at},
+  certified_on}`: `record` is the master list's record, `linked` the other source's,
+  `evidence` the statement codes the person saw (the pair's reasons, the source statement left
+  out), `p` the pair's probability where the linker gave one (written as a number, nothing made
+  up where there is none), `certified_on: reviewer` only where the build's resolution rests on a
+  reviewer's labels and absent otherwise.
+- **Never written, each with its test** (`packages/latence-proposal-writer/tests/test_links.py`,
+  9 tests): a seeded link; a link no person approved (the machine's, one certified on simulated
+  labels among them); `certified_on` other than `reviewer`; a link without an approved
+  decision, a claim, or both records in full (`no_claim`, `no_records`) or without what the
+  person saw (`no_evidence`); a self-link or two records of one object (`one_object`); a link
+  whose master list's names are not in the same file, so that the master record is a glossary
+  value of the object and column the names entry states (`master_not_in_the_file`); a linked
+  record linked to another record already, by another approved decision or by a link of the
+  build (`linked_elsewhere`). The host's rule "a master object and column that no single
+  dimension reads" cannot be checked on this side, which does not know the host's dimensions;
+  the writer's proxy is the master list's own names entry, which the host placed on 12 Nov.
+- **What the person saw reaches the link.** Once a build applied a person's answer the pair is no
+  longer listed, so the build now carries the pair's statements and probability, as the linker
+  showed them, onto the link the person decided (beside its claim).
+- **Red first:** the nine tests against the writer of the first revision of this ticket (no
+  `format`, a `links` entry, no refusal for one object, a master list or a second link): red;
+  the prototype's test
+  `test_a_link_a_person_decided_between_records_that_are_not_seeded_reaches_the_file_in_the_hosts_shape`:
+  red on the build that put no statement on a person's link (`no_evidence`).

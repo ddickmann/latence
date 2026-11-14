@@ -277,34 +277,37 @@ def test_a_page_download_alone_writes_the_file_with_no_day_option_and_no_line_wr
     assert _file(yard)[0] == text
 
 
-def test_a_link_a_person_decided_between_records_that_are_not_seeded_is_written_in_version_2_only(
+def test_a_link_a_person_decided_between_records_that_are_not_seeded_reaches_the_file_in_the_hosts_shape(
         yard: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ticket 45: the estate asks for version 2; a person's link reaches the file, the machine's
-    links (certified on simulated labels) never do, and nothing changes in version 1."""
+    """Ticket 45 and the host's ticket 294: a person's link reaches the file as a `link` entry
+    with what the person saw, and the file says `format: layer-proposal/2`; the machine's links
+    (certified on simulated labels) never do; a host on version 1 gets today's file."""
     monkeypatch.setattr(cli, "run_resolver", lambda *args, **kwargs: _resolver_answer())
     plain = {k: v for k, v in ESTATE.items() if k != "seeded_objects"}  # here the portal is a real second source
     plain["link"] = {**ESTATE["link"], "records": [ESTATE["link"]["records"][0], {**ESTATE["link"]["records"][1], "source": "partner portal"}]}
-    yard["config"].write_text(yaml.safe_dump({**plain, "propose": {"names": ["shop.dealers"], "version": 2}}), encoding="utf-8")
+    yard["config"].write_text(yaml.safe_dump({**plain, "propose": {"names": ["shop.dealers"]}}), encoding="utf-8")
     build(**yard, resolver=tmp_path)
     export = _export(yard)
     left = next(r for r in export["review"] if r["id"] == "same:shop.dealers:D3~partner.accounts:PA4")
-    _decide(yard, _line(left, by="reviewer-2"))
+    _decide(yard, _line(left, by="reviewer-2"), _line(_concept(export, "concept:shop.dealers")))
     build(**yard, resolver=tmp_path)  # the person's link is applied: the pair is no longer listed
     after = _export(yard)
     jsonschema.validate(after, EXPORT_SCHEMA)
     assert left["id"] not in {r["id"] for r in after["review"]}
     edge = next(e for e in after["edges"] if e["kind"] == "same_as" and e.get("decided_by") == "reviewer-2")
-    assert edge["claim"] == left["claim"]  # the build states the pair it linked, so the decision can be checked on it
+    assert edge["claim"] == left["claim"] and edge["evidence"] == left["evidence"]  # the build states the pair and what the person saw
     report = propose(yard["config"], yard["out"])
     text, doc = _file(yard)
     jsonschema.validate(doc, latence_proposal_writer.schema(2))
-    assert doc["version"] == "2" and [next(iter(e)) for e in doc["entries"]] == ["links"]
-    assert doc["entries"][0]["links"]["records"] == [
-        {"object": "shop.dealers", "column": "dealer_id", "key": "D3", "name": "Dealer 3 GmbH"},
-        {"object": "partner.accounts", "column": "account_id", "key": "PA4", "name": "Portal account 4"}]
+    assert doc["format"] == "layer-proposal/2" and [next(iter(e)) for e in doc["entries"]] == ["names", "link"]
+    assert doc["entries"][1]["link"] == {
+        "record": {"object": "shop.dealers", "column": "dealer_id", "key": "D3"},
+        "linked": {"object": "partner.accounts", "column": "account_id", "key": "PA4"},
+        "evidence": [{"code": "name.same_core", "params": {}}], "p": 0.55}
+    assert "certified_on" not in doc["entries"][1]["origin"]  # the build's line rests on simulated labels: no such mark is written
     assert "PA1" not in text and "PA2" not in text and "PA3" not in text  # the machine's links
-    assert report["entries"][0]["kind"] == "links" and report["not_written"] == []
-    # The same decisions in version 1: today's file, without the link.
-    yard["config"].write_text(yaml.safe_dump({**plain, "propose": {"names": ["shop.dealers"]}}), encoding="utf-8")
+    assert report["not_written"] == []
+    # A host on version 1: the estate file says links: false, and the file is today's.
+    yard["config"].write_text(yaml.safe_dump({**plain, "propose": {"names": ["shop.dealers"], "links": False}}), encoding="utf-8")
     assert propose(yard["config"], yard["out"])["not_carried"] == {"pair_of_records": 1}
-    assert _file(yard)[1] == {"source": "ontology", "entries": []}
+    assert "format" not in _file(yard)[1]

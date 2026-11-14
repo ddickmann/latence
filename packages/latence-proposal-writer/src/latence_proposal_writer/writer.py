@@ -24,16 +24,27 @@ Never written:
 - anything seeded: a seeded list, a record of one, a pair that holds one, and a pair of values
   of a value set that a seeded object carries, since the export cannot say which object a
   value was read from;
-- a link between records, whoever made it: the machine's links were approved by nobody, and a
-  host's names entry keeps one origin per record, so a linked record's name has no place in it;
+- a link between records that no person approved: the machine's links were approved by
+  nobody, and one certified on simulated labels is such a link;
 - an entry whose decision was made on another statement than the build now makes (its claim
   differs): it is listed as stale;
 - an entry whose decision states no claim, or no day while none was given: nothing is made up.
 
-In version 2 a link between two records that a person approved is written too (``links``): the
-two records by object, key column, key and name. Never a link the machine accepted and no
-person approved (one certified on simulated labels is such a link), never one that holds a
-seeded record, and never one whose pair the build cannot state now (no claim to check it on).
+A link between two records that a person approved is written as a ``link`` entry, in the
+shape the host's tool reads (its ticket 294): the master list's record (``record``) and the
+other source's record (``linked``), each by object, key column and key, the statement codes the
+person saw (``evidence``), the pair's probability where the linker gave one, and the decision.
+Such a file states ``format: layer-proposal/2``; a file with no link states no format and is
+version 1, byte for byte as before. A link is written only where the host would take it:
+
+- neither record seeded, and both stated in full (a single-column key, a key);
+- two records of two objects (no self-link, no two records of one object);
+- the master record of a list whose names this file carries (so the record is a glossary value
+  of the master object and column the names entry states);
+- a linked record linked to that master and to no other: not by another approved decision, and
+  not by a link of the build;
+- the statements the person saw stated (no link without its evidence);
+- ``certified_on`` only as ``reviewer``, and only where the build's resolution says so.
 
 The file is YAML in block style with every text in double quotes, so that no reader takes a
 name for a number, a date or a truth value. The same inputs give the same bytes.
@@ -50,12 +61,12 @@ from typing import Any
 from latence_core.errors import ConfigError
 
 SOURCE = "ontology"  # the kind of source the entries come from, as the host's layer records it
-# The versions of the file this writer writes. Version 1 is the host's proposal shape with the
-# two kinds of entry above and no ``version`` key; version 2 states ``version: "2"`` and adds
-# ``links``, a link between two records a person decided (ticket 45). A caller asks for 2 only
-# once the host's tool reads it.
+# The versions of the file. Version 1 states no ``format`` and holds spellings and names;
+# version 2 states ``format: layer-proposal/2`` and adds ``link`` entries (ticket 45, the
+# host's ticket 294). A file is version 2 only when it holds a link.
 VERSIONS = (1, 2)
 SCHEMA_VERSION = VERSIONS[-1]
+FORMAT_2 = "layer-proposal/2"
 COMMAND = "latence-proposal-writer"  # who wrote the file, as its opening comment says
 
 # The groups of the export a person can decide and this file has no entry for, by the key the
@@ -94,7 +105,8 @@ def _key(name: str) -> str:
 
 
 def _lines(node: Mapping[str, Any] | list[Any], indent: int) -> list[str]:
-    """A mapping or a list as YAML lines in block style. A text is always quoted."""
+    """A mapping or a list as YAML lines in block style. A text is always quoted; a number (a
+    link's probability) is written as a number."""
     pad = " " * indent
     out: list[str] = []
     if isinstance(node, Mapping):
@@ -103,6 +115,8 @@ def _lines(node: Mapping[str, Any] | list[Any], indent: int) -> list[str]:
                 out += [f"{pad}{_key(name)}:", *_lines(value, indent + 2)]
             elif isinstance(value, Mapping | list):
                 out.append(f"{pad}{_key(name)}: {'{}' if isinstance(value, Mapping) else '[]'}")
+            elif isinstance(value, int | float) and not isinstance(value, bool):
+                out.append(f"{pad}{_key(name)}: {json.dumps(value)}")  # a number, read as one
             else:
                 out.append(f"{pad}{_key(name)}: {_quoted(str(value))}")
         return out
@@ -194,37 +208,44 @@ def kept_values(pairs: list[Mapping[str, Any]]) -> dict[str, str]:
             if standing(str(p["a"])) == standing(str(p["b"]))}
 
 
-def _decided_links(export: Mapping[str, Any]) -> dict[frozenset[str], str]:
-    """The pairs of records a build linked on a person's decision, with the claim of the pair
-    the build states on the edge."""
-    return {frozenset((str(e["from"]), str(e["to"]))): str(e["claim"])
-            for e in export.get("edges", [])
+def _decided_links(export: Mapping[str, Any]) -> dict[frozenset[str], Mapping[str, Any]]:
+    """The links a build drew on a person's decision that state the pair's claim, by pair."""
+    return {frozenset((str(e["from"]), str(e["to"]))): e for e in export.get("edges", [])
             if e.get("kind") == "same_as" and e.get("decided_by") and e.get("claim")}
+
+
+def _linked_to(export: Mapping[str, Any]) -> dict[str, set[str]]:
+    """Every record the build links, with the records it links it to (either way round)."""
+    out: dict[str, set[str]] = {}
+    for e in export.get("edges", []):
+        if e.get("kind") == "same_as":
+            out.setdefault(str(e["from"]), set()).add(str(e["to"]))
+            out.setdefault(str(e["to"]), set()).add(str(e["from"]))
+    return out
 
 
 def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any]],
              names_of: tuple[str, ...] = (), spellings_on: Mapping[str, str] | None = None,
              decided_on: str | None = None,
-             version: int = 1) -> tuple[dict[str, Any], dict[str, Any]]:
+             links: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
     """The proposal file as data, and a report of what was written and what was not.
 
     ``export`` is a build's ``graph-export/3``; ``decisions`` the decisions in force, by
     element id. ``names_of`` are the master lists whose records' names may be written, beside
     those the export marks; ``spellings_on`` the object to state a value set's spellings on (by
     column); and ``decided_on`` the day of the approved decisions that state none (the day a
-    decision states, ``at``, a date or a timestamp, always wins). ``version`` is the file's
-    version (``VERSIONS``); links between records are written from version 2 on.
+    decision states, ``at``, a date or a timestamp, always wins). ``links=False`` writes no
+    link, for a host whose tool reads version 1 only; the file is then version 1 whatever was
+    approved.
 
     The report holds ``entries`` (one line per entry written), ``stale`` (approved on another
     statement), ``not_written`` (approved, with the reason: ``seeded``, ``no_claim``,
-    ``no_day``, ``not_in_the_build``, ``no_records``) and ``not_carried`` (approved elements of
-    a kind this file has no entry for, counted by kind)."""
-    if version not in VERSIONS:
-        raise ConfigError(f"this writer writes the proposal file in versions {VERSIONS}, "
-                          f"not in version {version}")
+    ``no_day``, ``not_in_the_build``, ``no_records``; for a link also ``one_object``,
+    ``master_not_in_the_file``, ``linked_elsewhere``, ``no_evidence``) and ``not_carried``
+    (approved elements of a kind this file has no entry for, counted by kind)."""
     given = _day(decided_on, "the command line") if decided_on else None
-    linked = _decided_links(export)
-    links: dict[str, tuple[str, str]] = {}  # element id -> the pair's two records
+    decided_links = _decided_links(export)
+    pending: dict[str, tuple[str, str, Mapping[str, Any]]] = {}  # element id -> the pair's ends
     concepts = {c["id"]: c for c in export["concepts"]}
     nodes = {n["id"]: n for n in export["nodes"]}
     seeded = {c["object_name"] for c in concepts.values()
@@ -277,15 +298,16 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                     origin_of(subject, d, pair["claim"])
             elif any(x.startswith(o + ":") for o in seeded for x in (pair["a"], pair["b"])):
                 held_back(subject, "seeded")
-            elif version < 2:
+            elif not links:
                 carried_not("pair_of_records")
             else:
                 ends = (str(pair["a"]), str(pair["b"]))
-                now = pair.get("claim") or linked.get(frozenset(ends))
+                edge = decided_links.get(frozenset(ends)) or {}
+                now = pair.get("claim") or edge.get("claim")
                 if now is None:  # neither listed nor linked on a person's decision in this build
                     held_back(subject, "not_in_the_build")
                 else:
-                    links[subject] = ends
+                    pending[subject] = (ends[0], ends[1], pair if pair.get("claim") else edge)
                     origin_of(subject, d, str(now))
         elif subject in concepts:
             concept = concepts[subject]
@@ -302,7 +324,7 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
 
     # (the element, the entry's body under its kind, its line in the report)
     found: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-    pairs = sorted((p for p in export["review"] if p["id"] in ready and p["id"] not in links),
+    pairs = sorted((p for p in export["review"] if p["id"] in ready and p["id"] not in pending),
                    key=lambda p: str(p["id"]))
     became = kept_values(pairs)
     for pair in pairs:
@@ -329,27 +351,27 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
         found.append((subject, {"names": {**body, "values": dict(sorted(rows.items()))}},
                       {"kind": "names", **body, "records": len(rows)}))
 
-    for subject in sorted(s for s in ready if s in links):
-        records = []
-        for end in links[subject]:
-            node = nodes.get(end) or {}
-            owner = concepts.get(str(node.get("concept")))
-            if owner is None or "key" not in node or len(owner.get("key") or []) != 1:
-                break
-            records.append({"object": str(owner["object_name"]), "column": str(owner["key"][0]),
-                            "key": str(node["key"]), "name": str(node["label"])})
-        if len(records) != 2:
-            held_back(subject, "no_records")
-            continue
-        found.append((subject, {"links": {"records": records}},
-                      {"kind": "links", "records": 2, "objects": [r["object"] for r in records]}))
+    named = {str(body["object"]) for _s, entry, _l in found if "names" in entry
+             for body in (entry["names"],)}
+    certified_on = (export.get("meta") or {}).get("resolution") or {}
+    written_links = _links(pending, ready, nodes, concepts, named, _linked_to(export), held_back)
+    for subject, record, linked, said in written_links:
+        body = {"record": record, "linked": linked,
+                "evidence": [{"code": str(s["code"]), "params": dict(s.get("params") or {})}
+                             for s in said["evidence"]],
+                **({"p": round(float(said["p"]), 4)} if said.get("p") is not None else {})}
+        found.append((subject, {"link": body},
+                      {"kind": "link", "record": record, "linked": linked}))
+    reviewer = certified_on.get("certified_on") == "reviewer"
 
     entries: list[dict[str, Any]] = []
     written: list[dict[str, Any]] = []
     for number, (subject, entry, line) in enumerate(found, start=1):
         o = ready[subject]
         decision = {"verdict": "approved", "by": o["by"], "at": o["at"]}
-        origin = {"element": subject, "claim": o["claim"], "decision": decision}
+        origin: dict[str, Any] = {"element": subject, "claim": o["claim"], "decision": decision}
+        if "link" in entry and reviewer:
+            origin["certified_on"] = "reviewer"
         entries.append({**entry, "origin": origin})
         written.append({"entry": number, "kind": line["kind"], "element": subject,
                         "claim": o["claim"], "decided_by": o["by"], "decided_on": o["at"],
@@ -358,5 +380,53 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
     report = {"entries": written, "stale": sorted(stale, key=lambda s: s["subject"]),
               "not_written": sorted(not_written, key=lambda s: s["subject"]),
               "not_carried": dict(sorted(not_carried.items()))}
-    head = {"version": str(version)} if version > 1 else {}
+    head = {"format": FORMAT_2} if any("link" in e for e in entries) else {}
     return {**head, "source": SOURCE, "entries": entries}, report
+
+
+def _links(pending: Mapping[str, tuple[str, str, Mapping[str, Any]]], ready: Mapping[str, Any],
+           nodes: Mapping[str, Mapping[str, Any]], concepts: Mapping[str, Mapping[str, Any]],
+           named: set[str], linked_to: Mapping[str, set[str]],
+           held_back: Any) -> list[tuple[str, dict[str, str], dict[str, str], Mapping[str, Any]]]:
+    """The links the host would take, each as (element, master record, linked record, what the
+    person saw); every other one is held back with the reason."""
+    def stated(end: str) -> dict[str, str] | None:
+        node = nodes.get(end) or {}
+        owner = concepts.get(str(node.get("concept"))) or {}
+        if "key" not in node or len(owner.get("key") or []) != 1 or not owner.get("object_name"):
+            return None
+        return {"object": str(owner["object_name"]), "column": str(owner["key"][0]),
+                "key": str(node["key"])}
+
+    candidates: list[tuple[str, str, dict[str, str], str, dict[str, str], Mapping[str, Any]]] = []
+    for subject in sorted(s for s in pending if s in ready):
+        a, b, said = pending[subject]
+        ends = [(end, stated(end)) for end in (a, b)]
+        if any(r is None for _e, r in ends):
+            held_back(subject, "no_records")
+            continue
+        (ea, ra), (eb, rb) = ends
+        assert ra is not None and rb is not None
+        if ra["object"] == rb["object"]:
+            held_back(subject, "one_object")
+            continue
+        masters = [(e, r, o, ro) for (e, r), (o, ro) in (((ea, ra), (eb, rb)), ((eb, rb), (ea, ra)))
+                   if r["object"] in named]
+        if len(masters) != 1:
+            held_back(subject, "master_not_in_the_file")
+            continue
+        master, record, other, linked = masters[0]
+        seen = said.get("reasons") or said.get("evidence") or []
+        shown = [s for s in seen if s.get("kind") != "source"]  # the sources are no reason
+        if not shown:
+            held_back(subject, "no_evidence")
+            continue
+        candidates.append((subject, master, record, other, linked, {**said, "evidence": shown}))
+    twice = {c[3] for c in candidates if sum(d[3] == c[3] for d in candidates) > 1}
+    out: list[tuple[str, dict[str, str], dict[str, str], Mapping[str, Any]]] = []
+    for subject, master, record, other, linked, said in candidates:
+        if other in twice or linked_to.get(other, set()) - {master}:
+            held_back(subject, "linked_elsewhere")
+            continue
+        out.append((subject, record, linked, said))
+    return out

@@ -95,8 +95,9 @@ def test_a_seeded_record_and_a_link_between_records_are_in_no_proposal() -> None
     assert "seeded" not in said and "certified_on" not in said and "simulated" not in said
     assert report["not_written"] == [{"subject": "concept:partner.accounts", "why": "seeded"},
                                      {"subject": north["id"], "why": "seeded"},
+                                     {"subject": two_dealers["id"], "why": "one_object"},  # two records of one object: no link
                                      {"subject": with_seeded["id"], "why": "seeded"}]
-    assert report["not_carried"] == {"pair_of_records": 1}  # the two dealers: a link has no entry here
+    assert report["not_carried"] == {}
 
 
 def test_an_entry_whose_decisions_claim_no_longer_matches_the_build_is_listed_as_stale_and_not_written() -> None:

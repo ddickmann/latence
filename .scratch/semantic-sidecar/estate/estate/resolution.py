@@ -121,6 +121,9 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
     prefix = master_obj + ":"
     known = {n["id"] for n in instances["nodes"]}
     accepted = {frozenset((d["a"], d["b"])): d for d in resolution["accepted"]}
+    # What the engine said of every pair it showed (accepted, left for review or asked about):
+    # a person's link carries what the person was shown, so that it can be handed on (ticket 45).
+    shown = {frozenset((d["a"], d["b"])): d for d in [*asked, *resolution["review"], *resolution["accepted"]]}
     said = {frozenset((d["a"], d["b"])): d for d in answers or []}
 
     def ends(pair: frozenset[str]) -> tuple[str, str] | None:
@@ -156,13 +159,13 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
     by_machine = len(edges)
     for other, master in sorted(by_person.items()):
         if other in known and master in known:
-            pair = accepted.get(frozenset((other, master)))
+            pair = shown.get(frozenset((other, master)))
             # The pair the person decided, stated as its review item stated it: a proposal file
             # checks the decision on it once the pair is no longer listed (ticket 45).
             by = said[frozenset((other, master))]["by"]
             edges.append({"from": other, "to": master, "kind": "same_as", "relation": None, "decided_by": by, "actor": f"human:{by}",
                           "claim": claim_of("possibly_same", {"a": master, "b": other}),
-                          **({"p": pair["p"], "evidence": pair["evidence"]} if pair else {"evidence": []})})
+                          **({"evidence": pair["evidence"], **({"p": pair["p"]} if "p" in pair else {})} if pair else {"evidence": []})})
     for e in edges:
         linked += 1
         if truth is not None:

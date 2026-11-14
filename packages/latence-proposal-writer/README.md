@@ -26,14 +26,22 @@ export, count = in_layer(export, read_receipts((receipt_path,)))
   in the export). Each entry says where it goes
   by a catalog object and a column and carries its origin: the element, its claim, who approved
   it and on which day.
-- **Versions** (`VERSIONS`, `SCHEMA_VERSION`): version 1, the default, is the shape above with no
-  `version` key. Version 2 (`proposal(..., version=2)`, `schema(2)`) states `version: "2"` and
-  adds `links`: a link between two records a person approved, both records by object, key
-  column, key and name. Ask for it only once the host's tool reads it; a reader of version 1
-  refuses such a file.
+- **Versions** (`VERSIONS`, `SCHEMA_VERSION`): a file with no link is version 1, the shape above
+  with no `format` key, byte for byte as before. A file that holds a link states
+  `format: layer-proposal/2` (`schema(2)`) and adds `link` entries in the shape the host's tool
+  reads: the master list's record (`record`) and the other source's record (`linked`), each by
+  object, key column and key, the statement codes the person saw (`evidence`), the pair's
+  probability where there is one (`p`), and the decision; `certified_on: reviewer` only where the
+  build's resolution rests on a reviewer's labels. `links=False` keeps a file at version 1 for a
+  host that reads only that.
+- **A link is written only where the host takes it:** neither record seeded; both stated in full;
+  two records of two objects; the master record of a list whose names the same file carries; a
+  linked record linked to that master and to no other (by another approved decision or by a link
+  of the build); the statements the person saw stated. Each other link is reported with its
+  reason (`seeded`, `no_records`, `one_object`, `master_not_in_the_file`, `linked_elsewhere`,
+  `no_evidence`).
 - **Never written:** a rejected or undecided element; anything seeded; a link the machine
-  accepted and no person approved (one certified on simulated labels is such a link), and in
-  version 1 any link between records; a decision made on another statement than the build now makes (reported as
+  accepted and no person approved (one certified on simulated labels is such a link); a decision made on another statement than the build now makes (reported as
   `stale`); a decision that states no claim, or no day while none was given. The report says, for
   every approved decision not written, why.
 - **The file** is YAML in block style with every text in double quotes, so that no reader takes a

@@ -47,14 +47,16 @@ reviewed change and writes a receipt.
   names under `propose.names` (the export marks each such list that is not seeded
   `"proposal": "names"`, so a host's page offers a decision on it). Each entry says where it goes by a catalog object and a column
   and carries its origin: the element's id, its claim, who approved it and on which day.
-- **Links between records, in version 2 only.** With `propose.version: 2` in the estate file
-  the file states `version: "2"` and adds a `links` entry for every link between two records a
-  person approved (both records by object, key column, key and name), for a host whose tool
-  reads that version (ticket 45). Without it the file is version 1, as before, and holds no link.
+- **Links between records.** A link between two records a person approved goes in as a `link`
+  entry, in the shape the host's tool reads (its ticket 294), and the file then states
+  `format: layer-proposal/2`; a file with no link is version 1, as before. Only where the host
+  takes it: no seeded record, two objects, the master list's names in the same file, a linked
+  record linked to no other, the statements the person saw. `propose.links: false` in the estate
+  file keeps a file at version 1.
 - **Never written:** a rejected or undecided element; anything seeded (a seeded list, its
   records, a pair that holds one, a pair of values of a value set a seeded object carries); a
   link the machine accepted and no person approved (one certified on simulated labels is such a
-  link), and in version 1 any link between records; an entry whose decision was made on another
+  link); an entry whose decision was made on another
   statement than the build now makes (listed as `stale`); an entry whose decision states no
   claim, or no day. The command prints each approved decision it did not write, with the
   reason.
