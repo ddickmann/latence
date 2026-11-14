@@ -35,6 +35,7 @@ from .reader import Reader
 from .reader_databricks import DatabricksReader
 from .reader_duckdb import DuckDBReader
 from .score import score
+from .staged import staged_statements, to_sql
 from .resolution import merge, pair_answers, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
@@ -214,6 +215,21 @@ def propose(config: Path, out: Path, file: Path | None = None,
     return {"file": str(target), **report}
 
 
+def stage(config: Path, out: Path, file: Path | None = None) -> dict[str, Any]:
+    """Write the staged proposal for the catalog (``staged-catalog.sql``) from the build's export
+    and the people's decisions: statements its owner reviews and applies (ticket 52)."""
+    cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if not (out / "ontology.json").exists():
+        raise SystemExit(f"no build in {out}: run `build` first, then `stage`")
+    if not cfg.get("catalog"):
+        raise SystemExit("the estate file names no catalog (catalog: <name>): the statements could not say where they go")
+    export = json.loads((out / "ontology.json").read_text(encoding="utf-8"))
+    statements, report = staged_statements(export, read_decisions(out / "decisions.jsonl"), str(cfg["catalog"]), cfg.get("schema_prefix", ""))
+    target = file or out / "staged-catalog.sql"
+    target.write_text(to_sql(statements), encoding="utf-8")
+    return {"file": str(target), **report}
+
+
 def certify(out: Path, subject: str, by: str, at: str) -> dict[str, Any]:
     """Append the data owner's certification of an element, on the statement the build's export
     makes now (its claim), to ``certifications.jsonl``. Whether it stands (the right person, an
@@ -325,6 +341,10 @@ def main() -> None:
     pr.add_argument("--decided-on",
                     help="the day (YYYY-MM-DD) of the approved decisions that state none; "
                          "without it such a decision is not written")
+    st = sub.add_parser("stage", help="the staged proposal for the catalog's owner, from the approved decisions of a build (ticket 52)")
+    st.add_argument("--config", type=Path, required=True)
+    st.add_argument("--out", type=Path, required=True)
+    st.add_argument("--file", type=Path, help="where to write it (default: staged-catalog.sql in the build folder)")
     ce = sub.add_parser("certify", help="the data owner certifies an approved element of a build (ticket 51)")
     ce.add_argument("--out", type=Path, required=True, help="the build folder that holds ontology.json")
     ce.add_argument("--subject", required=True, help="the element's id")
@@ -342,6 +362,8 @@ def main() -> None:
     elif a.cmd == "propose":
         report = propose(a.config, a.out, a.file, a.decided_on)
         print(json.dumps(report, indent=1, ensure_ascii=False))
+    elif a.cmd == "stage":
+        print(json.dumps(stage(a.config, a.out, a.file), indent=1, ensure_ascii=False))
     elif a.cmd == "certify":
         print(json.dumps(certify(a.out, a.subject, a.by, a.at), indent=1, ensure_ascii=False))
     elif a.cmd == "build":
