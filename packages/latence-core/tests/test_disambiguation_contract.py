@@ -9,6 +9,8 @@ or unjustified record.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from latence_core.contracts import (
     SCHEMA_VERSION,
@@ -201,15 +203,15 @@ def test_a_merge_decision_says_who_made_it() -> None:
     """Every merge decision carries its Actor (ADR-0069; the owner's decision of 14 Nov on the
     resolution engine): the engine, a model by its name, or a person by their id. None is
     assumed: a decision without one does not validate."""
-    body = {"source_text": "IBM", "target_text": "International Business Machines", "strategy": MergeStrategy.ACRONYM,
+    body: dict[str, Any] = {"source_text": "IBM", "target_text": "International Business Machines", "strategy": MergeStrategy.ACRONYM,
             "confidence": 0.85, "applied": True, "reason": "acronym", "evidence": _evidence(0.85)}
     with pytest.raises(ValidationError):
-        MergeDecision(**body)
+        MergeDecision.model_validate(body)
     for actor in ("engine", "model:glide-0.4b@2026-10", "human:reviewer-1"):
-        assert MergeDecision(**body, actor=actor).actor == actor
+        assert MergeDecision.model_validate({**body, "actor": actor}).actor == actor
     for wrong in ("", "reviewer-1", "human:", "model:", "Engine"):
         with pytest.raises(ValidationError):
-            MergeDecision(**body, actor=wrong)
+            MergeDecision.model_validate({**body, "actor": wrong})
 
 
 def test_evidence_confidence_bounded() -> None:
