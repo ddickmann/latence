@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: open: every browser spec passes, the acceptance run included (14 Nov); the host's Postgres-backed Python tests are not run to the end on this machine
 Blocked by: 36
 
 ## Question
@@ -87,3 +87,17 @@ Route table row: every use case walked in a browser; defects fixed | AFK | 36
   on the scenarios' scripts on its own port and state folder: **2 of 2 pass** (en and de, 3.2 min
   with the world's build), every screen with axe's WCAG 2.2 AA rules: 0 violations on 10 screens.
   No defect, so nothing for the table above.
+- **The host's Python tests that need Postgres: not run to the end here.** The host's suite
+  runs every store test on both backends, so these are 55 files (the plug-ins for Postgres and
+  pgvector, the Postgres catalog and store, the graph, DuckDB and Databricks tools, the dev and
+  synth tools' Postgres tests, and the core's and service's tests parametrized over Postgres):
+  2,790 tests. Two attempts on this machine, shared with other runs, ended early: the first
+  when the disk filled (its errors are the disk's, not the tests'), the second stopped on purpose
+  at about a third of the 953 tests outside the core and service (no failure so far) when the
+  shared Postgres cluster had grown to 3.4 GB and under 1 GB of disk was left. No defect was
+  seen. **Live request** (the owner's machine, Postgres 17 with pgvector from its package
+  manager, as the handoff says):
+  `cd $METIS && METIS_TEST_POSTGRES_URL=postgresql://<user>@:<port>/postgres?host=<socket dir> uv run pytest -n 4 <the 55 files> packages/metis-service/tests`,
+  the file list being every test file under `packages/` and `tools/` that names
+  `postgres_database`, `postgres_backend`, `METIS_TEST_POSTGRES_URL`, `METIS_ESTATE_POSTGRES`,
+  `pgvector` or `PostgresBackend` (`grep -rlE` over those names). Report the summary line.
