@@ -188,6 +188,7 @@ class MergeAudit:
     confidence: float
     applied: bool
     reason: str
+    actor: str = "engine"  # who decided: the cascade's rules are the engine's (v23)
 
 
 @dataclass

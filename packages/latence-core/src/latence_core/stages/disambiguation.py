@@ -449,6 +449,7 @@ def _merge_decision(audit: MergeAudit, cluster: ResolvedCluster) -> MergeDecisio
         applied=audit.applied,
         reason=audit.reason,
         evidence=evidence,
+        actor=audit.actor,
     )
 
 

@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: open
+Status: resolved (14 Nov): built; the text path's constraints follow with its review surface
 Blocked by: nothing
 Emerges from: 13 (decided by the owner, 14 Nov: "every human decision is kept as a must-link or
 cannot-link with its actor on each merge decision")
@@ -36,3 +36,26 @@ cannot-link constraints that every build replays.
 
 The text path's Disambiguation takes no person's decisions yet (no review surface feeds it);
 replaying constraints there, and under a Delta, follows with that surface.
+
+## Result (14 Nov)
+
+- **The core.** `MergeDecision.actor` is required and validated (`engine`, `model:<name>`,
+  `human:<id>`); no value is assumed. `SCHEMA_VERSION` is 23 (the history comment in
+  `contracts.py` says why it breaks: a v22 entity with merge decisions no longer validates and is
+  re-derived from its Source). The engine's `MergeAudit` carries `actor` (`engine` for the
+  cascade's rules), and the Stage maps it onto the contract; the two Disambiguator packages build
+  their decisions through that mapping and needed no change. The contract reference was
+  regenerated; `CONTEXT.md`'s *Actor* entry now says where it is in code and where not; the
+  tutorial's example record and `CHANGELOG.md` say 23.
+- **The estate.** Every `same_as` link says who made it: `actor: engine`, or `human:<id>` with
+  `decided_by`. A person's "same" is a must-link (drawn even where the linker proposed nothing
+  that time) and "different" a cannot-link (the machine's link is taken away), both from the
+  decisions file and so replayed by every build. The export's schema states `actor`.
+- **Tests, red first:** `test_a_merge_decision_says_who_made_it` and the actor added to
+  `test_merge_decision_records_below_policy_as_not_applied` (red: the contract had no actor),
+  `test_every_merge_decision_of_the_cascade_is_the_engines` (red: no actor on the decisions);
+  in the estate, `test_every_link_says_who_made_it_and_a_persons_answers_are_constraints_every_build_replays`
+  (red: `KeyError: 'actor'`).
+- **Not built**, as the ticket says: the text path's Disambiguation takes no person's decisions
+  (no review surface feeds it), so must-link and cannot-link there, and under a Delta, follow
+  with that surface.

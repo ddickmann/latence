@@ -198,7 +198,7 @@ def test_schema_version_is_current() -> None:
     # 22 (ADR-0068) REMOVES the retrieval-only contracts: ContextHeader + ChunkRecord's
     # ``context_header``, and the Hyperedge family (GraphHyperedge / HyperedgeRelation /
     # HyperedgeSourceRef / GraphScope.HYPEREDGE / GraphRecord.hyperedge).
-    assert SCHEMA_VERSION == 22
+    assert SCHEMA_VERSION == 23
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

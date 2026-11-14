@@ -283,7 +283,13 @@ from latence_core.errors import PageMapSidecarError
 # run is re-derived from its Source, so there is no migration path to provide — the number bump is
 # the notice. Node and edge records are otherwise unchanged (same ids, same fields, same order);
 # ``CanonicalEntity.member_link_confidences`` (v20) stays.
-SCHEMA_VERSION = 22
+#
+# v23 (the owner's decision of 14 Nov on the resolution engine, ADR-0069's Actor): BREAKING.
+# ``MergeDecision.actor`` is required: who made the decision, ``engine``, ``model:<name>`` or
+# ``human:<id>``. No value is assumed, so a v22 record of a canonical entity with merge decisions
+# no longer validates; like v22's removals, it is re-derived from its Source. The built-in
+# resolver's decisions are the engine's.
+SCHEMA_VERSION = 23
 
 
 class Provenance(BaseModel):
@@ -1954,6 +1960,7 @@ class MergeDecision(BaseModel):
     ``confidence`` its 0..1 score; ``applied`` whether the confidence policy accepted it;
     ``evidence`` the justification (the mentions/offsets). ``reason`` is a short
     human-readable note (e.g. ``"acronym: IBM ~ International Business Machines"``).
+    ``actor`` says who made the decision: the engine, a model, or a person (v23).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -1966,6 +1973,12 @@ class MergeDecision(BaseModel):
     applied: bool = Field(..., description="False = below policy, logged but not merged.")
     reason: str = Field(..., min_length=1, description="Human-readable justification.")
     evidence: Evidence
+    actor: str = Field(
+        ...,
+        pattern=r"^(engine|model:\S.*|human:\S.*)$",
+        description="Who made the decision (ADR-0069's Actor): `engine` (rules and calibrated "
+        "bands), `model:<name>` (a model by its name and version) or `human:<id>` (a person).",
+    )
 
 
 class CanonicalEntity(Record):

@@ -170,7 +170,7 @@ print(json.dumps(json.loads(e['evidence']), indent=1))
   "sha256:93df2e95…#chunk-0#entity-2",
   "sha256:93df2e95…#chunk-0#entity-6"
  ],
- "schema_version": 22,
+ "schema_version": 23,
  "snippet": "edge 'works_for' bb0d32639119f88d -> 96987fab1d4dd7e2"
 }
 ```

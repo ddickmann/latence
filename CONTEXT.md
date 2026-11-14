@@ -139,7 +139,7 @@ _Avoid_: Blob, payload, input record (unqualified)
 
 ## Decided, not yet in code
 
-The re-scope (ADR-0067) fixed the vocabulary below in ADR-0069. ADR-0070 to ADR-0073 use it. **No code implements any of these terms.** No record type, Stage or file in the repository carries them. They are here so that pages and discussions use one word for one thing before the first slice is built. Each entry is taken from the decision text and is marked *decided, not yet in code*.
+The re-scope (ADR-0067) fixed the vocabulary below in ADR-0069. ADR-0070 to ADR-0073 use it. **No code implements these terms, with the one exception the entry *Actor* names.** No other record type, Stage or file in the repository carries them. They are here so that pages and discussions use one word for one thing before the first slice is built. Each entry is taken from the decision text and is marked *decided, not yet in code*.
 
 **Ledger**:
 The append-only record of Assertions and Decisions, and the engine's one source of truth. Nothing in the semantic layer exists without at least one Assertion behind it, and the layer anyone reads is a deterministic replay of the ledger. A correction is a new Decision, never an edit of an old record.
@@ -160,7 +160,7 @@ _Status_: decided (ADR-0069), not yet in code. Today the merge log records what 
 
 **Actor**:
 Who produced an Assertion or made a Decision: the engine (rules and calibrated bands), a model (with its name and version) or a human.
-_Status_: decided (ADR-0069), not yet in code.
+_Status_: decided (ADR-0069). In code in one place only: every `MergeDecision` of Disambiguation carries `actor` (`engine`, `model:<name>` or `human:<id>`, `SCHEMA_VERSION` 23), and the built-in resolver's decisions are the engine's. Assertions and the other Decisions do not exist in code yet.
 
 **Concept**:
 A schema-level element: a class, a property or relation, or a measure or dimension. A Concept is only ever a proposal until a human approves it.

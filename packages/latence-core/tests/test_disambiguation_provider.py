@@ -143,6 +143,20 @@ def test_applied_merge_carries_audited_decision_and_evidence() -> None:
     assert set(entity.evidence.mention_ids) == {"m1", "m2"}
 
 
+def test_every_merge_decision_of_the_cascade_is_the_engines() -> None:
+    """The cascade decides by its rules, so each decision it records names the engine as its
+    Actor; nothing on this path is a person's or a model's decision."""
+    mentions = [
+        _mention("m1", "d1", "International Business Machines", "ORG", 0),
+        _mention("m2", "d2", "IBM", "ORG", 0),
+        _mention("m3", "d3", "Acme Corporation", "ORG", 0),
+        _mention("m4", "d4", "Acme", "ORG", 0),
+    ]
+    records = list(CascadeDisambiguator().disambiguate(mentions, []))
+    decisions = [d for r in records if r.entity is not None for d in r.entity.merge_decisions]
+    assert decisions and {d.actor for d in decisions} == {"engine"}
+
+
 # -- KB linking ---------------------------------------------------------------
 
 

@@ -69,6 +69,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **Every merge decision says who made it (`SCHEMA_VERSION` 23).** `MergeDecision.actor` is
+  required: `engine`, `model:<name>` or `human:<id>` (ADR-0069's Actor). The built-in resolver's
+  decisions are the engine's. Breaking: a v22 canonical entity with merge decisions no longer
+  validates and is re-derived from its Source.
+
 - **The front door says what the code does today, then the direction, marked as not built.**
   `README.md` and the docs-site home page now run in one order: what it is, quick start, what is
   built, status, and a section *Where this is going* that opens with "Nothing in this section is
