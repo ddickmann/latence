@@ -272,6 +272,11 @@
      "claim": {
       "description": "On a `same_as` link a person decided: the claim of the pair as its review item stated it, so that a decision can be checked on it once the pair is no longer listed.",
       "$ref": "#/$defs/claim"
+     },
+     "actor": {
+      "description": "On a `same_as` link: who made it, `engine` or `human:<id>` (a model's verdict links nothing by itself).",
+      "type": "string",
+      "pattern": "^(engine|human:.+)$"
      }
     }
    }
@@ -324,6 +329,28 @@
      },
      "in_layer": {
       "$ref": "#/$defs/in_layer"
+     },
+     "model_vote": {
+      "description": "A hosted model's verdict on a pair of records the linker left undecided (ticket 48): a vote with its actor, which decides nothing.",
+      "type": "object",
+      "required": [
+       "verdict",
+       "actor"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "verdict": {
+        "enum": [
+         "same",
+         "different",
+         "unsure"
+        ]
+       },
+       "actor": {
+        "type": "string",
+        "pattern": "^model:.+"
+       }
+      }
      }
     }
    }

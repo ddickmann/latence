@@ -148,3 +148,20 @@ def test_answers_on_pairs_of_records_are_read_from_the_decisions_and_pairs_of_na
     assert pair_answers(decisions, ["shop.dealers", "shop.parts"]) == [
         {"a": "shop.dealers:D1", "b": "shop.parts:P2", "same": False, "by": "reviewer-1"},
         {"a": "shop.dealers:D2", "b": "shop.parts:P4", "same": True, "by": "reviewer-2"}]
+
+
+def test_every_link_says_who_made_it_and_a_persons_answers_are_constraints_every_build_replays(reader: DuckDBReader) -> None:
+    """Ticket 47: a link carries its actor (the engine, or the person), and a person's "same" and
+    "different" decide their pair on every build, whatever the engine proposes that time."""
+    model, inst = _instances(reader)
+    concept_of = {c["object_name"]: c["id"] for c in model["concepts"] if c.get("object_name")}
+    answers = [{"a": "shop.dealers:D1", "b": "shop.parts:P2", "same": False, "by": "reviewer-1"},
+               {"a": "shop.dealers:D3", "b": "shop.parts:P4", "same": True, "by": "reviewer-2"}]
+    for proposed in (_answer(), {**_answer(), "accepted": [], "review": [], "clusters": {}}):  # this time the engine proposes nothing
+        out = merge(inst, proposed, LINK, None, concept_of, seeded=True, answers=answers)
+        links = {(e["from"], e["to"]): e for e in out["edges"] if e["kind"] == "same_as"}
+        assert all(e["actor"] in ("engine", f"human:{e.get('decided_by')}") for e in links.values())
+        assert {k: e["actor"] for k, e in links.items() if e["actor"] != "engine"} == {("shop.parts:P4", "shop.dealers:D3"): "human:reviewer-2"}  # must-link
+        assert ("shop.parts:P2", "shop.dealers:D1") not in links  # cannot-link
+    machine = merge(inst, _answer(), LINK, None, concept_of, seeded=True)
+    assert {e["actor"] for e in machine["edges"] if e["kind"] == "same_as"} == {"engine"}

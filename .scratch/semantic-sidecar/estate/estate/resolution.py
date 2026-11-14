@@ -100,8 +100,10 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
     - every record the engine put in a cluster with exactly one master record gets a
       ``same_as`` edge to it, with the probability and what the pair rests on;
     - a reviewer's answer on a pair decides it, whatever the engine made of it: "the same"
-      links the record to that master record and to no other, "different" takes the link away.
-      Such an edge says who decided it;
+      links the record to that master record and to no other (a must-link, drawn even where the
+      engine proposed nothing), "different" takes the link away (a cannot-link). The answers
+      live in the decisions file, so every build replays them. Such an edge says who decided it;
+    - every link says who made it (``actor``): ``engine`` or ``human:<id>`` (ticket 47);
     - the best pairs the engine left undecided become review items, without those a reviewer
       has answered;
     - the pairs the engine asks a reviewer to label are carried as ``label_requests``;
@@ -148,7 +150,7 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
                 taken_away += 1  # the machine linked them and a person says they are different
                 continue
             pair = accepted.get(frozenset((r, masters[0])))
-            edges.append({"from": r, "to": masters[0], "kind": "same_as", "relation": None,
+            edges.append({"from": r, "to": masters[0], "kind": "same_as", "relation": None, "actor": "engine",
                           **({"p": pair["p"], "evidence": pair["evidence"]} if pair else {"evidence": []})})
             done.add(r)
     by_machine = len(edges)
@@ -157,7 +159,8 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
             pair = accepted.get(frozenset((other, master)))
             # The pair the person decided, stated as its review item stated it: a proposal file
             # checks the decision on it once the pair is no longer listed (ticket 45).
-            edges.append({"from": other, "to": master, "kind": "same_as", "relation": None, "decided_by": said[frozenset((other, master))]["by"],
+            by = said[frozenset((other, master))]["by"]
+            edges.append({"from": other, "to": master, "kind": "same_as", "relation": None, "decided_by": by, "actor": f"human:{by}",
                           "claim": claim_of("possibly_same", {"a": master, "b": other}),
                           **({"p": pair["p"], "evidence": pair["evidence"]} if pair else {"evidence": []})})
     for e in edges:

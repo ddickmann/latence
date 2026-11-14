@@ -48,6 +48,10 @@ seeded_objects: [partner.service_accounts]
 # Records of a second source linked to a master list by the resolution engine. The first
 # object is the master. A source named under duplicate_free holds no duplicates: no two of its
 # records are ever the same thing. The labels are what a reviewer would have to give.
+# A hosted model may vote on the pairs the linker leaves for a person (estate/pair_voice.py,
+# ticket 48): off unless `hosted_model.enabled: true` with an egress rule (`fields` of a record
+# that may leave, of name, city and country; `model`; `prices`; `max_usd`). Each call is
+# recorded in pair_model_calls.jsonl; a vote decides nothing. Left off here.
 link:
   duplicate_free: [dealer master]
   labels: {fit: 400, test: 900}

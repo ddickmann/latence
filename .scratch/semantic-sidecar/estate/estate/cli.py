@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import yaml
 
 from .classes import TOP, CachedClassModel, OpenAIClassModel, RecordedClassModel, describe, prompt_of, propose_classes
@@ -27,6 +28,7 @@ from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
+from .pair_voice import OpenAIPairClient, ask_about_pairs, rule_of
 from .proposal import in_layer, proposal, read_receipts, to_yaml
 from .reader import Reader
 from .reader_databricks import DatabricksReader
@@ -56,7 +58,7 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: Path | None, out: Path,
           resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
           client: object | None = None, usage: tuple[Path, ...] = (), catalog: str | None = None,
-          receipts: tuple[Path, ...] = ()) -> dict[str, object]:
+          receipts: tuple[Path, ...] = (), pair_client: object | None = None) -> dict[str, object]:
     """The estate is read from a DuckDB mirror (``duckdb_path``) or from Unity Catalog
     (``catalog``; host, warehouse and credentials from the environment). ``receipts`` are what
     a host wrote when it placed a proposal file: an approved element they name says in the
@@ -64,7 +66,9 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
     one no element says so. ``hosted_model`` lets
     a hosted language model propose classes, if the estate allows it. The call is made only
     when what would be sent has changed, and only if its worst case stays under ``max_usd``.
-    ``client`` stands in for the provider's client in tests."""
+    ``client`` stands in for the provider's client in tests, and ``pair_client`` for the client
+    of the hosted model on the pairs the linker leaves undecided (ticket 48), which is asked only
+    where the estate file switches it on with an egress rule (``link.hosted_model``)."""
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
     reader: Reader
     if catalog:
@@ -148,6 +152,12 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                               tuple(link.get("duplicate_free", ())), answers, stands_in)
         concept_of = {c["object_name"]: c["id"] for c in layer["concepts"] if c.get("object_name")}
         instances = merge(instances, answer, link, truth, concept_of, seeded=any(s["object"] in seeded for s in link["records"]), answers=answers)
+        rule = rule_of(link)
+        if rule is not None:
+            records = {str(u): {"name": n, "city": c, "country": k} for u, n, c, k in
+                       duckdb.sql(f"SELECT unique_id, name, city, country FROM read_parquet('{out / 'records.parquet'}')").fetchall()}
+            review, pair_model = ask_about_pairs(instances["review"], records, rule, pair_client or OpenAIPairClient(), out / "pair_model_calls.jsonl")
+            instances = {**instances, "review": review, "meta": {**instances["meta"], "resolution": {**instances["meta"]["resolution"], "pair_model": pair_model}}}
         resolution_note = "linked" if answer["certified"] else answer["state"]
     if link and resolver is not None:
         for said in answers:  # every answer on a pair of records was applied, whether the pair is still listed or not
@@ -171,7 +181,8 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
             "classes": {"voices": classes["voices"], "placed": len(classes["subclass_of"]), "contested": sum(s["contested"] for s in classes["subclass_of"]),
                         "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"]), "hosted_call": call_note},
             "resolution": instances["meta"].get("resolution") or resolution_note,
-            **({"in_layer": taken_up} if receipts else {})}
+            **({"in_layer": taken_up} if receipts else {}),
+            **({"pair_model": (instances["meta"].get("resolution") or {}).get("pair_model")} if (instances["meta"].get("resolution") or {}).get("pair_model") else {})}
 
 
 def propose(config: Path, out: Path, file: Path | None = None,
