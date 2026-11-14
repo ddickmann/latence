@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from _workspace_providers import declared_providers
+from _workspace_providers import declared_providers, providers_declared_in, workspace_root
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.perf import is_compile_backend_failure
 from latence_core.tune.fingerprint import (
@@ -130,10 +130,29 @@ def test_every_provider_in_the_knob_mapping_is_a_provider_this_workspace_declare
     )
 
 
-def test_the_endpoint_entity_extractor_is_swept_under_its_registered_name() -> None:
-    grid = knob_grid_for_provider("entity.endpoint")
-    assert [setting.knobs for setting in grid] == [{"max_concurrency": 1}, {"max_concurrency": 8}]
-    assert knob_grid_for_provider("ner.endpoint") == []
+def test_every_knob_the_tuner_sweeps_is_a_key_the_provider_reads() -> None:
+    """A knob that the Provider never reads makes every candidate the same configuration, and
+    the sweep then measures noise and may crown it (ticket 24's documentation pass: the endpoint
+    family swept ``max_concurrency``, which none of the three endpoint Providers reads). Each
+    knob of a Provider's family must be named as a config key in that Provider's package source,
+    or in the core's Provider seam (``latence_core.providers``) where the package builds on it."""
+    root = workspace_root()
+    declared = providers_declared_in(root)
+    shared = "".join(path.read_text(encoding="utf-8")  # the perf seam a Provider built on it reads its knobs through
+                     for path in sorted((root / "packages" / "latence-core" / "src" / "latence_core" / "providers").glob("*.py")))
+    unread = []
+    for provider in sorted(_PROVIDER_FAMILY):
+        source = "".join(path.read_text(encoding="utf-8") for path in sorted((root / "packages" / declared[provider] / "src").rglob("*.py")))
+        if "latence_core.providers" in source:
+            source += shared
+        for setting in knob_grid_for_provider(provider):
+            unread += [f"{provider}: {knob}" for knob in setting.knobs if f'"{knob}"' not in source]
+    assert sorted(set(unread)) == [], f"the tuner sweeps knobs these Providers never read: {sorted(set(unread))}"
+
+
+def test_an_endpoint_provider_is_not_swept_while_it_reads_no_knob() -> None:
+    for name in ("entity.endpoint", "parser.endpoint", "embedding.endpoint", "ner.endpoint"):
+        assert knob_grid_for_provider(name) == []
 
 
 # -- (1) pick-correct: the fastest CORRECT setting wins ----------------------------------------

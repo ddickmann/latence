@@ -35,3 +35,14 @@ the `hyperedges` key, which ADR-0068 removed, and a run refuses a Pipeline that 
 `build_gold.py` and `chains.py` import nothing that was removed. `build_gold.py` reads an
 export under `store/`, which is not tracked and which `run_pipeline.py` used to produce. It has
 not been run against an export of the current pipeline.
+
+## `build_gold.py` on the current pipeline (2026-11-14)
+
+`build_gold.py` was run once against an export of the current pipeline: `pipeline.yaml` with its
+`hyperedges` block taken out (a removed key the current pipeline refuses), run as `gold-v0` with
+`latence run`, then `PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/build_gold.py`.
+Every planted fact resolved, in the document `chains.py` names, and every check the script makes
+passed: 100 questions, the same facts and texts. Eight offsets of four facts in four questions
+differ from the committed `gold.jsonl` (the chunks the current pipeline cuts around them start
+elsewhere). `gold.jsonl` is left as it was, a record of the August export; a gold set for the
+current pipeline is the regenerated file, made by the same two commands.

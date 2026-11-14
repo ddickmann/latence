@@ -31,7 +31,9 @@ It:
    never faked). The fingerprint is the reuse key: a tuned config is only applied on a device whose
    fingerprint **matches** (see below).
 2. **Sweeps each heavy Provider's knobs** — `dtype` (fp32/bf16), `quantize` (gliner2),
-   `compile` (on/off), `batch_size` / `ocr_batch_size`, `max_concurrency` (endpoint). The grid is
+   `compile` (on/off), `batch_size` / `ocr_batch_size`, and `max_concurrency` for the served OCR
+   parser (`parser.lighton_vllm`). The endpoint Providers are not swept: they read no knob the
+   tuner could vary. The grid is
    cartesian-but-pruned and **deterministic**, baseline (fp32/plain, compile off, batch 1) first.
 3. **Applies the HARD correctness gate** (the whole point). Each candidate runs the stack and is
    **REJECTED** if it:

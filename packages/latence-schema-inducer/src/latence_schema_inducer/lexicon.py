@@ -424,10 +424,21 @@ def _compile_cue(spellings: list[str], *, whole_word: bool) -> re.Pattern[str]:
     surface, and treating it as one would turn a stray ``(`` in a real-world cue into a run-time
     error and a hand-written ``.*`` into an accidental catastrophic backtrack. The spellings are
     joined into ONE alternation so the result counts as a single piece of evidence for
-    ``min_hits``. ``whole_word`` wraps the alternation in ``\\b`` boundaries, which is what stops a
-    short cue like ``iban`` firing inside ``Ibanez``.
+    ``min_hits``. ``whole_word`` keeps a spelling from matching inside a longer word, which is
+    what stops a short cue like ``iban`` firing inside ``Ibanez``: a spelling that starts with a
+    word character must not follow one, and one that ends with a word character must not be
+    followed by one. An edge that is punctuation needs no guard, since it cannot sit inside a
+    word: ``$`` fires in ``$3,200``, ``%`` in ``12.5%``, ``Mr.`` and ``U.S.C.`` before a space.
+    (A plain ``\\b`` on both sides made every cue that starts or ends with punctuation dead:
+    accepted at construction, matching nothing, ever.)
     """
-    literals = [re.escape(s.strip()) for s in dict.fromkeys(spellings) if s.strip()]
-    alternation = "|".join(literals)
-    pattern = rf"\b(?:{alternation})\b" if whole_word else f"(?:{alternation})"
-    return re.compile(pattern, re.IGNORECASE)
+    literals = [s.strip() for s in dict.fromkeys(spellings) if s.strip()]
+    if not whole_word:
+        return re.compile("(?:" + "|".join(re.escape(s) for s in literals) + ")", re.IGNORECASE)
+    guarded = [
+        ("(?<!\\w)" if re.match(r"\w", s) else "")
+        + re.escape(s)
+        + ("(?!\\w)" if re.search(r"\w$", s) else "")
+        for s in literals
+    ]
+    return re.compile("(?:" + "|".join(guarded) + ")", re.IGNORECASE)

@@ -32,8 +32,14 @@ from latence_core.tune.report import KnobSetting
 #   * "embedding"    — embedding.sentence_transformers: dtype + compile + batch_size.
 #   * "ocr"          — the generative OCR VLMs (parser.lighton, parser.lighton_vllm): dtype +
 #                      compile + ocr_batch_size (W8 page-batching).
-#   * "endpoint"     — endpoint/LLM Providers: max_concurrency only (W6) — no dtype/compile (the
-#                      model runs server-side).
+#   * "served_ocr"   — the served OCR parser (parser.lighton_vllm): max_concurrency only, the bound
+#                      on its in-flight page requests (the model runs server-side, so dtype and
+#                      compile are the server's, not this Provider's).
+#
+# The endpoint Providers (parser.endpoint, entity.endpoint, embedding.endpoint) are NOT swept: they
+# read no knob the tuner could vary (no concurrency setting among their config keys), so every
+# candidate would be the same configuration and the sweep would measure noise (ticket 24).
+# test_every_knob_the_tuner_sweeps_is_a_key_the_provider_reads holds every family to that rule.
 _DTYPE_VALUES = [DTYPE_FP32, DTYPE_BF16]  # fp32 first = the baseline/correctness reference.
 _COMPILE_VALUES = [False, True]  # off first = the baseline (the pod compile-crash lives on `True`).
 
@@ -55,7 +61,7 @@ _FAMILY_KNOBS: dict[str, dict[str, list[object]]] = {
                   "batch_size": list(_BATCH_VALUES)},
     "ocr": {"dtype": list(_DTYPE_VALUES), "compile": list(_COMPILE_VALUES),
             "ocr_batch_size": list(_OCR_BATCH_VALUES)},
-    "endpoint": {"max_concurrency": list(_CONCURRENCY_VALUES)},
+    "served_ocr": {"max_concurrency": list(_CONCURRENCY_VALUES)},
 }
 
 # The heavy/GPU Providers the tuner sweeps, mapped to their knob family. The spine of the roster the
@@ -72,10 +78,7 @@ _PROVIDER_FAMILY: dict[str, str] = {
     "embedding.sentence_transformers": "embedding",
     "parser.lighton": "ocr",
     "parser.glm": "ocr",
-    "parser.lighton_vllm": "ocr",
-    "embedding.endpoint": "endpoint",
-    "parser.endpoint": "endpoint",
-    "entity.endpoint": "endpoint",
+    "parser.lighton_vllm": "served_ocr",
 }
 
 

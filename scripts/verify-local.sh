@@ -80,6 +80,14 @@ step "pytest (full suite)"
 uv run pytest -q
 ok "pytest"
 
+# The test files outside packages/ (pytest's testpaths), named one by one: no gate ran them, and
+# two had been failing unseen (ticket 24). test_every_test_file_has_a_gate.py holds this list and
+# CI's to every tracked test file outside packages/ and the .scratch prototypes.
+step "pytest (the benchmark folders' own tests)"
+uv run pytest -q benchmark/corpus/test_manifest.py benchmark/e2e/test_perchunk_label_contract.py \
+              benchmark/rfc/test_build_corpus.py benchmark/rfc/test_stage_charts.py
+ok "benchmark tests"
+
 step "provider conformance (every registered provider, LATENCE_CUDA=0)"
 uv run pytest packages/latence-core/tests/test_conformance.py \
               packages/latence-core/tests/test_e2e_conformance.py -q

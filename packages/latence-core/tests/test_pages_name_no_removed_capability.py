@@ -39,6 +39,9 @@ _PAGES = (
     "CONTEXT.md",
     "llms.txt",
     "docs/agent-briefing.md",
+    # Joined on 2026-11-14 (ticket 24): its list of what was not measured still named the removed
+    # retrieval tooling as a gap.
+    "PERF-RESULTS.md",
 )
 
 #: What a paragraph must say when it names a removed capability.

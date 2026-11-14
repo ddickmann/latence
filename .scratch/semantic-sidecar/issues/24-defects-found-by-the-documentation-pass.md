@@ -2,7 +2,7 @@
 
 Type: task
 Mode: HITL
-Status: open
+Status: open: the five defects found and not fixed are done (14 Nov); item 9 (compose and Helm) is still not run, and the spend cap stays as decided (C)
 Decided by the owner (12 Nov): Should the benchmark campaign's spend cap be a hard stop; Decide
 when the campaign is next used
 Blocked by:
@@ -180,3 +180,40 @@ tree before the fix and is green after it.
 - **Urgency:** after v1. Blocks nothing.
 - **Cost:** none.
 - **Decided by the owner (12 Nov):** Decide when the campaign is next used.
+
+## The five defects found while fixing (14 Nov)
+
+1. **The tuner's `endpoint` family swept `max_concurrency`, which no endpoint Provider reads.**
+   Fixed: the three endpoint Providers are no longer swept (they read no knob the tuner could
+   vary); `parser.lighton_vllm`, which does read `max_concurrency` and runs its model on a server,
+   now has a family of its own with that knob only, instead of `dtype`, `compile` and
+   `ocr_batch_size`, which it never read. `docs/tuning.md` says so. Red first:
+   `test_every_knob_the_tuner_sweeps_is_a_key_the_provider_reads` (every knob of a Provider's
+   family is a config key in its package, or in the core's Provider seam it builds on; red on
+   the four unread knobs) and `test_an_endpoint_provider_is_not_swept_while_it_reads_no_knob`.
+   The old test that pinned `entity.endpoint`'s sweep was the defect written as a test, and was
+   replaced by the second one.
+2. **No gate ran `benchmark/corpus/test_manifest.py` or the tests under `benchmark/rfc/`.**
+   Fixed: `scripts/verify-local.sh` and CI each run the four test files outside `packages/`
+   (also `benchmark/e2e/test_perchunk_label_contract.py`, which no gate ran either). Red first:
+   `test_every_test_file_has_a_gate.py` (every tracked test file outside `packages/` and the
+   `.scratch` prototypes is named by both gates). **Running them found one more failure:**
+   `test_a_cue_that_starts_or_ends_with_punctuation_can_never_fire` had been red unseen. The
+   lexicon inducer wrapped every cue in `\b`, so a cue that starts or ends with punctuation
+   (`$`, `%`, `Mr.`, `U.S.C.`) never fired. Fixed in `latence_schema_inducer/lexicon.py`: only a
+   word-character edge is guarded; `iban` still does not fire inside `Ibanez`. That test was the
+   red one; the inducer's own suite passes unchanged.
+3. **`results/dogfood-rfc/report/rfc_bench.py` imports `latence_retrieval`.** Intended: it is the
+   record of how the numbers beside it were made, exempted by name in the import gate. No change.
+4. **`PERF-RESULTS.md` named retrieval and query-time throughput as a gap.** Fixed: the item is
+   gone, and the page joined the pages `test_pages_name_no_removed_capability.py` polices (red:
+   the page named SPLADE and MUVERA without saying they are removed).
+5. **`build_gold.py` had not been run against an export of the current pipeline.** Run once
+   (the pipeline without its removed `hyperedges` block, `latence run`, then the script): every
+   fact resolves and every check passes; 8 offsets of 4 facts in 4 questions differ from the
+   committed `gold.jsonl`, which stays as the August record. Written in
+   `benchmark/enterprise-gold/README.md`, with the two commands that regenerate it.
+
+**Still open:** item 9 (needs `helm` and a docker daemon; neither is here: a live request on the
+owner's machine: the compose and Helm commands of `docs/deployment.md`, as written). The spend cap
+stays as decided on 12 Nov (C: decided when the campaign is next used).

@@ -254,8 +254,6 @@ are in the repo — measure it and add the row with its hardware, profile, corpu
   throughput is a property of the remote service, and none was measured against a live endpoint.
 - **The universal/document parsers on real office formats** (`parser.document`, `parser.render`,
   `parser.glm`) and **served-vLLM OCR** — see the PENDING section above.
-- **Retrieval / query-time throughput** (`latence-retrieval`, SPLADE, MUVERA, the DuckDB graph
-  hops). This document covers index-time pipeline Stages only (ADR-0049 clock split).
 - **Delta / retract / purge runs.** Only full runs were measured.
 
 **Corpora.**
