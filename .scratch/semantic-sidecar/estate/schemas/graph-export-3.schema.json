@@ -870,6 +870,10 @@
     "seeded": {
      "type": "boolean"
     },
+    "proposal": {
+     "description": "Present on a stated master list the estate names for a proposal file (its records' names may go to a host's semantic layer once a person approves it), so that a page offers a decision on it. Absent on everything else, a seeded list included. No part of the claim.",
+     "const": "names"
+    },
     "claim": {
      "$ref": "#/$defs/claim"
     },

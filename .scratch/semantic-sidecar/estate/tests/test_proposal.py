@@ -241,3 +241,37 @@ def test_the_prototype_calls_the_package_and_states_the_same_kinds_of_element() 
     assert module.proposal is latence_proposal_writer.proposal
     assert module.read_receipts is latence_proposal_writer.read_receipts and module.in_layer is latence_proposal_writer.in_layer
     assert latence_proposal_writer.STRUCTURE_KINDS == ledger.STRUCTURE_KINDS and latence_proposal_writer.CLASS_KINDS == ledger.CLASS_KINDS
+
+
+def _page_download(*decided: tuple[dict[str, Any], str]) -> str:
+    """A decisions file as the host's Ontology page downloads it since its ticket 282: per line
+    the element, the verdict, the person, the time of the decision in UTC (``at``, written after
+    the person) and the element's claim."""
+    return "".join(json.dumps({"subject": el["id"], "verdict": verdict, "by": "reviewer-7", "at": "2026-11-14T09:30:12.345Z",
+                               "claim": el["claim"]}) + "\n" for el, verdict in decided)
+
+
+def test_a_page_download_alone_writes_the_file_with_no_day_option_and_no_line_written_by_hand(yard: dict[str, Any]) -> None:
+    """The host's ticket 282: a stated concept the estate names for the proposal is marked in
+    the export, so the page offers a decision on it, and every downloaded line carries its time."""
+    yard["config"].write_text(yaml.safe_dump({**ESTATE, "propose": {"names": ["shop.dealers", "partner.accounts"]}}), encoding="utf-8")
+    build(**yard)
+    export = _export(yard)
+    jsonschema.validate(export, EXPORT_SCHEMA)
+    marked = {c["id"]: c["proposal"] for c in export["concepts"] if "proposal" in c}
+    assert marked == {"concept:shop.dealers": "names"}  # the seeded list is named too, and never offered
+    alfa, dealers = _pair(export, "Alfa"), _concept(export, "concept:shop.dealers")
+    (yard["out"] / "decisions.jsonl").write_text(_page_download((alfa, "approved"), (dealers, "approved")), encoding="utf-8")
+    report = propose(yard["config"], yard["out"])  # no day option
+    text, doc = _file(yard)
+    jsonschema.validate(doc, FILE_SCHEMA)
+    assert [(e["kind"], e["element"], e["decided_by"], e["decided_on"], e["day_stated_by"]) for e in report["entries"]] == [
+        ("spellings", alfa["id"], "reviewer-7", "2026-11-14", "decision"), ("names", "concept:shop.dealers", "reviewer-7", "2026-11-14", "decision")]
+    assert report["not_written"] == [] and doc["entries"][1]["names"]["values"] == DEALERS
+    # The day option stays for lines that state no day; it never replaces a day a line states.
+    assert propose(yard["config"], yard["out"], decided_on="2026-11-01")["entries"] == report["entries"]
+    assert _file(yard)[0] == text
+    build(**yard)  # the build applies the downloaded decisions; the mark and the file stay as they were
+    assert {c["id"] for c in _export(yard)["concepts"] if "proposal" in c} == {"concept:shop.dealers"}
+    propose(yard["config"], yard["out"])
+    assert _file(yard)[0] == text

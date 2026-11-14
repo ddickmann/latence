@@ -10,8 +10,9 @@ Two kinds of entry are written, each from a decision in force that says ``approv
 - ``spellings``: two values of a value set that a reviewer called the same. The value kept is
   the one more rows carry, by the build's own rule; the other is its other spelling.
 - ``names``: the names of the records of a master list, by their key. Only for a list the
-  caller names (``names_of``): a reviewer's approval of a concept does not by itself send its
-  rows' names anywhere.
+  caller names (``names_of``) or the export marks (``"proposal": "names"``, the estate's word
+  that its names may go, which also lets a host's page offer the decision): a reviewer's
+  approval of a concept does not by itself send its rows' names anywhere.
 
 Each entry says where it goes by a catalog object and a column, never by a name of the host's
 layer, and carries the decision it rests on: the element's id, the element's claim, who
@@ -188,9 +189,10 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
     """The proposal file as data, and a report of what was written and what was not.
 
     ``export`` is a build's ``graph-export/3``; ``decisions`` the decisions in force, by
-    element id. ``names_of`` are the master lists whose records' names may be written,
-    ``spellings_on`` the object to state a value set's spellings on (by column), and
-    ``decided_on`` the day of the approved decisions that state none.
+    element id. ``names_of`` are the master lists whose records' names may be written, beside
+    those the export marks; ``spellings_on`` the object to state a value set's spellings on (by
+    column); and ``decided_on`` the day of the approved decisions that state none (the day a
+    decision states, ``at``, a date or a timestamp, always wins).
 
     The report holds ``entries`` (one line per entry written), ``stale`` (approved on another
     statement), ``not_written`` (approved, with the reason: ``seeded``, ``no_claim``,
@@ -255,7 +257,7 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
             concept = concepts[subject]
             if concept.get("seeded"):
                 held_back(subject, "seeded")
-            elif concept.get("object_name") not in names_of:
+            elif concept.get("object_name") not in names_of and concept.get("proposal") != "names":
                 carried_not("concept")
             else:
                 origin_of(subject, d, concept["claim"])

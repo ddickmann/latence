@@ -155,7 +155,7 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                  "label_requests": {name: [decisions.marked("possibly_same", item) for item in sample] for name, sample in instances.get("label_requests", {}).items()}}
     layer = {**layer, "meta": {**layer["meta"], "decisions": decisions.summary()}}
     export = build_export(layer, source=cfg["name"], title=cfg.get("title", cfg["name"]), verified=joins, instances=instances, structure=structure, classes=classes,
-                          language=cfg.get("language", "en"))
+                          language=cfg.get("language", "en"), proposal_names=tuple((cfg.get("propose") or {}).get("names", ())))
     export, taken_up = in_layer(export, read_receipts(receipts))
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")

@@ -17,10 +17,13 @@ export, count = in_layer(export, read_receipts((receipt_path,)))
 ```
 
 - `export` is a build's `graph-export/3` document; `decisions` are the decisions in force, by
-  element id (`verdict`, `by`, and the `claim` and the day `at` the decision was made on).
+  element id (`verdict`, `by`, and the `claim` and the day `at` the decision was made on, a date
+  or a timestamp). `decided_on` is the day for decisions that state none; it never replaces a
+  stated day.
 - **Two kinds of entry**, from approved decisions only: `spellings` (two values of a value set a
   reviewer called the same; the value more rows carry is kept) and `names` (the names of a master
-  list's records by their key, only for a list named in `names_of`). Each entry says where it goes
+  list's records by their key, only for a list named in `names_of` or marked `"proposal": "names"`
+  in the export). Each entry says where it goes
   by a catalog object and a column and carries its origin: the element, its claim, who approved
   it and on which day.
 - **Never written:** a rejected or undecided element; anything seeded; a link between records,

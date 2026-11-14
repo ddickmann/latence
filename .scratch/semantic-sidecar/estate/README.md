@@ -43,7 +43,8 @@ reviewed change and writes a receipt.
 - **Two kinds of entry, from approved decisions only.** `spellings`: two values of a value set
   a reviewer called the same (the value more rows carry is kept, the other is its spelling).
   `names`: the names of a master list's records by their key, for a list the estate file
-  names under `propose.names`. Each entry says where it goes by a catalog object and a column
+  names under `propose.names` (the export marks each such list that is not seeded
+  `"proposal": "names"`, so a host's page offers a decision on it). Each entry says where it goes by a catalog object and a column
   and carries its origin: the element's id, its claim, who approved it and on which day.
 - **Never written:** a rejected or undecided element; anything seeded (a seeded list, its
   records, a pair that holds one, a pair of values of a value set a seeded object carries); a
@@ -51,8 +52,10 @@ reviewed change and writes a receipt.
   statement than the build now makes (listed as `stale`); an entry whose decision states no
   claim, or no day. The command prints each approved decision it did not write, with the
   reason.
-- **The day of a decision** is `at` on its line. A line without one is written only when the
-  command is given the day (`--decided-on YYYY-MM-DD`); no day is made up.
+- **The day of a decision** is `at` on its line (a date, or a timestamp such as the host's
+  page writes since its ticket 282). A line without one is written only when the command is
+  given the day (`--decided-on YYYY-MM-DD`), which never replaces a day a line states; no day
+  is made up.
 - **The same inputs give the same bytes.** The file is YAML in block style with every text in
   double quotes.
 - **The receipt.** `build --receipt <file>` (repeat for more, oldest first) reads what the

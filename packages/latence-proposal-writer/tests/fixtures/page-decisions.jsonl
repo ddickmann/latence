@@ -1,0 +1,4 @@
+{"subject":"same:maker:Alfa Works, Inc.~Alfa Works North","verdict":"approved","by":"reviewer-7","at":"2026-11-14T09:30:12.345Z","claim":"0000000000000014"}
+{"subject":"same:maker:Beta Motor Corp.~Beta Motor of America","verdict":"approved","by":"reviewer-7","at":"2026-11-14T09:31:40.002Z","claim":"0000000000000015"}
+{"subject":"concept:shop.dealers","verdict":"approved","by":"reviewer-7","at":"2026-11-14T09:33:05.120Z","claim":"0000000000000001"}
+{"subject":"same:maker:Beta Motor Corp.~Beta Motor of America","verdict":"rejected","by":"reviewer-7","at":"2026-11-14T09:35:00.000Z","reason":"two companies","claim":"0000000000000015"}

@@ -31,10 +31,18 @@ def _claimed(kind: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_export(layer: dict[str, Any], *, source: str, title: str, verified: list[tuple[str, str]] | None = None,
                  instances: dict[str, Any] | None = None, structure: dict[str, Any] | None = None,
-                 classes: dict[str, Any] | None = None, language: str = "en") -> dict[str, Any]:
-    """``language`` is the language the catalog's comments are written in."""
+                 classes: dict[str, Any] | None = None, language: str = "en", proposal_names: tuple[str, ...] = ()) -> dict[str, Any]:
+    """``language`` is the language the catalog's comments are written in. ``proposal_names``
+    are the master lists whose records' names may go into a proposal file: each that is not
+    seeded is marked ``"proposal": "names"``, so a host's page offers a decision on it like on
+    an induced element. The mark is the estate file's word, not a statement about the data: it
+    is no part of the claim and no assertion."""
+    def offered(c: dict[str, Any]) -> dict[str, Any]:
+        return {"proposal": "names"} if c.get("object_name") in proposal_names and not c.get("seeded") else {}
+
     concepts = [{**c, "claim": claim_of("concept", c), "definition": text(c.get("definition"), "catalog", language),
-                 **({"attributes": [{**a, "definition": text(a.get("definition"), "catalog", language)} for a in c["attributes"]]} if "attributes" in c else {})}
+                 **({"attributes": [{**a, "definition": text(a.get("definition"), "catalog", language)} for a in c["attributes"]]} if "attributes" in c else {}),
+                 **offered(c)}
                 for c in layer["concepts"]]
     relations = _claimed("relation", layer["relations"])
     measures = [{**m, "claim": claim_of("measure", m), "definition": text(m.get("definition"), "catalog", language)} for m in layer["measures"]]

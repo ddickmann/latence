@@ -107,7 +107,7 @@ loaded, so the catalog's build links no records; that difference is expected.
 ```bash
 cd $LATENCE/.scratch/semantic-sidecar/estate
 .venv/bin/python -m estate propose --config estates/vehicles.yaml --out out/vehicles \
-    --decided-on <YYYY-MM-DD>                # the day of the decisions that state none
+    --decided-on <YYYY-MM-DD>                # only for lines without a day (a page before the host's ticket 282)
 cd $METIS
 uv run metis-dev propose estate-semantics --apply --release <version> --receipt /tmp/receipt.json \
     --glossary $LATENCE/.scratch/semantic-sidecar/estate/out/vehicles/proposal.yaml
@@ -170,13 +170,17 @@ of what its tool reads.
   master list that the estate file names under `propose.names` (here the dealers): each
   record's key with its name (`names`). Every entry carries the element's id, its claim, and
   the decision: approved, by whom, on which day.
-- **The dealers need a line written by hand.** The page offers no decision on a stated
-  concept. Append to `out/vehicles/decisions.jsonl`:
+- **The dealers.** The export marks the dealers' list `"proposal": "names"` because the
+  estate file names it; a page with the host's ticket 282 offers the decision on it, and its
+  download carries that decision. On an older page, which offers no decision on a stated
+  concept, append to `out/vehicles/decisions.jsonl` by hand:
   `{"subject": "concept:internal.dealers", "verdict": "approved", "by": "<person id>", "claim": "<claim>", "at": "<YYYY-MM-DD>"}`,
   with the claim the export states for it:
   `.venv/bin/python -c "import json; print(next(c['claim'] for c in json.load(open('out/vehicles/ontology.json'))['concepts'] if c['id'] == 'concept:internal.dealers'))"`.
-- **The day.** A line the page downloads carries no day. Add `"at"` to the line, or give
-  `--decided-on` for all the lines without one. Without a day an entry is not written.
+- **The day.** A line the page downloads carries its time (`at`, UTC) since the host's
+  ticket 282, and the command takes the day from it. A line without one (an older page, a line
+  by hand) needs `"at"` added, or `--decided-on` for all the lines without one; the option
+  never replaces a day a line states. Without a day an entry is not written.
 - **What is never in it:** a rejected or undecided element; the seeded service accounts, any
   pair that holds one, and any pair of values of a value set the seeded table carries; a link
   between records, the machine's (certified here on simulated labels) and a person's alike;

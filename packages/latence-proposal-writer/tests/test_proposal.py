@@ -8,6 +8,7 @@ build, these do on the export a build writes."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import jsonschema
@@ -196,3 +197,27 @@ def test_the_schema_ships_with_the_package_and_states_what_the_writer_writes() -
     read["entries"][0]["origin"]["seeded"] = True
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(read, held)
+
+
+def test_a_download_of_the_page_alone_writes_the_file_with_no_day_given_and_no_list_named() -> None:
+    """The host's page (its ticket 282) downloads every decision with its time in UTC, and
+    offers a decision on a stated list the estate marked for the proposal. From such a download
+    and the export, the file is written with no day given and no list named by the caller."""
+    doc = export()
+    marked = {**doc, "concepts": [{**c, "proposal": "names"} if c["id"] in ("concept:shop.dealers", "concept:partner.accounts") else c
+                                  for c in doc["concepts"]]}
+    download = (Path(__file__).parent / "fixtures" / "page-decisions.jsonl").read_text(encoding="utf-8")
+    decided = in_force(*(json.loads(row) for row in download.splitlines()))  # the last line on an element counts
+    document, report = proposal(marked, decided)
+    _, read = _written(document)
+    assert [(e["kind"], e["element"], e["decided_by"], e["decided_on"], e["day_stated_by"]) for e in report["entries"]] == [
+        ("spellings", "same:maker:Alfa Works, Inc.~Alfa Works North", "reviewer-7", "2026-11-14", "decision"),
+        ("names", "concept:shop.dealers", "reviewer-7", "2026-11-14", "decision")]
+    assert read["entries"][1]["names"]["values"] == DEALERS and report["not_written"] == []
+    # A day given is for lines that state none; it never replaces the day a line states.
+    assert proposal(marked, decided, decided_on="2026-11-01")[1]["entries"] == report["entries"]
+    # Without the mark, an approval of the list still sends no names anywhere.
+    assert [e["kind"] for e in proposal(doc, decided)[1]["entries"]] == ["spellings"]
+    # A seeded list stays out, marked or not.
+    seeded = in_force(line(element(marked, "concept:partner.accounts")))
+    assert proposal(marked, seeded)[1]["not_written"] == [{"subject": "concept:partner.accounts", "why": "seeded"}]
