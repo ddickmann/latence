@@ -2,7 +2,8 @@
 
 Type: question
 Mode: HITL (the host's owner decides what enters its semantic layer)
-Status: open, after v1
+Status: resolved (14 Nov): yes
+Decided by the owner (14 Nov): yes: a person-decided link reaches the host's layer as a new entry shape, agreed on the host's side first (a host ticket for the entry it reads, then the writer here). Links certified on simulated labels are never written, as settled.
 Blocked by: nothing
 Emerges from: 40 ("Choices": no link between records is ever written, a person's included)
 

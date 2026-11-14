@@ -130,12 +130,12 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Task: defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): open: a spend cap as a hard stop is the owner's to decide; the compose and Helm commands were not run; five defects found and not fixed
 - [Task: record the baseline: one text-path run and ULTRA's real link-prediction numbers](issues/08-baseline-measurement.md): open: the baseline of the text path and of link prediction is not recorded
 - [Task: get a Databricks sandbox for the engine](issues/09-databricks-sandbox-access.md): open
-- [Grilling: the upgrade of the resolution engine](issues/13-resolution-engine-upgrade.md): open grilling; the feasibility spike's input is recorded in it
+- [Grilling: the upgrade of the resolution engine](issues/13-resolution-engine-upgrade.md): resolved (14 Nov): the owner's answers on the neural stage, scale, a hosted model in the uncertain band and the persistence of human links are in the ticket; the builds follow as their own tickets
 - [Grilling: the text-path upgrade](issues/15-text-path-upgrade.md): open grilling; blocked by the missing baseline
-- [Grilling: the review, certification and versioning lifecycle](issues/16-review-and-versioning-lifecycle.md): open grilling
+- [Grilling: the review, certification and versioning lifecycle](issues/16-review-and-versioning-lifecycle.md): resolved (14 Nov): five states, staged proposals to the catalog, review on the host's page beside it, drift and erasure; the builds follow as their own tickets
 - [Task: the proposal file from a fresh build with the record linker](issues/44-proposal-file-from-a-build-with-the-record-linker.md): new: the trial's fresh build ran without the linker; the file from the kept export with its links is the same bytes
 - [Build: the proposal writer as the optional adapter package the decision record names](issues/43-proposal-writer-as-the-adapter-package.md): new, after v1: today a module of the estate prototype, which no gate of the repository covers
-- [Question: should a link between records that a person decided reach the host's layer?](issues/45-a-decided-link-between-records-and-the-hosts-layer.md): new, after v1: no link is written today, a person's included
+- [Question: should a link between records that a person decided reach the host's layer?](issues/45-a-decided-link-between-records-and-the-hosts-layer.md): resolved (14 Nov): yes, as a new entry shape agreed on the host's side first
 - [Build: the catalog reader reads lineage, row filters and column masks](issues/41-catalog-reader-lineage-filters-and-masks.md): new, after v1
 - [Build: what ontology v1 leaves out: document mentions, then SHACL and PROV-O exports](issues/42-what-ontology-v1-leaves-out.md): new, after v1
 

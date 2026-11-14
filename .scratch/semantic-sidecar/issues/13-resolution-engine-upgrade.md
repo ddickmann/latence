@@ -2,7 +2,8 @@
 
 Type: grilling
 Mode: HITL
-Status: open
+Status: resolved (14 Nov), by the owner's answers below
+Decided by the owner (14 Nov): the neural second stage (the small re-scoring model and the reranker) is kept and runs on the owner's machine until the deployment on AWS; resolution runs in memory, a Spark path becomes a ticket when an estate outgrows it; a hosted model may decide pairs in the uncertain band only under the deployment's stated egress rule, off by default, each call recorded; every human decision is kept as a must-link or cannot-link with its actor on each merge decision; an older module (the disambiguation cascade, embedding and linker paths, type consolidation) is kept only where a measurement shows it adds value, and retired otherwise. The builds follow as their own tickets.
 Blocked by:
 
 ## Question
