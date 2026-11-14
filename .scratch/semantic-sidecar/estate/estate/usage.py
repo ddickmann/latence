@@ -1,9 +1,11 @@
 """What people ask, as a signal on the elements they use.
 
 A host writes a log of the questions it answered (``usage/1``, one JSON object per line): for
-each question the measures, the dimensions and the joins of the query that answered it, and
-the terms the record states a meaning for. No value of a filter is in it, and a record that
-carries one is refused.
+each question the measures, the dimensions and the joins of the query that answered it, the
+names of its stages, and the terms the record states a meaning for. No value of a filter is in
+it, and a record that carries one is refused. A record exported from a deployment's audit trail
+says ``recorded: true``: it is people's use, and counts as such (never as synthetic). The
+stages are read and counted; the model holds no element for a stage, so they attach to none.
 
 Here the log is read and matched to elements the model already holds, by name: a measure of a
 metric view, a value set, a relation. A match adds a count to the element and a signal that
@@ -25,7 +27,7 @@ from typing import Any
 from .codes import say
 
 FORMAT = "usage/1"
-FIELDS = {"format", "source", "synthetic", "id", "language", "answered", "measures", "dimensions", "joins", "terms"}
+FIELDS = {"format", "source", "synthetic", "recorded", "id", "language", "answered", "measures", "dimensions", "joins", "terms", "stages"}
 
 
 def read_usage(paths: list[Path]) -> list[dict[str, Any]]:
@@ -42,6 +44,11 @@ def read_usage(paths: list[Path]) -> list[dict[str, Any]]:
             for d in r.get("dimensions", []):
                 if "values" in d or "value" in d:
                     raise ValueError(f"{path}:{n}: a dimension carries values; a usage record names columns only")
+            stages = r.get("stages", [])
+            if not isinstance(stages, list) or not all(isinstance(s, str) or (isinstance(s, dict) and set(s) == {"name"}) for s in stages):
+                raise ValueError(f"{path}:{n}: stages are named and nothing more: a list of names")
+            if r.get("recorded") and r.get("synthetic"):
+                raise ValueError(f"{path}:{n}: a record says it was recorded from people's questions and that it is synthetic")
             out.append(r)
     return out
 
@@ -71,7 +78,7 @@ def attach(model: dict[str, Any], records: list[dict[str, Any]]) -> tuple[dict[s
     terms: dict[str, dict[str, dict[str, Any]]] = {}
     matched = {"measures": 0, "dimensions": 0, "joins": 0, "terms": 0}
     sources: dict[str, int] = {}
-    answered = 0
+    answered, stages, recorded = 0, 0, 0
 
     def miss(kind: str, name: str, **more: Any) -> None:
         entry = missed.setdefault((kind, name), {"kind": kind, "name": name, **more, "answers": 0})
@@ -79,6 +86,8 @@ def attach(model: dict[str, Any], records: list[dict[str, Any]]) -> tuple[dict[s
 
     for r in records:
         sources[r["source"]] = sources.get(r["source"], 0) + 1
+        stages += len(r.get("stages", []))  # read and counted; no element of the model is a stage
+        recorded += bool(r.get("recorded"))
         if not r.get("answered"):
             continue
         answered += 1
@@ -132,6 +141,7 @@ def attach(model: dict[str, Any], records: list[dict[str, Any]]) -> tuple[dict[s
         return out
 
     out = {**model, **{kind: [with_usage(el) for el in model[kind]] for kind in ("concepts", "relations", "measures")}}
-    meta = {"records": len(records), "answered": answered, "sources": dict(sorted(sources.items())), "matched": matched,
+    meta = {"records": len(records), "answered": answered,
+            **({"recorded": recorded} if recorded else {}), **({"stages": stages} if stages else {}), "sources": dict(sorted(sources.items())), "matched": matched,
             "unmatched": [missed[k] for k in sorted(missed)]}
     return out, meta

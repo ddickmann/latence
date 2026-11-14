@@ -99,3 +99,22 @@ def test_a_dimension_that_is_an_entitys_key_or_a_column_of_one_object_counts_on_
     assert next(c for c in out["concepts"] if c["id"] == "concept:shop.dealers")["usage"]["answers"] == 2
     assert next(c for c in out["concepts"] if c["id"] == "concept:shop.claims")["usage"]["answers"] == 1
     assert meta["unmatched"] == [] and meta["matched"]["dimensions"] == 3
+
+
+def test_a_record_naming_its_stages_is_read_and_a_recorded_question_is_a_real_signal(reader: DuckDBReader, tmp_path: Path) -> None:
+    """The host's usage/1 records name the stages of the query that answered (names only, beside
+    the measures and dimensions), and records exported from a deployment's audit trail say they
+    were recorded (14 Nov). The stages are read and counted, attached to nothing (the model holds
+    no element for a stage), and a recorded question counts as people's use, not as a synthetic one."""
+    model = induce(reader, **OPTIONS)
+    records = read_usage([_log(tmp_path, [
+        _record("g1", measures=[CLAIMS], stages=["base", "by_make"]),
+        _record("t1", measures=[CLAIMS], source="recorded", synthetic=False, recorded=True, stages=[{"name": "base"}]),
+    ])])
+    out, meta = attach(model, records)
+    used = next(m for m in out["measures"] if m["id"].endswith("claim_count"))["usage"]
+    assert used == {"answers": 2, "sources": {"golden": 1, "recorded": 1}, "synthetic_only": False}
+    assert meta["stages"] == 3 and meta["recorded"] == 1
+    for bad in ({"stages": [{"name": "base", "values": ["X"]}]}, {"stages": "base"}, {"recorded": True, "synthetic": True}):
+        with pytest.raises(ValueError):
+            read_usage([_log(tmp_path, [_record("x", **bad)])])

@@ -105,3 +105,19 @@ route tests, the browser walk in both languages.
 ## From the map (moved 12 Nov)
 
 Route table row: what people ask is a signal on the elements they use | AFK | **done**
+
+## Addendum (14 Nov): stages and recorded questions in the host's records
+
+The host's `usage/1` records gained `stages` (the names of the query's stages, beside its
+measures and dimensions; golden records too), and `metis-dev usage export --trail <audit bundle>`
+writes recorded records from a deployment's audit trail. The reader refused both: it holds a
+record to a closed list of fields.
+
+- `stages` is read: a list of names (a name, or `{"name": …}`); anything more in it (a value) is
+  refused like a dimension with values. The model holds no element for a stage, so stages attach
+  to nothing; `meta.usage.stages` counts them.
+- `recorded: true` is people's use: such a record counts on its elements as not synthetic, and
+  `meta.usage.recorded` counts it. A record that says it is recorded and synthetic is refused.
+- The usage meta of a log with neither is unchanged, so the vehicle estate's export is too.
+- Red first: `test_a_record_naming_its_stages_is_read_and_a_recorded_question_is_a_real_signal`
+  (red: "got ['stages'] beside them").
