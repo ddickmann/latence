@@ -124,7 +124,7 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Build: classes and hierarchies are measured against a list a person checked](issues/29-hand-checked-list-and-score.md): built; waits for the owner to correct the hand-checked list
 - [Build: a reader for Unity Catalog, proven against a stand-in](issues/33-unity-catalog-reader.md): built and proven against a stand-in; waits for the owner's run on the real catalog
 - [Decision: is the ontology capability at v1 quality?](issues/34-ontology-v1-acceptance.md): seven of nine checks met; the owner's decision is open
-- [Build: every use case walked in a browser on the local backend](issues/37-every-use-case-walked.md): 28 browser specs pass; still to do: the acceptance run and the host's other tests that need Postgres
+- [Build: every use case walked in a browser on the local backend](issues/37-every-use-case-walked.md): every browser spec passes, the acceptance run included (14 Nov); the host's Postgres-backed Python tests are the owner's run
 - [Build: live checks on real models, through the owner's runner](issues/38-live-checks-through-the-gate-queue.md): open: the requests through the owner's runner (the landing gate with the guard checks, the user-interface lane, one stability run)
 - [Build: handoff to the main machine and the switch to Databricks](issues/39-handoff-to-the-main-machine.md): open: first the owner's three check commands on the main machine, then the handoff document
 - [Task: defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): open: a spend cap as a hard stop is the owner's to decide; the compose and Helm commands were not run; five defects found and not fixed
@@ -133,11 +133,22 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Grilling: the upgrade of the resolution engine](issues/13-resolution-engine-upgrade.md): resolved (14 Nov): the owner's answers on the neural stage, scale, a hosted model in the uncertain band and the persistence of human links are in the ticket; the builds follow as their own tickets
 - [Grilling: the text-path upgrade](issues/15-text-path-upgrade.md): open grilling; blocked by the missing baseline
 - [Grilling: the review, certification and versioning lifecycle](issues/16-review-and-versioning-lifecycle.md): resolved (14 Nov): five states, staged proposals to the catalog, review on the host's page beside it, drift and erasure; the builds follow as their own tickets
-- [Task: the proposal file from a fresh build with the record linker](issues/44-proposal-file-from-a-build-with-the-record-linker.md): new: the trial's fresh build ran without the linker; the file from the kept export with its links is the same bytes
-- [Build: the proposal writer as the optional adapter package the decision record names](issues/43-proposal-writer-as-the-adapter-package.md): new, after v1: today a module of the estate prototype, which no gate of the repository covers
-- [Question: should a link between records that a person decided reach the host's layer?](issues/45-a-decided-link-between-records-and-the-hosts-layer.md): resolved (14 Nov): yes, as a new entry shape agreed on the host's side first
-- [Build: the catalog reader reads lineage, row filters and column masks](issues/41-catalog-reader-lineage-filters-and-masks.md): new, after v1
-- [Build: what ontology v1 leaves out: document mentions, then SHACL and PROV-O exports](issues/42-what-ontology-v1-leaves-out.md): new, after v1
+- [Task: the proposal file from a fresh build with the record linker](issues/44-proposal-file-from-a-build-with-the-record-linker.md): the code part built and tested (14 Nov), the decision day read from the page's `at`; the run with the linker's environment is the owner's
+- [Build: the proposal writer as the optional adapter package the decision record names](issues/43-proposal-writer-as-the-adapter-package.md): resolved (14 Nov): the package `latence-proposal-writer`, under the repository's gates
+- [Question: should a link between records that a person decided reach the host's layer?](issues/45-a-decided-link-between-records-and-the-hosts-layer.md): resolved (14 Nov): yes; the writer is built to the host's entry (its ticket 294)
+- [Build: the catalog reader reads lineage, row filters and column masks](issues/41-catalog-reader-lineage-filters-and-masks.md): built against the stand-in (14 Nov); the build on the real catalog is the owner's
+- [Build: what ontology v1 leaves out: document mentions, then SHACL and PROV-O exports](issues/42-what-ontology-v1-leaves-out.md): mentions, SHACL and PROV-O built (14 Nov); the outside vocabulary and the move into packages are 55 and 56
+- [Build: the export holds only what the host's guard lets every signed-in person read](issues/46-the-export-passes-the-hosts-guard.md): resolved on this side (14 Nov); one run against the host's corrected guard once it is on the host's integration line
+- [Build: an actor on every merge decision, and a person's links kept as must-link and cannot-link](issues/47-an-actor-on-every-merge-decision-and-human-links-kept.md): resolved (14 Nov), from 13
+- [Build: a hosted model may decide pairs in the uncertain band, under a stated egress rule](issues/48-a-hosted-model-in-the-uncertain-band.md): built with a stand-in client (14 Nov), from 13; a live run on synthetic data is the owner's
+- [Build: the neural second stage runs as a stage on the owner's machine](issues/49-the-neural-second-stage-on-the-owners-machine.md): open, from 13; needs the owner's machine
+- [Task: measure each older resolution module and keep or retire it](issues/50-measure-each-older-resolution-module.md): open, from 13; needs a text-side gold set first
+- [Build: the five-state lifecycle, a reviewer's approval and the data owner's certification](issues/51-the-five-state-lifecycle.md): resolved (14 Nov), from 16
+- [Build: approved changes reach the catalog as staged proposals its owner applies](issues/52-approved-changes-reach-the-catalog-as-staged-proposals.md): resolved (14 Nov), from 16; applying a file is the owner's
+- [Build: drift becomes a new proposal, and the old entry is marked stale](issues/53-drift-becomes-a-new-proposal.md): resolved (14 Nov), from 16
+- [Build: a column that turns sensitive is erased from every export and the ledger](issues/54-erasure-when-a-column-turns-sensitive.md): resolved (14 Nov), from 16
+- [Build: classes from an outside vocabulary as a third voice](issues/55-classes-from-an-outside-vocabulary.md): open, split from 42
+- [Build: the estate prototype's code moves into packages under the repository's gates](issues/56-the-prototype-folder-into-packages.md): open, split from 42; the package layout is the owner's question
 
 ## The owner's decisions (12 Nov)
 
