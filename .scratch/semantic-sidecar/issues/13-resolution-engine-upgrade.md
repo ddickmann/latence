@@ -86,3 +86,12 @@ What that asks of the engine:
   town was needed for names that reuse a few words. The passes should be chosen per estate
   from what they propose, not fixed.
 - **An absent field must not stop a run** (the first stage stopped without postcodes).
+
+## The builds (written 14 Nov)
+
+- [47: an actor on every merge decision, and a person's links kept as must-link and cannot-link](47-an-actor-on-every-merge-decision-and-human-links-kept.md)
+- [48: a hosted model may decide pairs in the uncertain band, under a stated egress rule](48-a-hosted-model-in-the-uncertain-band.md)
+- [49: the neural second stage runs as a stage on the owner's machine](49-the-neural-second-stage-on-the-owners-machine.md) (needs a GPU; not built here)
+- [50: measure each older resolution module and keep or retire it](50-measure-each-older-resolution-module.md)
+- Resolution in memory stays; a Spark path becomes a ticket when an estate outgrows it (owner),
+  so none is written now.

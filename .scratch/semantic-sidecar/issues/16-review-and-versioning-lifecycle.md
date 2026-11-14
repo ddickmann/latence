@@ -20,3 +20,13 @@ Decide the lifecycle:
 - whether the review surface is standalone (CLI, console, app) or Metis's review routes when
   running as a sidecar;
 - erasure when a column turns sensitive.
+
+## The builds (written 14 Nov)
+
+- [51: the five-state lifecycle, a reviewer's approval and the data owner's certification](51-the-five-state-lifecycle.md)
+- [52: approved changes reach the catalog as staged proposals its owner applies](52-approved-changes-reach-the-catalog-as-staged-proposals.md)
+- [53: drift becomes a new proposal, and the old entry is marked stale](53-drift-becomes-a-new-proposal.md)
+- [54: a column that turns sensitive is erased from every export and the ledger](54-erasure-when-a-column-turns-sensitive.md)
+- Review beside the host happens on the host's Ontology page and routes (the host's to build);
+  standalone, on this side's command line and workbench, which ticket 51 gives the
+  certification step.
