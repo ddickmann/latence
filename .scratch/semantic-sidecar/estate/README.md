@@ -25,7 +25,7 @@ PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests          # a toy estate wit
 | `estate/induce.py` | concepts, relations, value sets, hierarchies, attributes, measure bindings, each with signals and support |
 | `estate/ledger.py` | assertions and decisions, append-only; the layer is their replay |
 | `estate/export.py` | the `graph-export/3` file; its JSON Schema and the table of codes are in `schemas/` |
-| `estate/proposal.py` | the proposal file for a host's semantic layer, written from approved decisions, and the host's receipt read back; the file's shape is `schemas/proposal-file.schema.json` |
+| `estate/proposal.py` | a thin call into the repository's package `latence-proposal-writer` (`packages/latence-proposal-writer`), which writes the proposal file for a host's semantic layer from approved decisions and reads the host's receipt back; the file's shape is that package's `schema/proposal-file.schema.json` |
 | `estates/vehicles.yaml` | what the engine is told about the vehicle and warranty estate |
 
 A person's decisions go into `out/<estate>/decisions.jsonl`, one JSON object per line with

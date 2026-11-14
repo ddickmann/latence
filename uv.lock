@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
@@ -46,6 +46,7 @@ members = [
     "latence-pii-gliner",
     "latence-pii-gliner2",
     "latence-pii-presidio",
+    "latence-proposal-writer",
     "latence-relation-gliner",
     "latence-relation-llm",
     "latence-runner-airflow",
@@ -2133,6 +2134,7 @@ dependencies = [
     { name = "latence-parser-document" },
     { name = "latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext" },
+    { name = "latence-proposal-writer" },
     { name = "latence-source-sharepoint" },
     { name = "pyiceberg", extra = ["sql-sqlite"] },
 ]
@@ -2154,10 +2156,12 @@ observability = [
 [package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
+    { name = "jsonschema" },
     { name = "mypy" },
     { name = "packaging" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "types-jsonschema" },
 ]
 
 [package.metadata]
@@ -2173,6 +2177,7 @@ requires-dist = [
     { name = "latence-parser-document", editable = "packages/latence-parser-document" },
     { name = "latence-parser-pdfplumber", editable = "packages/latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext", editable = "packages/latence-parser-plaintext" },
+    { name = "latence-proposal-writer", editable = "packages/latence-proposal-writer" },
     { name = "latence-source-sharepoint", editable = "packages/latence-source-sharepoint" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5" },
     { name = "mkdocs-mermaid2-plugin", marker = "extra == 'docs'", specifier = ">=1.1" },
@@ -2184,10 +2189,12 @@ provides-extras = ["docs", "observability", "iceberg"]
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.100" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "packaging", specifier = ">=23.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.6" },
+    { name = "types-jsonschema", specifier = ">=4.20" },
 ]
 
 [[package]]
@@ -2441,6 +2448,17 @@ requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "presidio-analyzer", specifier = ">=2.2,<3" },
 ]
+
+[[package]]
+name = "latence-proposal-writer"
+version = "0.1.0"
+source = { editable = "packages/latence-proposal-writer" }
+dependencies = [
+    { name = "latence-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "latence-core", editable = "packages/latence-core" }]
 
 [[package]]
 name = "latence-relation-gliner"
@@ -6320,6 +6338,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/f7/68adc395201b20b872d68e975386832e8005ffeacedd43a1d837a32815be/typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e", size = 202097, upload-time = "2026-06-26T09:22:45.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/87/b9fd69c92c6102a066e1b86a35243f53e70bd4c709f2a26d9f4fee4f4dc0/typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c", size = 122564, upload-time = "2026-06-26T09:22:44.72Z" },
+]
+
+[[package]]
+name = "types-jsonschema"
+version = "4.26.0.20261006"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/d2/1f742605f5a6d39f993134885b8de41c98af606871d3ebddaf3e776bd1eb/types_jsonschema-4.26.0.20261006.tar.gz", hash = "sha256:3eb7db61b6819d40addfdaac7173e749071a7d4a9a4394f0c844598ec84b2500", size = 16843, upload-time = "2026-10-06T08:16:07.318Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/a0/4f2e3c0dc3d5cad958006f2e0307065cc8fe4fbf0393ff0b69d55ee9bbe5/types_jsonschema-4.26.0.20261006-py3-none-any.whl", hash = "sha256:29301f4e65e3928540cdf5e23ad716e38bb0c0b416a48dada213edd3d70206ec", size = 16113, upload-time = "2026-10-06T08:16:06.355Z" },
 ]
 
 [[package]]

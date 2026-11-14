@@ -15,6 +15,17 @@ history. It is large for that reason. When the first tag is cut (`docs/RELEASING
 becomes that release's section and the cadence starts from there; until then there is no cadence to
 report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
 
+### Added
+
+- **`latence-proposal-writer`, the optional adapter for a host's semantic layer
+  ([ADR-0070](docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).**
+  It writes the reviewable proposal file from a build's export and the decisions in force (two
+  value spellings a reviewer called the same, and the names of a master list's records; never
+  anything rejected, undecided, seeded, decided on another statement, or a link between records)
+  and reads the host's receipt (`layer-receipt/1`) back. It depends on `latence-core` only,
+  registers no Provider, and ships the file's JSON Schema. The estate prototype's writer moved
+  into it; the prototype's command now calls it and writes the same bytes. 31 packages.
+
 ### Removed
 
 - **The query-time retrieval tooling is gone (ADR-0068).** Four distributions leave the

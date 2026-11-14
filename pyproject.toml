@@ -59,6 +59,7 @@ latence-benchmark = { workspace = true }
 
 latence-console = { workspace = true }
 latence-demo = { workspace = true }
+latence-proposal-writer = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -133,6 +134,12 @@ dependencies = [
     # default CPU-first dev env and its offline/deterministic tests run. It registers NO
     # Provider entry point: it reads the files a run left behind, it never joins a Pipeline.
     "latence-console",
+
+    # The optional adapter for a host's semantic layer (ADR-0070, ticket 43): it writes the
+    # proposal file from a build's export and a person's decisions and reads the host's receipt
+    # back. ZERO new deps beyond latence-core, no model, no network, and it registers no Provider,
+    # so like latence-console it installs into the default dev env and its tests run offline.
+    "latence-proposal-writer",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
@@ -177,6 +184,11 @@ dev = [
     # group as well so ``latence env verify`` + its regression tests run in the plain workspace
     # env and in scripts/verify-local.sh without an extra install step.
     "packaging>=23.0",
+    # The proposal file's JSON Schema is held against what latence-proposal-writer writes, in its
+    # tests only (the shape is the host's; the schema is this side's statement of it). DEV-only,
+    # never a runtime dependency of any package; the stubs keep its tests under strict mypy.
+    "jsonschema>=4.20",
+    "types-jsonschema>=4.20",
 ]
 
 [tool.ruff]

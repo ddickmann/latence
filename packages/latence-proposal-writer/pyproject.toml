@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-proposal-writer"
+version = "0.1.0"
+description = "The optional adapter for a host's semantic layer (ADR-0070): writes the reviewable proposal file from the approved decisions of an ontology build, and reads back the receipt the host's tool writes when it has placed the file."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "ontology", "semantic-layer", "review", "proposal", "data-catalog"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+# Only the core, for its typed errors. The writer is pure standard library otherwise: it reads
+# an export (a dict), writes YAML text by hand so that the bytes are its own, and never imports
+# a host's code (ADR-0070, "No shared code").
+dependencies = [
+    "latence-core",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
+
+# Registers NOTHING under `latence.providers`: the writer is not a Stage. It runs after a build,
+# on the build's export and a person's decisions, and its output is a file a host reviews.
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_proposal_writer"]

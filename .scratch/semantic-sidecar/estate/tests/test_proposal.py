@@ -1,7 +1,9 @@
-"""The proposal file for a host's semantic layer (ticket 40): written from approved decisions
-only, never from anything seeded, rejected, undecided or decided on another statement; the
-same bytes for the same inputs; and the export says since which release of the host's library
-an element is in the layer only where a receipt says it was placed."""
+"""The proposal file for a host's semantic layer, through this prototype's build and command
+(tickets 40 and 43). The writer and its own tests are the package `latence-proposal-writer`;
+what stays here is what only a build shows: a seeded record and the machine's links stay out
+of a real build's file, the file is the same before and after a build applied the decisions
+(the package's rule for the value kept is the build's), the receipt reaches the export, and
+the command line."""
 
 from __future__ import annotations
 
@@ -15,13 +17,13 @@ import jsonschema
 import pytest
 import yaml
 
-from estate import cli
+import latence_proposal_writer
+from estate import cli, ledger
+from estate import proposal as module
 from estate.cli import build, propose
-from estate.ledger import claim_of
-from estate.proposal import proposal
 
 SCHEMAS = Path(__file__).resolve().parents[1] / "schemas"
-FILE_SCHEMA = json.loads((SCHEMAS / "proposal-file.schema.json").read_text(encoding="utf-8"))
+FILE_SCHEMA = latence_proposal_writer.schema()
 EXPORT_SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
 
 MAKERS = ("Alfa Works, Inc.", "Beta Motor Corp.", "Delt Cars", "Beta Motor of America", "Gama (GMA US LLC)", "Gama (GMA US, LLC)", "Alfa Works North")
@@ -107,54 +109,6 @@ def _origin(el: dict[str, Any], by: str = "reviewer-1", at: str = "2026-11-12") 
     return {"element": el["id"], "claim": el["claim"], "decision": {"verdict": "approved", "by": by, "at": at}}
 
 
-def test_an_approved_pair_and_an_approved_master_list_are_written_with_the_decision_they_rest_on(yard: dict[str, Any]) -> None:
-    build(**yard)
-    export = _export(yard)
-    alfa, dealers = _pair(export, "Alfa"), _concept(export, "concept:shop.dealers")
-    assert alfa["rows_a"] != alfa["rows_b"]  # one spelling carries more rows than the other
-    _decide(yard, _line(alfa), _line(dealers, by="owner-of-the-list", at="2026-11-13T09:30:00+01:00"))
-    report = propose(yard["config"], yard["out"])
-    text, doc = _file(yard)
-    jsonschema.validate(doc, FILE_SCHEMA)
-    assert doc["source"] == "ontology" and len(doc["entries"]) == 2
-    # The value kept is the one more rows carry; the object is the one that holds most of the value set, not the first by name.
-    assert doc["entries"][0] == {"spellings": {"object": "shop.recalls", "column": "maker", "value": "Alfa Works, Inc.", "forms": ["Alfa Works North"]},
-                                 "origin": _origin(alfa)}
-    assert doc["entries"][1] == {"names": {"object": "shop.dealers", "column": "dealer_id", "values": DEALERS},
-                                 "origin": _origin(dealers, by="owner-of-the-list", at="2026-11-13")}  # the day of a timestamp
-    assert all(isinstance(v, str) for v in doc["entries"][1]["names"]["values"].values())  # "0123" and "Yes" are names, not a number and a truth value
-    assert report["file"] == str(yard["out"] / "proposal.yaml")
-    assert report["entries"] == [
-        {"entry": 1, "kind": "spellings", "element": alfa["id"], "claim": alfa["claim"], "decided_by": "reviewer-1", "decided_on": "2026-11-12", "day_stated_by": "decision",
-         "object": "shop.recalls", "column": "maker", "value": "Alfa Works, Inc.", "forms": ["Alfa Works North"]},
-        {"entry": 2, "kind": "names", "element": "concept:shop.dealers", "claim": dealers["claim"], "decided_by": "owner-of-the-list", "decided_on": "2026-11-13", "day_stated_by": "decision",
-         "object": "shop.dealers", "column": "dealer_id", "records": 30}]
-    assert report["stale"] == [] and report["not_written"] == [] and report["not_carried"] == {}
-    # The estate file may name the object a value set's spellings are stated on.
-    yard["config"].write_text(yaml.safe_dump({**ESTATE, "propose": {"names": ["shop.dealers"], "spellings_on": {"maker": "shop.claims"}}}), encoding="utf-8")
-    propose(yard["config"], yard["out"])
-    assert _file(yard)[1]["entries"][0]["spellings"]["object"] == "shop.claims"
-    yard["config"].write_text(yaml.safe_dump({**ESTATE, "propose": {"spellings_on": {"maker": "shop.dealers"}}}), encoding="utf-8")
-    with pytest.raises(ValueError, match="shop.dealers does not hold the value set maker"):
-        propose(yard["config"], yard["out"])
-
-
-def test_a_rejected_or_undecided_element_is_in_no_proposal(yard: dict[str, Any]) -> None:
-    build(**yard)
-    export = _export(yard)
-    alfa, beta, gama, dealers = _pair(export, "Alfa"), _pair(export, "Beta"), _pair(export, "Gama"), _concept(export, "concept:shop.dealers")
-    assert gama["claim"]  # the third pair is listed and nobody decides it
-    _decide(yard, _line(beta), _line(alfa), _line(dealers, verdict="rejected"), _line(beta, verdict="rejected"))  # the last decision on an element is the one in force
-    for rebuilt in (False, True):  # the same whether or not a build has applied the decisions since
-        if rebuilt:
-            build(**yard)
-        report = propose(yard["config"], yard["out"])
-        text, doc = _file(yard)
-        assert [e["origin"]["element"] for e in doc["entries"]] == [alfa["id"]]
-        assert "Beta" not in text and "Gama" not in text and "Dealer" not in text and "names:" not in text
-        assert [e["element"] for e in report["entries"]] == [alfa["id"]] and report["not_written"] == [] and report["stale"] == []
-
-
 RESOLVED = {"kind": "name", "code": "name.same_core", "params": {}, "ref": ""}
 
 
@@ -209,27 +163,6 @@ def test_a_seeded_record_and_a_link_certified_on_simulated_labels_are_in_no_prop
     assert seen[0] == seen[1]
 
 
-def test_an_entry_whose_decisions_claim_no_longer_matches_the_build_is_listed_as_stale_and_not_written(yard: dict[str, Any]) -> None:
-    build(**yard)
-    export = _export(yard)
-    alfa, beta, dealers = _pair(export, "Alfa"), _pair(export, "Beta"), _concept(export, "concept:shop.dealers")
-    # The list was approved when it was keyed on another column; the pair's line carries the claim of another element.
-    then = claim_of("concept", {**dealers, "key": ["dealer_no"]})
-    assert then != dealers["claim"]
-    _decide(yard, _line(dealers, claim=then), _line(alfa, claim=beta["claim"]), _line(beta))
-    for rebuilt in (False, True):
-        if rebuilt:
-            applied: Any = build(**yard)["decisions"]
-            assert [s["subject"] for s in applied["stale"]] == ["concept:shop.dealers", alfa["id"]]  # the build says the same
-        report = propose(yard["config"], yard["out"])
-        text, doc = _file(yard)
-        assert [e["origin"]["element"] for e in doc["entries"]] == [beta["id"]]
-        assert "Alfa" not in text and "Dealer" not in text
-        assert report["stale"] == [{"subject": "concept:shop.dealers", "decided_on": then, "now": dealers["claim"]},
-                                   {"subject": alfa["id"], "decided_on": beta["claim"], "now": alfa["claim"]}]
-        assert report["not_written"] == []
-
-
 def test_two_runs_on_the_same_inputs_give_the_same_bytes_whatever_order_the_decisions_were_written_in(yard: dict[str, Any]) -> None:
     build(**yard)
     export = _export(yard)
@@ -247,57 +180,6 @@ def test_two_runs_on_the_same_inputs_give_the_same_bytes_whatever_order_the_deci
     propose(yard["config"], yard["out"])
     assert (yard["out"] / "proposal.yaml").read_bytes() == first
     assert first.endswith(b"\n") and b"\r" not in first and first.decode("utf-8")  # one line ending, UTF-8
-
-
-def test_a_kept_value_never_rests_on_a_decision_that_is_not_written() -> None:
-    def pair(a: str, b: str, rows_a: int, rows_b: int, became: str) -> dict[str, Any]:
-        el = {"id": f"same:maker:{a}~{b}", "kind": "possibly_same", "concept": "concept:value:maker", "a": f"value:maker:{a}", "b": f"value:maker:{b}",
-              "rows_a": rows_a, "rows_b": rows_b, "merged_into": f"value:maker:{became}"}
-        return {**el, "claim": claim_of("possibly_same", el)}
-
-    # Three spellings, two approved pairs. A build that applied both made all three one value: the third name, which most rows carry.
-    first, second = pair("Ab Cars", "Ab Cars Inc", 5, 4, "Ab Cars International"), pair("Ab Cars Inc", "Ab Cars International", 4, 20, "Ab Cars International")
-    export = {"concepts": [{"id": "concept:value:maker", "kind": "reference", "column": "maker", "objects": ["s.a", "s.b"], "claim": "0" * 16}],
-              "relations": [], "measures": [], "nodes": [], "review": [first, second]}
-    decisions = {first["id"]: _line(first), second["id"]: _line(second, at=None)}  # the second decision states no day
-    document, report = proposal(export, decisions)
-    # Only the first pair is written, so its value is one of its own two names: nothing in the file says the third is the same.
-    assert [e["spellings"] for e in document["entries"]] == [{"object": "s.a", "column": "maker", "value": "Ab Cars", "forms": ["Ab Cars Inc"]}]
-    assert "International" not in json.dumps(document) and report["not_written"] == [{"subject": second["id"], "why": "no_day"}]
-    # With both written, both say what the build says.
-    document, _ = proposal(export, decisions, decided_on="2026-11-12")
-    assert [(e["spellings"]["value"], e["spellings"]["forms"]) for e in document["entries"]] == [
-        ("Ab Cars International", ["Ab Cars Inc"]), ("Ab Cars International", ["Ab Cars", "Ab Cars Inc"])]
-
-
-def test_a_decision_that_states_no_day_or_no_claim_is_not_written_and_a_day_is_never_made_up(yard: dict[str, Any]) -> None:
-    build(**yard)
-    export = _export(yard)
-    alfa, dealers = _pair(export, "Alfa"), _concept(export, "concept:shop.dealers")
-    _decide(yard, _line(alfa, at=None), _line(dealers, claim=None))  # as the page writes a line today, and as a line written by hand may be
-    report = propose(yard["config"], yard["out"])
-    assert _file(yard)[1] == {"source": "ontology", "entries": []}
-    assert report["entries"] == [] and report["not_written"] == [{"subject": "concept:shop.dealers", "why": "no_claim"}, {"subject": alfa["id"], "why": "no_day"}]
-    # Whoever runs the command may state the day for the decisions that state none; the report says where the day came from.
-    report = propose(yard["config"], yard["out"], decided_on="2026-11-14")
-    assert _file(yard)[1]["entries"][0]["origin"] == _origin(alfa, at="2026-11-14")
-    assert report["entries"][0]["day_stated_by"] == "command" and report["not_written"] == [{"subject": "concept:shop.dealers", "why": "no_claim"}]
-    with pytest.raises(ValueError, match="no ISO date"):
-        propose(yard["config"], yard["out"], decided_on="14 Nov")
-    _decide(yard, _line(alfa, at="yesterday"))
-    with pytest.raises(ValueError, match="no ISO date"):
-        propose(yard["config"], yard["out"])
-
-
-def test_what_the_estate_file_does_not_name_and_what_the_file_has_no_entry_for_is_counted_and_not_written(yard: dict[str, Any]) -> None:
-    yard["config"].write_text(yaml.safe_dump({k: v for k, v in ESTATE.items() if k != "propose"}), encoding="utf-8")
-    build(**yard)
-    export = _export(yard)
-    dealers, relation = _concept(export, "concept:shop.dealers"), next(r for r in export["relations"] if r["status"] == "proposed")
-    _decide(yard, _line(dealers), _line(relation), {"subject": "concept:shop.gone", "verdict": "approved", "by": "reviewer-1", "claim": "0" * 16, "at": "2026-11-12"})
-    report = propose(yard["config"], yard["out"])
-    assert _file(yard)[1]["entries"] == []  # a reviewer's approval of a concept does not by itself send its rows' names anywhere
-    assert report["not_carried"] == {"concept": 1, "relation": 1} and report["not_written"] == [{"subject": "concept:shop.gone", "why": "not_in_the_build"}]
 
 
 def _receipt(path: Path, version: str, placed: list[tuple[dict[str, Any], str | None]], already: tuple[dict[str, Any], ...] = (),
@@ -351,3 +233,11 @@ def test_the_command_line_writes_the_file_and_prints_what_it_wrote(yard: dict[st
     assert yaml.safe_load((tmp_path / "for-the-host.yaml").read_text(encoding="utf-8"))["entries"][0]["origin"]["decision"]["at"] == "2026-11-12"
     with pytest.raises(SystemExit, match="no build in"):
         propose(yard["config"], tmp_path / "nothing-built")
+
+
+def test_the_prototype_calls_the_package_and_states_the_same_kinds_of_element() -> None:
+    """The writer is the package's (ticket 43): this module only names the command. The kinds
+    of element the file has no entry for are the ledger's, so the two lists must agree."""
+    assert module.proposal is latence_proposal_writer.proposal
+    assert module.read_receipts is latence_proposal_writer.read_receipts and module.in_layer is latence_proposal_writer.in_layer
+    assert latence_proposal_writer.STRUCTURE_KINDS == ledger.STRUCTURE_KINDS and latence_proposal_writer.CLASS_KINDS == ledger.CLASS_KINDS

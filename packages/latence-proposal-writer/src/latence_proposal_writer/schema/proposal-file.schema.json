@@ -1,7 +1,7 @@
 {
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "title": "proposal file: what a reviewed ontology hands to a host's semantic layer",
- "description": "The file `python -m estate propose` writes (YAML; this schema is held against the file as read back). It is written from a host's description of the shape its own proposal tool reads, extended by two kinds of entry; the host's reader is the authority on that shape, and this schema describes only what this writer writes. Every entry names where it goes by a catalog object and a column, and carries the decision it rests on. Nothing else is written: no mark such as `seeded` or `certified_on` exists here, because what would carry one is never written.",
+ "description": "The file `latence_proposal_writer` writes (YAML; this schema is held against the file as read back). It is written from a host's description of the shape its own proposal tool reads, extended by two kinds of entry; the host's reader is the authority on that shape, and this schema describes only what this writer writes. Every entry names where it goes by a catalog object and a column, and carries the decision it rests on. Nothing else is written: no mark such as `seeded` or `certified_on` exists here, because what would carry one is never written.",
  "type": "object",
  "required": ["source", "entries"],
  "additionalProperties": false,

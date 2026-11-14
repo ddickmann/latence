@@ -41,7 +41,7 @@ uv run metis-dev usage export \
 cd $LATENCE/.scratch/semantic-sidecar/estate
 python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
 python3.12 -m venv ../spike/.venv && ../spike/.venv/bin/pip install -q -r ../spike/requirements-link.txt
-PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 124 pass
+PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 119 pass
 ```
 
 **4. The seeded second source, the build, the export**
@@ -160,8 +160,10 @@ placements, pairs of names), press *Download decisions*, and put the file at
 ## The proposal file for the host's semantic layer
 
 The one way anything a review approved reaches the host's semantic layer (ADR-0070).
-`estate propose` writes `out/vehicles/proposal.yaml`; its shape is
-`schemas/proposal-file.schema.json`, written from the host's description of what its tool reads.
+`estate propose` writes `out/vehicles/proposal.yaml` through the repository's package
+`latence-proposal-writer` (installed by `requirements.txt` from this checkout); the file's
+shape is that package's `schema/proposal-file.schema.json`, written from the host's description
+of what its tool reads.
 
 - **What is in it.** For every approved pair of names of a value set: the value kept and its
   other spelling, stated on a catalog object and column (`spellings`). For every approved
