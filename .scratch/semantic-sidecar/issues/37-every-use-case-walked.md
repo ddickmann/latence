@@ -78,3 +78,12 @@ a real model does not write it.
 ## From the map (moved 12 Nov)
 
 Route table row: every use case walked in a browser; defects fixed | AFK | 36
+
+## State (14 Nov): the acceptance run passed; the host's Postgres tests, see below
+
+- **The acceptance run** (`acceptance.spec.ts`, `npm run e2e:acceptance` with
+  `playwright.acceptance.config.ts`), on the host's integration head `c883b5d2`, in a throwaway
+  clone of the host's checkout (the checkout itself was only read), the acceptance world built
+  on the scenarios' scripts on its own port and state folder: **2 of 2 pass** (en and de, 3.2 min
+  with the world's build), every screen with axe's WCAG 2.2 AA rules: 0 violations on 10 screens.
+  No defect, so nothing for the table above.
