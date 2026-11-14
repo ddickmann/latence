@@ -59,8 +59,12 @@ not taken.
   check still refuses `aliases` on a row of a concept that is no value set and a pair whose
   `merged_into` names a row the export does not hold. Against the first rule it was red (the
   four refusals above).
-- **Still to do:** run the vehicle estate's decided export against the host's own guard once its
-  fix is on the integration line; this side's tests stay as the proof until then.
+- **Done (14 Nov): the host's own corrected guard passes the decided vehicle export.** The guard
+  (`metis_service/ontology_export.py`) at the host's staging head `77f96a74` (its fix is commit
+  `01725af5`), copied read-only out of the host's checkout as before, against the vehicle
+  estate's export built with the page's decisions, the Kia and Chrysler "same value" pairs among
+  them (both listed with `merged_into`): **0 refusals**. The same export against the guard at
+  `4f44ae84`: the 4 refusals above. This side's check says 0 as well.
 
 Reproduction (this side): build the vehicle estate as in block 4, append two approved lines on
 `same:manufacturer:Kia America, Inc.~Kia Motors America` and
