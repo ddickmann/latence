@@ -86,7 +86,7 @@ class Decisions:
             return None
         self._stale.pop(el["id"], None)
         self._applied[el["id"]] = d["verdict"]
-        return {k: d[k] for k in ("verdict", "by", "reason") if k in d}
+        return {k: d[k] for k in ("verdict", "by", "reason", "calibration") if k in d}
 
     def rejected(self, kind: str, el: dict[str, Any]) -> bool:
         v = self.verdict(kind, el)
@@ -96,6 +96,10 @@ class Decisions:
         """The element with the decision in force on it, if there is one."""
         v = self.verdict(kind, el)
         return {**el, "decision": v} if v is not None else el
+
+    def applied(self) -> dict[str, str]:
+        """The verdict applied on each element this build asked about."""
+        return dict(self._applied)
 
     def summary(self) -> dict[str, Any]:
         seen = set(self._applied) | set(self._stale) | self._bare

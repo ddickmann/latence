@@ -28,6 +28,7 @@ from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
+from .lifecycle import calibrated, engine_approvals, read_certifications, with_states
 from .pair_voice import OpenAIPairClient, ask_about_pairs, rule_of
 from .proposal import in_layer, proposal, read_receipts, to_yaml
 from .reader import Reader
@@ -104,7 +105,12 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
     if link and not all(spec["object"] in names for spec in link["records"]):
         link = None  # the second source is not in this estate (the mirror without the seed)
     out.mkdir(parents=True, exist_ok=True)
-    decisions = Decisions(read_decisions(out / "decisions.jsonl"))
+    # The engine approves a kind only where a recorded calibration proves it safe (ticket 51);
+    # a person's decision outranks it.
+    life_cfg = cfg.get("lifecycle") or {}
+    safe, calibrations_refused = calibrated(list(life_cfg.get("auto_approve") or []))
+    by_people = read_decisions(out / "decisions.jsonl")
+    decisions = Decisions({**engine_approvals(model, safe, by_people), **by_people})
     layer = replay(model, decisions)
     instances = build_instances(reader, layer, tuple(cfg.get("personal_objects", ())), tuple(cfg.get("resolve", ())), shown,
                                 also={spec["object"]: spec["name"] for spec in link["records"][1:]} if link else None,
@@ -173,6 +179,9 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                           language=cfg.get("language", "en"), proposal_names=tuple((cfg.get("propose") or {}).get("names", ())),
                           lineage=lineage, lineage_outside=lineage_outside)
     export, taken_up = in_layer(export, read_receipts(receipts))
+    shown = {el["id"] for part in (export["concepts"], export["relations"], export["measures"], export["review"]) for el in part}
+    export, life = with_states(export, read_certifications(out / "certifications.jsonl"), life_cfg.get("data_owner"),
+                               [s for s, v in decisions.applied().items() if v == "rejected" and s not in shown])
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
@@ -182,6 +191,7 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                         "own_classes": len(classes["classes"]), "unplaced": len(classes["unplaced"]), "hosted_call": call_note},
             "resolution": instances["meta"].get("resolution") or resolution_note,
             **({"in_layer": taken_up} if receipts else {}),
+            "lifecycle": {**life, "calibrations_refused": calibrations_refused},
             **({"pair_model": (instances["meta"].get("resolution") or {}).get("pair_model")} if (instances["meta"].get("resolution") or {}).get("pair_model") else {})}
 
 
@@ -202,6 +212,24 @@ def propose(config: Path, out: Path, file: Path | None = None,
     target = file or out / "proposal.yaml"
     target.write_text(to_yaml(document, cfg["name"]), encoding="utf-8")
     return {"file": str(target), **report}
+
+
+def certify(out: Path, subject: str, by: str, at: str) -> dict[str, Any]:
+    """Append the data owner's certification of an element, on the statement the build's export
+    makes now (its claim), to ``certifications.jsonl``. Whether it stands (the right person, an
+    element approved, the same statement) is the next build's to say."""
+    if not (out / "ontology.json").exists():
+        raise SystemExit(f"no build in {out}: run `build` first, then `certify`")
+    export = json.loads((out / "ontology.json").read_text(encoding="utf-8"))
+    groups = [export["concepts"], export["relations"], export["measures"], export["review"]]
+    element = next((el for part in groups for el in part if el["id"] == subject), None)
+    if element is None:
+        raise SystemExit(f"{subject} is no element of the build in {out}")
+    day = str(at)[:10]
+    line = {"subject": subject, "by": by, "claim": element["claim"], "at": day}
+    with open(out / "certifications.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+    return line
 
 
 def compare(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +325,11 @@ def main() -> None:
     pr.add_argument("--decided-on",
                     help="the day (YYYY-MM-DD) of the approved decisions that state none; "
                          "without it such a decision is not written")
+    ce = sub.add_parser("certify", help="the data owner certifies an approved element of a build (ticket 51)")
+    ce.add_argument("--out", type=Path, required=True, help="the build folder that holds ontology.json")
+    ce.add_argument("--subject", required=True, help="the element's id")
+    ce.add_argument("--by", required=True, help="the data owner's id, as the estate file names them")
+    ce.add_argument("--at", required=True, help="the day of the certification (YYYY-MM-DD)")
     a = ap.parse_args()
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
@@ -309,6 +342,8 @@ def main() -> None:
     elif a.cmd == "propose":
         report = propose(a.config, a.out, a.file, a.decided_on)
         print(json.dumps(report, indent=1, ensure_ascii=False))
+    elif a.cmd == "certify":
+        print(json.dumps(certify(a.out, a.subject, a.by, a.at), indent=1, ensure_ascii=False))
     elif a.cmd == "build":
         print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage), catalog=a.catalog,
                                receipts=tuple(a.receipt)), indent=1))
