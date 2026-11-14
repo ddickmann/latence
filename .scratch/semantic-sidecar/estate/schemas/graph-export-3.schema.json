@@ -891,6 +891,52 @@
      }
     }
    }
+  },
+  "mentions": {
+   "description": "Mentions of the estate's rows in its documents (ticket 42): a half-open character span of a document, linked to the one row it names, or to its candidates where two rows carry the name. Absent without documents.",
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "document",
+     "digest",
+     "start",
+     "end",
+     "text"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "document": {
+      "type": "string"
+     },
+     "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+     },
+     "start": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "end": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "text": {
+      "type": "string",
+      "minLength": 3
+     },
+     "node": {
+      "type": "string"
+     },
+     "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
   }
  },
  "$defs": {

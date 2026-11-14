@@ -30,6 +30,7 @@ from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .drift import find_drift, prior_statements
 from .erasure import erase, turned_sensitive
+from .mentions import find_mentions
 from .lifecycle import calibrated, engine_approvals, read_certifications, with_states
 from .pair_voice import OpenAIPairClient, ask_about_pairs, rule_of
 from .proposal import in_layer, proposal, read_receipts, to_yaml
@@ -41,6 +42,7 @@ from .staged import staged_statements, to_sql
 from .resolution import merge, pair_answers, run_resolver, write_records
 from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .structure import broader_edges, build_structure, explain_review
+from .standards import to_prov, to_shacl
 from .turtle import to_turtle
 from .usage import attach, read_usage
 
@@ -62,7 +64,7 @@ def read_verified(path: Path, objects: set[str]) -> list[tuple[str, str]]:
 def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: Path | None, out: Path,
           resolver: Path | None = None, hosted_model: bool = False, class_answer: Path | None = None, max_usd: float = 0.25,
           client: object | None = None, usage: tuple[Path, ...] = (), catalog: str | None = None,
-          receipts: tuple[Path, ...] = (), pair_client: object | None = None) -> dict[str, object]:
+          receipts: tuple[Path, ...] = (), pair_client: object | None = None, documents: Path | None = None) -> dict[str, object]:
     """The estate is read from a DuckDB mirror (``duckdb_path``) or from Unity Catalog
     (``catalog``; host, warehouse and credentials from the environment). ``receipts`` are what
     a host wrote when it placed a proposal file: an approved element they name says in the
@@ -206,8 +208,15 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
                                [s for s, v in decisions.applied().items() if v == "rejected" and s not in shown])
     if drifted:
         export = {**export, "drift": drifted}
+    mention_counts = None
+    if documents is not None:  # the estate's documents, their mentions linked to its rows (ticket 42)
+        mentions, mention_counts = find_mentions(export, documents)
+        export = {**export, "mentions": mentions, "meta": {**export["meta"], "mentions": mention_counts}}
     (out / "ontology.json").write_text(json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out / "ontology.ttl").write_text(to_turtle(export, cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")), encoding="utf-8")
+    base = cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")
+    (out / "ontology.ttl").write_text(to_turtle(export, base), encoding="utf-8")
+    (out / "ontology.shacl.ttl").write_text(to_shacl(export, base), encoding="utf-8")  # ticket 42
+    (out / "ontology.prov.ttl").write_text(to_prov(export, base), encoding="utf-8")
     return {"new_assertions": new, **export["meta"]["counts"], "decisions": export["meta"]["decisions"],
             "nodes": instances["meta"]["nodes"], "edges": instances["meta"]["edges"], "review_items": instances["meta"]["review_items"],
             "structure": {k: len(v) for k, v in export["structure"].items()},
@@ -218,6 +227,7 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
             "lifecycle": {**life, "calibrations_refused": calibrations_refused},
             **({"drift": drifted} if drifted else {}),
             **({"erased": erased} if erased else {}),
+            **({"mentions": mention_counts} if mention_counts is not None else {}),
             **({"pair_model": (instances["meta"].get("resolution") or {}).get("pair_model")} if (instances["meta"].get("resolution") or {}).get("pair_model") else {})}
 
 
@@ -337,6 +347,7 @@ def main() -> None:
     b.add_argument("--hosted-model", action="store_true", help="let a hosted language model propose classes and definitions from names (the estate file must allow it)")
     b.add_argument("--class-answer", type=Path, help="a recorded answer to classes_prompt.json, in place of a call to a hosted model")
     b.add_argument("--usage", type=Path, action="append", default=[], help="a log of answered questions (usage/1); repeat for more")
+    b.add_argument("--documents", type=Path, help="a folder of the estate's documents (.txt, .md): their mentions of its rows are linked")
     b.add_argument("--receipt", type=Path, action="append", default=[],
                    help="what a host wrote when it placed a proposal file (layer-receipt/1); "
                         "repeat for more, oldest first")
@@ -393,7 +404,7 @@ def main() -> None:
         print(json.dumps(certify(a.out, a.subject, a.by, a.at), indent=1, ensure_ascii=False))
     elif a.cmd == "build":
         print(json.dumps(build(a.config, a.duckdb, a.metric_views, a.verified, a.out, a.resolver, a.hosted_model, a.class_answer, a.max_usd, usage=tuple(a.usage), catalog=a.catalog,
-                               receipts=tuple(a.receipt)), indent=1))
+                               receipts=tuple(a.receipt), documents=a.documents), indent=1))
     else:
         a.ui_dir.mkdir(parents=True, exist_ok=True)
         for name in UI_FILES:

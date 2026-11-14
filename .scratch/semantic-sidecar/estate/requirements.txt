@@ -3,6 +3,7 @@ PyYAML==6.0.3
 jsonschema==4.25.1
 pytest==8.4.2
 rdflib==7.6.0  # tests only: the Turtle export is parsed back
+pyshacl==0.30.1  # tests only: the SHACL export is validated as SHACL and against data
 # openai==3.49.0  # only for `build --hosted-model`; tests use a stand-in client
 # The proposal writer is the repository's optional adapter package (ticket 43), installed from
 # this checkout with the core it depends on (paths relative to this folder, where the command

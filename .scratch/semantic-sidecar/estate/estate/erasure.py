@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-REWRITTEN = ("ontology.json", "ontology.ttl")  # the build writes these again from what it reads now
+REWRITTEN = ("ontology.json", "ontology.ttl", "ontology.shacl.ttl", "ontology.prov.ttl")  # the build writes these again from what it reads now
 
 
 def turned_sensitive(prior: dict[str, list[dict[str, Any]]], objects: dict[str, dict[str, bool]]) -> dict[str, list[str]]:
