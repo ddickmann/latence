@@ -6,7 +6,9 @@ anything it cannot check (another format, a concept that does not say what its r
 an attribute that does not say whether it is personal).
 
 The rules are checked here as the host states them, by code of this side's own: no code of the
-host is in this repository."""
+host is in this repository. With the host's correction of 14 Nov (its ticket 238, option A of
+this side's ticket 46): a row of a value set may carry ``aliases`` (its other spellings), and a
+pair's end may name a row the pair's ``merged_into`` says it became, where the export holds it."""
 
 from __future__ import annotations
 
@@ -18,8 +20,10 @@ from estate.cli import build
 
 from .conftest import SENSITIVE
 from .test_ledger_export import project  # noqa: F401  (the fixture)
+from .test_proposal import yard  # noqa: F401  (the fixture)
 
 ROW_FIELDS = {"id", "concept", "label", "key", "rows"}
+VALUE_ROW_FIELDS = ROW_FIELDS | {"aliases"}
 ROWS_MAY_HOLD = {"available", "withheld_personal", "without_personal_columns"}
 
 
@@ -42,8 +46,9 @@ def what_a_host_refuses(export: dict[str, Any]) -> list[str]:
     for n in export["nodes"]:
         rows[n["id"]] = n
         c = concepts.get(n["concept"])
-        if set(n) - ROW_FIELDS:
-            why.append(f"a row of {n['concept']} carries {sorted(set(n) - ROW_FIELDS)}")
+        allowed = VALUE_ROW_FIELDS if c is not None and c.get("kind") == "reference" else ROW_FIELDS
+        if set(n) - allowed:
+            why.append(f"a row of {n['concept']} carries {sorted(set(n) - allowed)}")
         if c is None:
             why.append(f"a row of {n['concept']}, which is no concept of the export")
         elif c.get("instances") == "withheld_personal":
@@ -54,7 +59,7 @@ def what_a_host_refuses(export: dict[str, Any]) -> list[str]:
             why.append(f"a value of {c['id']}, a personal column")
     named = [(f"edge {e['kind']}", e[end]) for e in export["edges"] for end in ("from", "to", "via") if isinstance(e.get(end), str)]
     pairs = [*export["review"], *(p for sample in (export.get("label_requests") or {}).values() for p in sample)]
-    named += [(f"pair {p['id']}", p[end]) for p in pairs for end in ("a", "b")]
+    named += [(f"pair {p['id']}", p[end]) for p in pairs for end in ("a", "b") if not (p[end] not in rows and p.get("merged_into") in rows)]
     for where, name in named:
         if name.startswith("concept:") and name not in concepts or not name.startswith("concept:") and name not in rows:
             why.append(f"{where} names what the export does not hold")
@@ -86,3 +91,25 @@ def test_a_build_passes_what_the_host_checks_before_it_serves_an_export(project:
     assert what_a_host_refuses(bad) == ["a row of concept:shop.owners, an object about persons"]
     first = export["nodes"][0]
     assert what_a_host_refuses({**export, "nodes": [{**first, "email": "x"}, *export["nodes"][1:]]}) == [f"a row of {first['concept']} carries ['email']"]
+
+
+def test_a_build_that_applied_a_persons_same_value_passes_too(yard: dict[str, Any]) -> None:
+    """The case that broke the first guard: two spellings a person called one value, applied by
+    the next build. The kept row carries the other spelling, and the decided pair names a row
+    that became the kept one."""
+    build(**yard)
+    export = json.loads((yard["out"] / "ontology.json").read_text(encoding="utf-8"))
+    alfa = next(r for r in export["review"] if r["a"].startswith("value:") and "Alfa" in r["id"])
+    (yard["out"] / "decisions.jsonl").write_text(json.dumps({"subject": alfa["id"], "verdict": "approved", "by": "reviewer-1", "claim": alfa["claim"]}) + "\n",
+                                                 encoding="utf-8")
+    build(**yard)
+    after = json.loads((yard["out"] / "ontology.json").read_text(encoding="utf-8"))
+    assert any("aliases" in n for n in after["nodes"]) and any("merged_into" in r for r in after["review"])  # what the first guard refused
+    assert what_a_host_refuses(after) == []
+    # Still refused: aliases on a row of a concept that is no value set, and a pair whose end became no row it holds.
+    dealer = next(n for n in after["nodes"] if n["concept"] == "concept:shop.dealers")
+    assert what_a_host_refuses({**after, "nodes": [*after["nodes"], {**dealer, "id": "shop.dealers:X", "aliases": ["y"]}]}) == [
+        "a row of concept:shop.dealers carries ['aliases']"]
+    gone = next(r for r in after["review"] if "merged_into" in r)
+    assert what_a_host_refuses({**after, "review": [{**r, "merged_into": "value:maker:nowhere"} if r is gone else r for r in after["review"]]}) == [
+        f"pair {gone['id']} names what the export does not hold"]

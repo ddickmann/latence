@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK, with one decision on the host's side
-Status: open: the check is built and an undecided build passes it (14 Nov); a build that applied a decision on two spellings does not, and which side changes is open for the owner
+Status: resolved on this side (14 Nov): the check is built and passes on a decided build under the host's corrected rule (option A, the host's ticket 238); open: one run against the host's guard once its fix is on the integration line
 Blocked by: nothing
 Emerges from: the host's ticket 238 (a guard on what an ontology export may hold), built on
 the host's side on 14 Nov
@@ -44,23 +44,23 @@ anything it cannot check (another format, a concept without `instances`, an attr
   The page, the receipt (`in_layer` sits on the pair) and the proposal file (it is written from
   the pair as listed) all rely on both, so dropping either from the export would break them.
 
-## Open for the owner (and the host's ticket 238)
+## Resolution (14 Nov): the host's guard is corrected (option A)
 
-Which side changes so that a decided pair of spellings can be shown?
+Decided on the host's side as a correction within the owner's rule, so no question for the owner:
+the host's guard allows `aliases` on a row of a value set (not over a sensitive column) and
+accepts a pair end whose pair's `merged_into` names a row the export holds. The host makes the
+change in its ticket 238. **The export contract stays as it is.** The other two ways (each
+spelling a row of its own with the merge as an edge; decided pairs left out of the export) were
+not taken.
 
-- **A. The host's guard allows both (recommended):** `aliases` on a row of a value set (the
-  names of the same value; the guard already refuses a value set over a personal column), and a
-  pair end that names a row the pair's `merged_into` says it became, where the export holds
-  that row. Nothing changes here; the two are what the page already reads.
-- **B. The export changes:** each spelling keeps its own row, with its own count, and the merge
-  is an edge between the two values. A contract change of `graph-export/3` that the page has to
-  learn, the receipt and the proposal writer to follow; more work on both sides for no gain in
-  what may be read.
-- **C. Decided pairs leave the export:** the page no longer shows what was decided, the receipt
-  cannot mark it, and the proposal file loses its spellings. Not recommended.
-
-Until it is decided, the demonstration's Ontology page is refused as soon as the owner applies
-the two manufacturer pairs and rebuilds (handoff block 8, then block 4 again).
+- This side's check (`what_a_host_refuses`) follows the corrected rule, and a third test,
+  `test_a_build_that_applied_a_persons_same_value_passes_too`, builds the yard estate, applies a
+  person's "same value" on two maker spellings and holds the export to it: it passes, and the
+  check still refuses `aliases` on a row of a concept that is no value set and a pair whose
+  `merged_into` names a row the export does not hold. Against the first rule it was red (the
+  four refusals above).
+- **Still to do:** run the vehicle estate's decided export against the host's own guard once its
+  fix is on the integration line; this side's tests stay as the proof until then.
 
 Reproduction (this side): build the vehicle estate as in block 4, append two approved lines on
 `same:manufacturer:Kia America, Inc.~Kia Motors America` and
