@@ -29,6 +29,7 @@ from .induce import induce
 from .instances import build_instances, merge_values
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .drift import find_drift, prior_statements
+from .erasure import erase, turned_sensitive
 from .lifecycle import calibrated, engine_approvals, read_certifications, with_states
 from .pair_voice import OpenAIPairClient, ask_about_pairs, rule_of
 from .proposal import in_layer, proposal, read_receipts, to_yaml
@@ -112,10 +113,18 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
     # a person's decision outranks it.
     life_cfg = cfg.get("lifecycle") or {}
     safe, calibrations_refused = calibrated(list(life_cfg.get("auto_approve") or []))
+    # A column that turned sensitive since an earlier build read it: its values are erased from
+    # the folder before anything here reads the folder (ticket 54).
+    prior = prior_statements(out / "assertions.jsonl", out / "ledger_builds.jsonl")
+    builds_so_far = (out / "ledger_builds.jsonl").read_text(encoding="utf-8").count("\n") if (out / "ledger_builds.jsonl").exists() else 0
+    previous = json.loads((out / "ontology.json").read_text(encoding="utf-8")) if (out / "ontology.json").exists() else None
+    erased = erase(out, previous, turned_sensitive(prior, {o.full_name: {c.name: c.sensitive for c in o.columns} for o in read_objects}),
+                   {str(c["column"]) for c in model["concepts"] if c.get("kind") == "reference"}, builds_so_far + 1)
+    prior = prior_statements(out / "assertions.jsonl", out / "ledger_builds.jsonl")
     by_people = read_decisions(out / "decisions.jsonl")
     # What drifted under a decided element since it was decided (ticket 53): the decision is
     # kept on the record as stale and not applied, so the element is a proposal again.
-    drifted = find_drift(by_people, model, prior_statements(out / "assertions.jsonl", out / "ledger_builds.jsonl"),
+    drifted = find_drift(by_people, model, prior,
                          {o.full_name: {c.name: c.type for c in o.columns} for o in read_objects})
     by_people = {k: v for k, v in by_people.items() if k not in {e["subject"] for e in drifted}}
     decisions = Decisions({**engine_approvals(model, safe, by_people), **by_people})
@@ -208,6 +217,7 @@ def build(config: Path, duckdb_path: Path | None, views: Path | None, verified: 
             **({"in_layer": taken_up} if receipts else {}),
             "lifecycle": {**life, "calibrations_refused": calibrations_refused},
             **({"drift": drifted} if drifted else {}),
+            **({"erased": erased} if erased else {}),
             **({"pair_model": (instances["meta"].get("resolution") or {}).get("pair_model")} if (instances["meta"].get("resolution") or {}).get("pair_model") else {})}
 
 
