@@ -30,6 +30,11 @@ Never written:
   differs): it is listed as stale;
 - an entry whose decision states no claim, or no day while none was given: nothing is made up.
 
+In version 2 a link between two records that a person approved is written too (``links``): the
+two records by object, key column, key and name. Never a link the machine accepted and no
+person approved (one certified on simulated labels is such a link), never one that holds a
+seeded record, and never one whose pair the build cannot state now (no claim to check it on).
+
 The file is YAML in block style with every text in double quotes, so that no reader takes a
 name for a number, a date or a truth value. The same inputs give the same bytes.
 """
@@ -45,6 +50,12 @@ from typing import Any
 from latence_core.errors import ConfigError
 
 SOURCE = "ontology"  # the kind of source the entries come from, as the host's layer records it
+# The versions of the file this writer writes. Version 1 is the host's proposal shape with the
+# two kinds of entry above and no ``version`` key; version 2 states ``version: "2"`` and adds
+# ``links``, a link between two records a person decided (ticket 45). A caller asks for 2 only
+# once the host's tool reads it.
+VERSIONS = (1, 2)
+SCHEMA_VERSION = VERSIONS[-1]
 COMMAND = "latence-proposal-writer"  # who wrote the file, as its opening comment says
 
 # The groups of the export a person can decide and this file has no entry for, by the key the
@@ -183,22 +194,37 @@ def kept_values(pairs: list[Mapping[str, Any]]) -> dict[str, str]:
             if standing(str(p["a"])) == standing(str(p["b"]))}
 
 
+def _decided_links(export: Mapping[str, Any]) -> dict[frozenset[str], str]:
+    """The pairs of records a build linked on a person's decision, with the claim of the pair
+    the build states on the edge."""
+    return {frozenset((str(e["from"]), str(e["to"]))): str(e["claim"])
+            for e in export.get("edges", [])
+            if e.get("kind") == "same_as" and e.get("decided_by") and e.get("claim")}
+
+
 def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any]],
              names_of: tuple[str, ...] = (), spellings_on: Mapping[str, str] | None = None,
-             decided_on: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+             decided_on: str | None = None,
+             version: int = 1) -> tuple[dict[str, Any], dict[str, Any]]:
     """The proposal file as data, and a report of what was written and what was not.
 
     ``export`` is a build's ``graph-export/3``; ``decisions`` the decisions in force, by
     element id. ``names_of`` are the master lists whose records' names may be written, beside
     those the export marks; ``spellings_on`` the object to state a value set's spellings on (by
     column); and ``decided_on`` the day of the approved decisions that state none (the day a
-    decision states, ``at``, a date or a timestamp, always wins).
+    decision states, ``at``, a date or a timestamp, always wins). ``version`` is the file's
+    version (``VERSIONS``); links between records are written from version 2 on.
 
     The report holds ``entries`` (one line per entry written), ``stale`` (approved on another
     statement), ``not_written`` (approved, with the reason: ``seeded``, ``no_claim``,
     ``no_day``, ``not_in_the_build``, ``no_records``) and ``not_carried`` (approved elements of
     a kind this file has no entry for, counted by kind)."""
+    if version not in VERSIONS:
+        raise ConfigError(f"this writer writes the proposal file in versions {VERSIONS}, "
+                          f"not in version {version}")
     given = _day(decided_on, "the command line") if decided_on else None
+    linked = _decided_links(export)
+    links: dict[str, tuple[str, str]] = {}  # element id -> the pair's two records
     concepts = {c["id"]: c for c in export["concepts"]}
     nodes = {n["id"]: n for n in export["nodes"]}
     seeded = {c["object_name"] for c in concepts.values()
@@ -251,8 +277,16 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                     origin_of(subject, d, pair["claim"])
             elif any(x.startswith(o + ":") for o in seeded for x in (pair["a"], pair["b"])):
                 held_back(subject, "seeded")
-            else:
+            elif version < 2:
                 carried_not("pair_of_records")
+            else:
+                ends = (str(pair["a"]), str(pair["b"]))
+                now = pair.get("claim") or linked.get(frozenset(ends))
+                if now is None:  # neither listed nor linked on a person's decision in this build
+                    held_back(subject, "not_in_the_build")
+                else:
+                    links[subject] = ends
+                    origin_of(subject, d, str(now))
         elif subject in concepts:
             concept = concepts[subject]
             if concept.get("seeded"):
@@ -268,7 +302,8 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
 
     # (the element, the entry's body under its kind, its line in the report)
     found: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-    pairs = sorted((p for p in export["review"] if p["id"] in ready), key=lambda p: str(p["id"]))
+    pairs = sorted((p for p in export["review"] if p["id"] in ready and p["id"] not in links),
+                   key=lambda p: str(p["id"]))
     became = kept_values(pairs)
     for pair in pairs:
         value_set = concepts[pair["concept"]]
@@ -294,6 +329,21 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
         found.append((subject, {"names": {**body, "values": dict(sorted(rows.items()))}},
                       {"kind": "names", **body, "records": len(rows)}))
 
+    for subject in sorted(s for s in ready if s in links):
+        records = []
+        for end in links[subject]:
+            node = nodes.get(end) or {}
+            owner = concepts.get(str(node.get("concept")))
+            if owner is None or "key" not in node or len(owner.get("key") or []) != 1:
+                break
+            records.append({"object": str(owner["object_name"]), "column": str(owner["key"][0]),
+                            "key": str(node["key"]), "name": str(node["label"])})
+        if len(records) != 2:
+            held_back(subject, "no_records")
+            continue
+        found.append((subject, {"links": {"records": records}},
+                      {"kind": "links", "records": 2, "objects": [r["object"] for r in records]}))
+
     entries: list[dict[str, Any]] = []
     written: list[dict[str, Any]] = []
     for number, (subject, entry, line) in enumerate(found, start=1):
@@ -308,4 +358,5 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
     report = {"entries": written, "stale": sorted(stale, key=lambda s: s["subject"]),
               "not_written": sorted(not_written, key=lambda s: s["subject"]),
               "not_carried": dict(sorted(not_carried.items()))}
-    return {"source": SOURCE, "entries": entries}, report
+    head = {"version": str(version)} if version > 1 else {}
+    return {**head, "source": SOURCE, "entries": entries}, report

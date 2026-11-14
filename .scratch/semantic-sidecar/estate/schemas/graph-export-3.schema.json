@@ -247,6 +247,10 @@
      },
      "decided_by": {
       "type": "string"
+     },
+     "claim": {
+      "description": "On a `same_as` link a person decided: the claim of the pair as its review item stated it, so that a decision can be checked on it once the pair is no longer listed.",
+      "$ref": "#/$defs/claim"
      }
     }
    }

@@ -26,8 +26,14 @@ export, count = in_layer(export, read_receipts((receipt_path,)))
   in the export). Each entry says where it goes
   by a catalog object and a column and carries its origin: the element, its claim, who approved
   it and on which day.
-- **Never written:** a rejected or undecided element; anything seeded; a link between records,
-  whoever made it; a decision made on another statement than the build now makes (reported as
+- **Versions** (`VERSIONS`, `SCHEMA_VERSION`): version 1, the default, is the shape above with no
+  `version` key. Version 2 (`proposal(..., version=2)`, `schema(2)`) states `version: "2"` and
+  adds `links`: a link between two records a person approved, both records by object, key
+  column, key and name. Ask for it only once the host's tool reads it; a reader of version 1
+  refuses such a file.
+- **Never written:** a rejected or undecided element; anything seeded; a link the machine
+  accepted and no person approved (one certified on simulated labels is such a link), and in
+  version 1 any link between records; a decision made on another statement than the build now makes (reported as
   `stale`); a decision that states no claim, or no day while none was given. The report says, for
   every approved decision not written, why.
 - **The file** is YAML in block style with every text in double quotes, so that no reader takes a

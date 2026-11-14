@@ -24,6 +24,7 @@ from typing import Any
 import duckdb
 
 from .codes import check
+from .ledger import claim_of
 from .reader import Reader
 
 COLUMNS = ("unique_id", "source_system", "entity_type", "name", "city", "postcode", "country", "industry", "reg_id", "cluster")
@@ -154,7 +155,10 @@ def merge(instances: dict[str, Any], resolution: dict[str, Any], link: dict[str,
     for other, master in sorted(by_person.items()):
         if other in known and master in known:
             pair = accepted.get(frozenset((other, master)))
+            # The pair the person decided, stated as its review item stated it: a proposal file
+            # checks the decision on it once the pair is no longer listed (ticket 45).
             edges.append({"from": other, "to": master, "kind": "same_as", "relation": None, "decided_by": said[frozenset((other, master))]["by"],
+                          "claim": claim_of("possibly_same", {"a": master, "b": other}),
                           **({"p": pair["p"], "evidence": pair["evidence"]} if pair else {"evidence": []})})
     for e in edges:
         linked += 1
