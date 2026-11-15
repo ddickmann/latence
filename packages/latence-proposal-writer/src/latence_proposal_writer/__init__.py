@@ -25,7 +25,8 @@ from .writer import (
 __all__ = ["CLASS_KINDS", "COMMAND", "RECEIPT", "SCHEMA_VERSION", "SOURCE", "STRUCTURE_KINDS",
            "VERSIONS", "in_layer", "kept_values", "proposal", "read_receipts", "schema", "to_yaml"]
 
-_SCHEMAS = {1: "proposal-file.schema.json", 2: "proposal-file-2.schema.json"}
+_SCHEMAS = {1: "proposal-file.schema.json", 2: "proposal-file-2.schema.json",
+            3: "proposal-file-3.schema.json"}
 
 
 def schema(version: int = 1) -> dict[str, Any]:

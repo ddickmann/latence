@@ -31,6 +31,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   a person confirms it (`latence-ontology rename`). Given a host's alias table, an element the
   table names by a platform id carries the host's key (`match`, `skos:exactMatch`), never one
   derived from a name; labels are `skos:prefLabel` and `skos:altLabel` with their language.
+- **`match`, `broader` and `labels` entries in the proposal file (`layer-proposal/3`).**
+  `latence-proposal-writer` writes them from approved decisions in the shapes the host's tool
+  reads: a match only with every named domain's data owner's certification and never as a close
+  match, a member's roll-up with what the data showed, a concept's words per language approved as
+  such; its `SCHEMA_VERSION` is 3 and its receipt reader marks what was placed.
 - **`latence-proposal-writer`, the optional adapter for a host's semantic layer
   ([ADR-0070](docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).**
   It writes the reviewable proposal file from a build's export and the decisions in force (two

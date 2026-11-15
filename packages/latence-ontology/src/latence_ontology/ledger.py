@@ -36,6 +36,9 @@ CLAIM_FIELDS: dict[str, tuple[str, ...]] = {
     "class": ("id", "parent"),
     "subclass": ("concept", "parent"),
     "possibly_same": ("a", "b"),
+    # A concept's words in one language (ticket 58): what a person reviews before they may go to
+    # a host's glossary. The concept's own claim does not cover its words.
+    "labels": ("id", "concept", "lang", "pref", "alt"),
 }
 UNORDERED = {("equivalent", "concepts")}
 

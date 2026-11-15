@@ -1,8 +1,10 @@
 """The receipt a host's tool writes when it has placed a proposal file, read back.
 
 An approved element the receipt lists as placed, on the claim the element still states, says
-since which release of the host's library it is in the layer (``in_layer``). What a receipt
-lists as already there or as refused says nothing about since when, and is not read.
+since which release of the host's library it is in the layer (``in_layer``): a concept, a
+pair, a step between value sets or an equivalence (the element of a ``broader`` or ``match``
+entry), and a concept's labels in one language (``labels.in_layer``, by language). What a
+receipt lists as already there or as refused says nothing about since when, and is not read.
 """
 
 from __future__ import annotations
@@ -46,9 +48,31 @@ def in_layer(export: Mapping[str, Any],
         approved = (el.get("decision") or {}).get("verdict") == "approved"
         return {**el, "in_layer": dict(release)} if release is not None and approved else el
 
+    def worded(c: dict[str, Any]) -> dict[str, Any]:
+        said = c.get("labels")
+        if not isinstance(said, Mapping):
+            return c
+        placed = {}
+        for lang, claim in sorted((said.get("claims") or {}).items()):
+            release = taken.get((f"labels:{c['id']}@{lang}", str(claim)))
+            approved = ((said.get("decisions") or {}).get(lang) or {}).get("verdict") == "approved"
+            if release is not None and approved:
+                placed[lang] = dict(release)
+        return {**c, "labels": {**said, "in_layer": placed}} if placed else c
+
     if not taken:
         return dict(export), 0
-    concepts = [marked(c) for c in export["concepts"]]
+    concepts = [worded(marked(c)) for c in export["concepts"]]
     review = [marked(r) for r in export["review"]]
+    structure = {
+        part: [marked(el) for el in els] if part in ("roll_ups", "equivalent") else els
+        for part, els in (export.get("structure") or {}).items()
+    }
     count = sum("in_layer" in el for el in concepts + review)
-    return {**export, "concepts": concepts, "review": review}, count
+    count += sum("in_layer" in el for part in ("roll_ups", "equivalent")
+                 for el in structure.get(part, []))
+    count += sum(len((c.get("labels") or {}).get("in_layer") or {}) for c in concepts)
+    out = {**export, "concepts": concepts, "review": review}
+    if "structure" in export:
+        out["structure"] = structure
+    return out, count

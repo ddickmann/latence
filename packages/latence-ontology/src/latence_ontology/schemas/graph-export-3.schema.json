@@ -1370,13 +1370,31 @@
     "alt"
    ],
    "additionalProperties": false,
-   "description": "skos:prefLabel (one per language) and skos:altLabel, each a text with its language (ticket 57).",
+   "description": "skos:prefLabel (one per language) and skos:altLabel, each a text with its language (ticket 57); per language the claim a person decides them on, the decision in force and, once a host placed them, its library and release (ticket 58).",
    "properties": {
     "pref": {
      "$ref": "#/$defs/texts"
     },
     "alt": {
      "$ref": "#/$defs/texts"
+    },
+    "claims": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/claim"
+     }
+    },
+    "decisions": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/decision"
+     }
+    },
+    "in_layer": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/in_layer"
+     }
     }
    }
   },

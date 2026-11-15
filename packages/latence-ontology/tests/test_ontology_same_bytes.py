@@ -2,8 +2,8 @@
 was meant to. ``PROTOTYPE`` holds the digests recorded from the estate prototype
 (`.scratch/semantic-sidecar/estate/estate/`) at the commit before the move; ``TOY`` and
 ``VEHICLES`` the digests of the files as they are now, re-recorded by the ticket that changed
-them: 57 added ``iri``, ``labels`` and ``match`` to the export and labels to the Turtle file, and
-nothing else (the export without those three fields is still the prototype's bytes, which the
+them: 57 added ``iri``, ``labels`` and ``match`` to the export and labels to the Turtle file, 58
+the labels' claims, and nothing else (the export without those three fields is still the prototype's bytes, which the
 toy estate's test checks on every run). The toy
 estate is built here on every run. The vehicle estate needs the host's mirror, its metric views,
 its usage log and its verified joins, which this repository does not hold, so its test runs when
@@ -37,14 +37,14 @@ PROTOTYPE = {
 ADDED_SINCE = ("iri", "labels", "match")  # ticket 57
 
 TOY = {
-    "ontology.json": "1aa92813e9bcda935caff33ebb83ca48a8a33605906c55789f3e1715338d2654",  # pragma: allowlist secret
+    "ontology.json": "123c4fa2f02fefba75047a74479618f839ed5040f4bb11a3dc46045cc379e469",  # pragma: allowlist secret
     "ontology.ttl": "31fa82f79d7864c4166fcc8f8eafb25eefafb277720fd8c270f85b9b25a5417b",  # pragma: allowlist secret
     "ontology.shacl.ttl": "45c9e8aeaa75c1032d3a0ea5362950257182daeb90a2fbde8182826e17ce59d9",  # pragma: allowlist secret
     "ontology.prov.ttl": "27eaf6b9ff8eff7809afa8709a76ad9b1338604ea53f2baa7c454c57798c6dd0",  # pragma: allowlist secret
 }
 
 VEHICLES = {
-    "ontology.json": "7908e24f1a183f315f05283bb76b238df2911f0f8001984e4b985148e0c7f536",  # pragma: allowlist secret
+    "ontology.json": "c7ad0afbbb6890b8d887e6e96841d3bfb22dcf19d9b8c7e51b6995ea58fb10d6",  # pragma: allowlist secret
     "ontology.ttl": "94da7765d4d71f9e745d0d7ad75f7247d3ed4c6ea4fed64fcfb6dc71c95bfd3f",  # pragma: allowlist secret
     "ontology.shacl.ttl": "cd661e923a370da7f7c44120be47618fb98a779e9ad1b269972e4a5a4f0b2afa",  # pragma: allowlist secret
     "ontology.prov.ttl": "3ffe9059465768154e6bcde294997b33d65bdc572c6560225a524bb40dc88038",  # pragma: allowlist secret

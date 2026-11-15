@@ -46,6 +46,26 @@ version 1, byte for byte as before. A link is written only where the host would 
 - the statements the person saw stated (no link without its evidence);
 - ``certified_on`` only as ``reviewer``, and only where the build's resolution says so.
 
+Three entries over concepts (ticket 58, the host's ticket 304 as the owner decided it on 15
+Nov) make a file ``format: layer-proposal/3``:
+
+- ``match``: an element that says two domains' columns are one concept (a value set whose
+  objects lie in two or more domains, or two value sets called equivalent across domains),
+  keyed to the host's key the build read from the host's alias table (the export's ``match``;
+  never derived from a name), with one ``{domain, object, column}`` per domain. A reviewer
+  approved it, and every domain it names is certified by that domain's data owner on the claim
+  it states now (``origin.certified``). Written only where the caller names the domains (by
+  schema, each with its data owner); a close match is never written (``close: false``).
+- ``broader``: an approved step between two value sets (a roll-up the data proved): one entry
+  per member of the finer set, naming the codes it rolls up to and what the data showed
+  (``support``: the member's rows and the share of them that carry those codes).
+- ``labels``: a concept's words in one language that a person approved as such (the element
+  ``labels:<concept id>@<language>``, decided on its own claim): its preferred label and its
+  other labels, on the object and column the host's dimension reads (a value set's column, or a
+  master list's key).
+
+A file with no such entry is version 2 or 1, byte for byte as before.
+
 The file is YAML in block style with every text in double quotes, so that no reader takes a
 name for a number, a date or a truth value. The same inputs give the same bytes.
 """
@@ -54,7 +74,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -64,9 +84,13 @@ SOURCE = "ontology"  # the kind of source the entries come from, as the host's l
 # The versions of the file. Version 1 states no ``format`` and holds spellings and names;
 # version 2 states ``format: layer-proposal/2`` and adds ``link`` entries (ticket 45, the
 # host's ticket 294). A file is version 2 only when it holds a link.
-VERSIONS = (1, 2)
+# Version 3 states ``format: layer-proposal/3`` and adds ``match``, ``broader`` and ``labels``
+# entries (ticket 58, the host's ticket 304); a file is version 3 only when it holds one.
+VERSIONS = (1, 2, 3)
 SCHEMA_VERSION = VERSIONS[-1]
 FORMAT_2 = "layer-proposal/2"
+FORMAT_3 = "layer-proposal/3"
+CONCEPT_ENTRIES = ("match", "broader", "labels")
 COMMAND = "latence-proposal-writer"  # who wrote the file, as its opening comment says
 
 # The groups of the export a person can decide and this file has no entry for, by the key the
@@ -115,7 +139,9 @@ def _lines(node: Mapping[str, Any] | list[Any], indent: int) -> list[str]:
                 out += [f"{pad}{_key(name)}:", *_lines(value, indent + 2)]
             elif isinstance(value, Mapping | list):
                 out.append(f"{pad}{_key(name)}: {'{}' if isinstance(value, Mapping) else '[]'}")
-            elif isinstance(value, int | float) and not isinstance(value, bool):
+            elif isinstance(value, bool):  # a truth value (a match's `close`), read as one
+                out.append(f"{pad}{_key(name)}: {'true' if value else 'false'}")
+            elif isinstance(value, int | float):
                 out.append(f"{pad}{_key(name)}: {json.dumps(value)}")  # a number, read as one
             else:
                 out.append(f"{pad}{_key(name)}: {_quoted(str(value))}")
@@ -224,10 +250,24 @@ def _linked_to(export: Mapping[str, Any]) -> dict[str, set[str]]:
     return out
 
 
+def _domain_of(obj: str, domains: Mapping[str, Mapping[str, Any]]) -> str | None:
+    """The domain an object (``<schema>.<table>``) lies in, by its schema."""
+    schema = obj.partition(".")[0]
+    found = [d for d, spec in sorted(domains.items()) if schema in (spec.get("schemas") or [])]
+    return found[0] if len(found) == 1 else None
+
+
+def _member_code(node_id: str, column: str) -> str:
+    return node_id.removeprefix(f"value:{column}:")
+
+
 def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any]],
              names_of: tuple[str, ...] = (), spellings_on: Mapping[str, str] | None = None,
              decided_on: str | None = None,
-             links: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
+             links: bool = True, concepts_too: bool = True,
+             domains: Mapping[str, Mapping[str, Any]] | None = None,
+             certifications: Sequence[Mapping[str, Any]] | None = None,
+             ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The proposal file as data, and a report of what was written and what was not.
 
     ``export`` is a build's ``graph-export/3``; ``decisions`` the decisions in force, by
@@ -236,12 +276,17 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
     column); and ``decided_on`` the day of the approved decisions that state none (the day a
     decision states, ``at``, a date or a timestamp, always wins). ``links=False`` writes no
     link, for a host whose tool reads version 1 only; the file is then version 1 whatever was
-    approved.
+    approved. ``concepts_too=False`` writes no ``match``, ``broader`` or ``labels`` entry, for a
+    host whose tool reads version 2 at most. ``domains`` are the estate's domains (``{name:
+    {schemas: [...], data_owner: <id>}}``), without which no ``match`` is written, and
+    ``certifications`` the data owners' certifications (``{subject, by, at, claim}``).
 
     The report holds ``entries`` (one line per entry written), ``stale`` (approved on another
     statement), ``not_written`` (approved, with the reason: ``seeded``, ``no_claim``,
     ``no_day``, ``not_in_the_build``, ``no_records``; for a link also ``one_object``,
-    ``master_not_in_the_file``, ``linked_elsewhere``, ``no_evidence``) and ``not_carried``
+    ``master_not_in_the_file``, ``linked_elsewhere``, ``no_evidence``; for a match also
+    ``no_key``, ``one_domain``, ``two_columns_in_a_domain``, ``not_certified``; for a step
+    ``no_members``) and ``not_carried``
     (approved elements of a kind this file has no entry for, counted by kind)."""
     given = _day(decided_on, "the command line") if decided_on else None
     decided_links = _decided_links(export)
@@ -258,6 +303,20 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
     not_written: list[dict[str, str]] = []
     not_carried: dict[str, int] = {}
     ready: dict[str, dict[str, str]] = {}  # element id -> the origin its entry will carry
+    structure = {el["id"]: el for part in (export.get("structure") or {}).values()
+                 if isinstance(part, list) for el in part if isinstance(el, Mapping)}
+    matched: list[str] = []  # the elements a match entry may be written for
+    stepped: list[str] = []  # the steps between value sets a broader entry may be written for
+    worded: dict[str, tuple[str, str]] = {}  # labels element -> (concept id, language)
+    known = domains or {}
+
+    def seeded_set(value_set: Mapping[str, Any]) -> bool:
+        return bool(seeded & set(value_set.get("objects") or ()))
+
+    def matchable(value_sets: list[Mapping[str, Any]]) -> bool:
+        """Whether the value sets lie in two domains or more (so that a match may be written)."""
+        named = {_domain_of(str(o), known) for v in value_sets for o in v.get("objects") or []}
+        return len(named - {None}) >= 2
 
     def held_back(subject: str, why: str) -> None:
         not_written.append({"subject": subject, "why": why})
@@ -280,6 +339,21 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
 
     for subject, d in sorted(decisions.items()):
         if d["verdict"] != "approved":
+            continue
+        if subject.startswith("labels:"):
+            concept_id, _, lang = subject.removeprefix("labels:").rpartition("@")
+            labelled = concepts.get(concept_id)
+            now = ((labelled or {}).get("labels") or {}).get("claims", {}).get(lang)
+            if labelled is None or now is None:
+                held_back(subject, "not_in_the_build")
+            elif labelled.get("seeded") or (labelled.get("kind") == "reference"
+                                            and seeded_set(labelled)):
+                held_back(subject, "seeded")
+            elif not concepts_too:
+                carried_not("labels")
+            else:
+                worded[subject] = (concept_id, lang)
+                origin_of(subject, d, str(now))
             continue
         if subject.startswith("same:"):
             pair = listed.get(subject)
@@ -309,6 +383,13 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                 else:
                     pending[subject] = (ends[0], ends[1], pair if pair.get("claim") else edge)
                     origin_of(subject, d, str(now))
+        elif (subject in concepts and concepts[subject].get("kind") == "reference" and known
+              and concepts_too and matchable([concepts[subject]])):
+            if seeded_set(concepts[subject]):
+                held_back(subject, "seeded")
+            else:
+                matched.append(subject)
+                origin_of(subject, d, str(concepts[subject]["claim"]))
         elif subject in concepts:
             concept = concepts[subject]
             if concept.get("seeded"):
@@ -317,6 +398,27 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                 carried_not("concept")
             else:
                 origin_of(subject, d, concept["claim"])
+        elif (kinds.get(subject) == "roll_up" and concepts_too
+              and str(structure[subject].get("from", "")).startswith("concept:value:")
+              and str(structure[subject].get("to", "")).startswith("concept:value:")):
+            step = structure[subject]
+            sides = [concepts.get(str(step["from"])), concepts.get(str(step["to"]))]
+            if any(e is None for e in sides):
+                held_back(subject, "not_in_the_build")
+            elif any(seeded_set(e) for e in sides if e is not None):
+                held_back(subject, "seeded")
+            else:
+                stepped.append(subject)
+                origin_of(subject, d, str(step["claim"]))
+        elif (kinds.get(subject) == "equivalent" and known and concepts_too
+              and all(str(c) in concepts for c in structure[subject].get("concepts") or [])
+              and matchable([concepts[str(c)] for c in structure[subject]["concepts"]])):
+            sets = [concepts[str(c)] for c in structure[subject]["concepts"]]
+            if any(seeded_set(v) for v in sets):
+                held_back(subject, "seeded")
+            else:
+                matched.append(subject)
+                origin_of(subject, d, str(structure[subject]["claim"]))
         elif subject in kinds:
             carried_not(kinds[subject])
         else:
@@ -340,7 +442,7 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
         body: dict[str, Any] = {"object": stated_on, "column": column, "value": kept,
                                 "forms": forms}
         found.append((pair["id"], {"spellings": body}, {"kind": "spellings", **body}))
-    for subject in sorted(s for s in ready if s in concepts):
+    for subject in sorted(s for s in ready if s in concepts and s not in matched):
         concept = concepts[subject]
         rows = {str(n["key"]): str(n["label"]) for n in export["nodes"]
                 if n["concept"] == subject and "key" in n}
@@ -364,6 +466,89 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                       {"kind": "link", "record": record, "linked": linked}))
     reviewer = certified_on.get("certified_on") == "reviewer"
 
+    certified: dict[str, list[Mapping[str, Any]]] = {}
+    for c in certifications or []:
+        certified.setdefault(str(c["subject"]), []).append(c)
+    for subject in sorted(s for s in matched if s in ready):
+        sets = ([concepts[subject]] if subject in concepts
+                else [concepts[str(c)] for c in structure[subject]["concepts"]])
+        keys = sorted({str((v.get("match") or {}).get("key")) for v in sets
+                       if (v.get("match") or {}).get("key")})
+        per_domain: dict[str, list[dict[str, str]]] = {}
+        for v in sets:
+            held_in: dict[str, list[str]] = {}
+            for o in v.get("objects") or []:
+                domain = _domain_of(str(o), known)
+                if domain is not None:
+                    held_in.setdefault(domain, []).append(str(o))
+            for domain, objects in sorted(held_in.items()):
+                one = _object_of({**v, "objects": objects}, export["relations"], None)
+                per_domain.setdefault(domain, []).append(
+                    {"domain": domain, "object": one, "column": str(v["column"])})
+        owners = {d: str(spec.get("data_owner") or "") for d, spec in known.items()}
+        signed = {str(c["by"]): c for c in certified.get(subject, [])
+                  if str(c.get("claim")) == ready[subject]["claim"]}
+        if len(keys) != 1:
+            held_back(subject, "no_key")
+        elif len(per_domain) < 2:
+            held_back(subject, "one_domain")
+        elif any(len(v) != 1 for v in per_domain.values()):
+            held_back(subject, "two_columns_in_a_domain")
+        elif any(not owners.get(d) or owners[d] not in signed for d in per_domain):
+            held_back(subject, "not_certified")
+        else:
+            body = {"key": keys[0], "concepts": [v[0] for _d, v in sorted(per_domain.items())],
+                    "close": False}
+            by_domain = [{"domain": d, "by": owners[d],
+                          "at": _day(signed[owners[d]]["at"], f"the certification of {subject}")}
+                         for d in sorted(per_domain)]
+            found.append((subject, {"match": body},
+                          {"kind": "match", "key": keys[0], "domains": sorted(per_domain),
+                           "_certified": by_domain}))
+
+    node_rows = {str(n["id"]): int(n.get("rows") or 0) for n in export["nodes"]}
+    for subject in sorted(s for s in stepped if s in ready):
+        step = structure[subject]
+        finer, coarser = concepts[str(step["from"])], concepts[str(step["to"])]
+        up: dict[str, dict[str, int]] = {}
+        for e in export.get("edges", []):
+            if e.get("kind") == "broader" and e.get("relation") == subject:
+                up.setdefault(str(e["from"]), {})[str(e["to"])] = int(e.get("rows") or 0)
+        if not up:
+            held_back(subject, "no_members")
+            continue
+        column = str(finer["column"])
+        stated_on = _object_of(finer, export["relations"], (spellings_on or {}).get(column))
+        for member, parents in sorted(up.items()):
+            carried = sum(parents.values())
+            whole = node_rows.get(member) or carried
+            share = round(carried / whole, 4) if whole else 0.0
+            body = {"object": stated_on, "column": column, "value": _member_code(member, column),
+                    "broader": sorted(_member_code(p, str(coarser["column"])) for p in parents),
+                    "support": {"rows": carried, "share": share}}
+            found.append((subject, {"broader": body}, {"kind": "broader", **body}))
+
+    for subject in sorted(s for s in worded if s in ready):
+        concept_id, lang = worded[subject]
+        labelled = concepts[concept_id]
+        said = labelled["labels"]
+        if labelled.get("kind") == "reference":
+            column = str(labelled["column"])
+            where = {"object": _object_of(labelled, export["relations"],
+                                          (spellings_on or {}).get(column)), "column": column}
+        elif len(labelled.get("key") or []) == 1 and labelled.get("object_name"):
+            where = {"object": str(labelled["object_name"]), "column": str(labelled["key"][0])}
+        else:
+            held_back(subject, "no_records")
+            continue
+        pref = [t["text"] for t in said.get("pref") or [] if t["lang"] == lang]
+        if not pref:
+            held_back(subject, "not_in_the_build")
+            continue
+        body = {**where, "language": lang, "names": pref[0],
+                "synonyms": sorted(t["text"] for t in said.get("alt") or [] if t["lang"] == lang)}
+        found.append((subject, {"labels": body}, {"kind": "labels", **body}))
+
     entries: list[dict[str, Any]] = []
     written: list[dict[str, Any]] = []
     for number, (subject, entry, line) in enumerate(found, start=1):
@@ -372,15 +557,18 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
         origin: dict[str, Any] = {"element": subject, "claim": o["claim"], "decision": decision}
         if "link" in entry and reviewer:
             origin["certified_on"] = "reviewer"
+        if "match" in entry:
+            origin["certified"] = line["_certified"]
         entries.append({**entry, "origin": origin})
         written.append({"entry": number, "kind": line["kind"], "element": subject,
                         "claim": o["claim"], "decided_by": o["by"], "decided_on": o["at"],
                         "day_stated_by": o["day_stated_by"],
-                        **{k: v for k, v in line.items() if k != "kind"}})
+                        **{k: v for k, v in line.items() if k not in ("kind", "_certified")}})
     report = {"entries": written, "stale": sorted(stale, key=lambda s: s["subject"]),
               "not_written": sorted(not_written, key=lambda s: s["subject"]),
               "not_carried": dict(sorted(not_carried.items()))}
-    head = {"format": FORMAT_2} if any("link" in e for e in entries) else {}
+    head = ({"format": FORMAT_3} if any(k in e for e in entries for k in CONCEPT_ENTRIES)
+            else {"format": FORMAT_2} if any("link" in e for e in entries) else {})
     return {**head, "source": SOURCE, "entries": entries}, report
 
 

@@ -1,0 +1,539 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "proposal file, version 3 (layer-proposal/3): what a reviewed ontology hands to a host's semantic layer, entries over concepts included",
+ "description": "The file `latence_proposal_writer` writes (YAML; this schema is held against the file as read back). It is written from a host's description of the shape its own proposal tool reads, extended by two kinds of entry; the host's reader is the authority on that shape, and this schema describes only what this writer writes. Every entry names where it goes by a catalog object and a column, and carries the decision it rests on. Nothing else is written: no mark such as `seeded` or `certified_on` exists here, because what would carry one is never written. Version 2 states `format: layer-proposal/2` and adds one kind of entry, a link between two records a person approved, in the shape the host's tool reads (its ticket 294; this side's ticket 45). A file without `format` is version 1 and holds no link. Version 3 states `format: layer-proposal/3` and adds three kinds of entry over concepts, in the shapes the host's tool reads (its ticket 304, as the owner decided it on 15 Nov; this side's ticket 58): a `match` (two or more domains' columns are one concept, keyed to the host's key, approved by a reviewer and certified by every named domain's data owner; never a close match), a `broader` (a member of a value set rolls up to others, with what the data showed) and `labels` (a concept's words in one language). A file holds version 3 only when it holds one of them.",
+ "type": "object",
+ "required": [
+  "format",
+  "source",
+  "entries"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "format": {
+   "description": "The file's version.",
+   "const": "layer-proposal/3"
+  },
+  "source": {
+   "description": "The kind of source the entries come from.",
+   "const": "ontology"
+  },
+  "entries": {
+   "type": "array",
+   "items": {
+    "oneOf": [
+     {
+      "$ref": "#/$defs/spellings_entry"
+     },
+     {
+      "$ref": "#/$defs/names_entry"
+     },
+     {
+      "$ref": "#/$defs/link_entry"
+     },
+     {
+      "$ref": "#/$defs/match_entry"
+     },
+     {
+      "$ref": "#/$defs/broader_entry"
+     },
+     {
+      "$ref": "#/$defs/labels_entry"
+     }
+    ]
+   }
+  }
+ },
+ "$defs": {
+  "text": {
+   "type": "string",
+   "minLength": 1
+  },
+  "origin": {
+   "description": "The decision the entry rests on: the element decided (its id in the export), what it stated when it was decided (its claim), and who approved it on which day.",
+   "type": "object",
+   "required": [
+    "element",
+    "claim",
+    "decision"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "element": {
+     "$ref": "#/$defs/text"
+    },
+    "claim": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{16}$"
+    },
+    "decision": {
+     "type": "object",
+     "required": [
+      "verdict",
+      "by",
+      "at"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "verdict": {
+       "const": "approved"
+      },
+      "by": {
+       "$ref": "#/$defs/text"
+      },
+      "at": {
+       "description": "The day of the decision, an ISO date.",
+       "type": "string",
+       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+      }
+     }
+    }
+   }
+  },
+  "spellings_entry": {
+   "description": "Two values of a value set that a reviewer called the same: the value kept and its other spellings.",
+   "type": "object",
+   "required": [
+    "spellings",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "spellings": {
+     "type": "object",
+     "required": [
+      "object",
+      "column",
+      "value",
+      "forms"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "object": {
+       "description": "A catalog object that holds the value set, as `<schema>.<table>`.",
+       "$ref": "#/$defs/text"
+      },
+      "column": {
+       "$ref": "#/$defs/text"
+      },
+      "value": {
+       "description": "The value kept: the one more rows carry.",
+       "$ref": "#/$defs/text"
+      },
+      "forms": {
+       "description": "Its other spellings.",
+       "type": "array",
+       "minItems": 1,
+       "uniqueItems": true,
+       "items": {
+        "$ref": "#/$defs/text"
+       }
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin"
+    }
+   }
+  },
+  "names_entry": {
+   "description": "The names of a master list's records, by the record's key.",
+   "type": "object",
+   "required": [
+    "names",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "names": {
+     "type": "object",
+     "required": [
+      "object",
+      "column",
+      "values"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "object": {
+       "description": "The master list, as `<schema>.<table>`.",
+       "$ref": "#/$defs/text"
+      },
+      "column": {
+       "description": "The list's key column.",
+       "$ref": "#/$defs/text"
+      },
+      "values": {
+       "description": "Key of a record -> its name.",
+       "type": "object",
+       "minProperties": 1,
+       "additionalProperties": {
+        "$ref": "#/$defs/text"
+       }
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin"
+    }
+   }
+  },
+  "origin_of_a_link": {
+   "description": "The decision the entry rests on: the element decided (its id in the export), what it stated when it was decided (its claim), and who approved it on which day.",
+   "type": "object",
+   "required": [
+    "element",
+    "claim",
+    "decision"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "element": {
+     "$ref": "#/$defs/text"
+    },
+    "claim": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{16}$"
+    },
+    "decision": {
+     "type": "object",
+     "required": [
+      "verdict",
+      "by",
+      "at"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "verdict": {
+       "const": "approved"
+      },
+      "by": {
+       "$ref": "#/$defs/text"
+      },
+      "at": {
+       "description": "The day of the decision, an ISO date.",
+       "type": "string",
+       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+      }
+     }
+    },
+    "certified_on": {
+     "description": "On what the link's certification rests; only a reviewer's labels are written.",
+     "const": "reviewer"
+    }
+   }
+  },
+  "record": {
+   "description": "A record of a catalog object, by the object, its key column and the record's key.",
+   "type": "object",
+   "required": [
+    "object",
+    "column",
+    "key"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "object": {
+     "description": "As `<schema>.<table>`.",
+     "$ref": "#/$defs/text"
+    },
+    "column": {
+     "$ref": "#/$defs/text"
+    },
+    "key": {
+     "$ref": "#/$defs/text"
+    }
+   }
+  },
+  "link_entry": {
+   "description": "A record of another source that a person decided is the master list's record: never a link the machine made alone, never one that holds a seeded record, never two records of one object.",
+   "type": "object",
+   "required": [
+    "link",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "link": {
+     "type": "object",
+     "required": [
+      "record",
+      "linked",
+      "evidence"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "record": {
+       "description": "The master list's record.",
+       "$ref": "#/$defs/record"
+      },
+      "linked": {
+       "description": "The other source's record.",
+       "$ref": "#/$defs/record"
+      },
+      "evidence": {
+       "description": "The statement codes the person saw.",
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "object",
+        "required": [
+         "code",
+         "params"
+        ],
+        "additionalProperties": false,
+        "properties": {
+         "code": {
+          "$ref": "#/$defs/text"
+         },
+         "params": {
+          "type": "object"
+         }
+        }
+       }
+      },
+      "p": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 1
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin_of_a_link"
+    }
+   }
+  },
+  "origin_of_a_match": {
+   "description": "The decision a match rests on, and every named domain's data owner's certification on the claim it states.",
+   "type": "object",
+   "required": [
+    "element",
+    "claim",
+    "decision",
+    "certified"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "element": {
+     "$ref": "#/$defs/text"
+    },
+    "claim": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{16}$"
+    },
+    "decision": {
+     "type": "object",
+     "required": [
+      "verdict",
+      "by",
+      "at"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "verdict": {
+       "const": "approved"
+      },
+      "by": {
+       "$ref": "#/$defs/text"
+      },
+      "at": {
+       "description": "The day of the decision, an ISO date.",
+       "type": "string",
+       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+      }
+     }
+    },
+    "certified": {
+     "type": "array",
+     "minItems": 2,
+     "items": {
+      "type": "object",
+      "required": [
+       "domain",
+       "by",
+       "at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "domain": {
+        "$ref": "#/$defs/text"
+       },
+       "by": {
+        "$ref": "#/$defs/text"
+       },
+       "at": {
+        "type": "string",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+       }
+      }
+     }
+    }
+   }
+  },
+  "match_entry": {
+   "description": "Two or more domains' columns are one concept: placed by the host as each domain's reference to the conformed key.",
+   "type": "object",
+   "required": [
+    "match",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "match": {
+     "type": "object",
+     "required": [
+      "key",
+      "concepts",
+      "close"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "key": {
+       "type": "string",
+       "pattern": "^(dataset|dimension|measure):[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*$"
+      },
+      "concepts": {
+       "type": "array",
+       "minItems": 2,
+       "items": {
+        "type": "object",
+        "required": [
+         "domain",
+         "object",
+         "column"
+        ],
+        "additionalProperties": false,
+        "properties": {
+         "domain": {
+          "$ref": "#/$defs/text"
+         },
+         "object": {
+          "$ref": "#/$defs/text"
+         },
+         "column": {
+          "$ref": "#/$defs/text"
+         }
+        }
+       }
+      },
+      "close": {
+       "const": false,
+       "description": "A close match is never written; the host would never place it."
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin_of_a_match"
+    }
+   }
+  },
+  "broader_entry": {
+   "description": "A member of a value set rolls up to others, on a step between two value sets a person approved and the data proved.",
+   "type": "object",
+   "required": [
+    "broader",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "broader": {
+     "type": "object",
+     "required": [
+      "object",
+      "column",
+      "value",
+      "broader",
+      "support"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "object": {
+       "$ref": "#/$defs/text"
+      },
+      "column": {
+       "$ref": "#/$defs/text"
+      },
+      "value": {
+       "$ref": "#/$defs/text"
+      },
+      "broader": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "$ref": "#/$defs/text"
+       }
+      },
+      "support": {
+       "type": "object",
+       "required": [
+        "rows",
+        "share"
+       ],
+       "additionalProperties": false,
+       "properties": {
+        "rows": {
+         "type": "integer",
+         "minimum": 0
+        },
+        "share": {
+         "type": "number",
+         "minimum": 0,
+         "maximum": 1
+        }
+       }
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin"
+    }
+   }
+  },
+  "labels_entry": {
+   "description": "A concept's words in one language, which a person approved as such.",
+   "type": "object",
+   "required": [
+    "labels",
+    "origin"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "labels": {
+     "type": "object",
+     "required": [
+      "object",
+      "column",
+      "language",
+      "names",
+      "synonyms"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "object": {
+       "$ref": "#/$defs/text"
+      },
+      "column": {
+       "$ref": "#/$defs/text"
+      },
+      "language": {
+       "type": "string",
+       "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]+)*$"
+      },
+      "names": {
+       "$ref": "#/$defs/text"
+      },
+      "synonyms": {
+       "type": "array",
+       "items": {
+        "$ref": "#/$defs/text"
+       }
+      }
+     }
+    },
+    "origin": {
+     "$ref": "#/$defs/origin"
+    }
+   }
+  }
+ }
+}

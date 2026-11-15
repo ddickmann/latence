@@ -71,7 +71,7 @@ def test_an_approved_link_is_written_in_the_hosts_shape_and_the_file_says_its_fo
         "origin": {"element": LINK_C1, "claim": claim(70), "decision": {"verdict": "approved", "by": "reviewer-1", "at": "2026-11-12"},
                    "certified_on": "reviewer"}}
     assert [e["kind"] for e in report["entries"]] == ["names", "link"] and report["not_written"] == []
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3  # version 3 (ticket 58) holds match, broader and labels entries
 
 
 def test_a_file_without_a_link_is_version_1_byte_for_byte_and_a_host_on_version_1_gets_no_link() -> None:
@@ -144,5 +144,5 @@ def test_no_record_linked_to_another_record_already() -> None:
 
 
 def test_a_schema_the_writer_does_not_know_is_refused() -> None:
-    with pytest.raises(ConfigError, match="version 3"):
-        schema(3)
+    with pytest.raises(ConfigError, match="version 4"):
+        schema(4)  # versions 1 to 3 are shipped (3 since ticket 58)

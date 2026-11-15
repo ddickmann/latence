@@ -34,6 +34,15 @@ export, count = in_layer(export, read_receipts((receipt_path,)))
   probability where there is one (`p`), and the decision; `certified_on: reviewer` only where the
   build's resolution rests on a reviewer's labels. `links=False` keeps a file at version 1 for a
   host that reads only that.
+- **Version 3** (`schema(3)`, `format: layer-proposal/3`) adds three entries over concepts, in
+  the shapes the host's tool reads (its ticket 304): `match` (an element that says two or more
+  domains' columns are one concept, keyed to the host's key the build read from the host's alias
+  table, approved by a reviewer and certified by every named domain's data owner; a close match
+  is never written), `broader` (each member of a value set rolls up to codes of another, on an
+  approved step, with what the data showed) and `labels` (a concept's words in one language,
+  approved as such). `domains` and `certifications` are the estate's domains with their data
+  owners and the owners' certifications; without `domains` no match is written.
+  `concepts_too=False` keeps a file at version 2 or 1.
 - **A link is written only where the host takes it:** neither record seeded; both stated in full;
   two records of two objects; the master record of a list whose names the same file carries; a
   linked record linked to that master and to no other (by another approved decision or by a link

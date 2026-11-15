@@ -419,9 +419,10 @@ def build(
         matches, crosswalk_note = crosswalk(
             export, reader.metric_views(), read_alias_tables(alias_tables)
         )
-    export = with_identity(export, base, iris.of, matches, cfg.get("language", "en"))
+    export = with_identity(export, base, iris.of, matches, cfg.get("language", "en"), decisions)
     export["meta"] = {
         **export["meta"],
+        "decisions": decisions.summary(),  # again: the labels were asked about just now
         **({"renames": renamed} if renamed["carried"] or renamed["refused"] else {}),
         **({"crosswalk": crosswalk_note} if crosswalk_note is not None else {}),
     }
@@ -485,6 +486,9 @@ def propose(
         said.get("spellings_on"),
         decided_on,
         links=bool(said.get("links", True)),
+        concepts_too=bool(said.get("concepts", True)),
+        domains=cfg.get("domains") or None,
+        certifications=read_certifications(out / "certifications.jsonl"),
     )
     target = file or out / "proposal.yaml"
     target.write_text(to_yaml(document, cfg["name"]), encoding="utf-8")
