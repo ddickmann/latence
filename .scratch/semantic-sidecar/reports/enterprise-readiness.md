@@ -193,9 +193,23 @@ this branch; the next session takes these in order.
 3. **Coverage floor (M5).** Measure with
    `uv run --with pytest-cov==7.1.0 pytest packages --cov=packages --cov-report=json`. Set
    `--cov-fail-under` in `ci.yml` at the measured whole percent, rounded down.
-4. **The proposal guard (R5)**, after decision D-2: apply `enterprise-proposal-guard.patch` in
-   this folder (the writer's check and its test `tests/test_guard.py`). Then fix the share's
-   population; `test_ontology_hub` is the red test.
+4. **The proposal guard (R5): D-2 is decided as (a)** (owner, 15 Nov).
+   - Record, on each `broader` edge, the member's rows within the step's own objects:
+     - `structure.broader_edges`, `structure.py:411-448`: count the rows where the finer column
+       is not null over the same `names`;
+     - the writer then takes `share = rows / that count`, which is at most 1 by construction
+       (`writer.py:552-556`).
+   - Bump the graph-export contract to `graph-export/4`:
+     - `export.py:25`;
+     - a new `schemas/graph-export-4.schema.json`;
+     - the tests that load `graph-export-3.schema.json`.
+   - Re-record the `same_bytes` digests, with the reason in its docstring.
+   - Then apply `enterprise-proposal-guard.patch` (the writer's check and `tests/test_guard.py`):
+     - red first: `test_ontology_hub` writes 1.0769 today;
+     - add a test where personal objects carry both columns: the share stays at most 1 and the
+       roll-up's edges are unchanged.
+   - List what the host's reader must accept (the new version string, the new edge field) for
+     the orchestrator.
 5. **Docs build.** `uv sync --extra docs && uv run mkdocs build --strict`.
    `docs/RELEASING.md` and `docs/getting-started/index.md` changed on this branch. Afterwards,
    reinstall the heavy editables as `verify-local.sh` does.
