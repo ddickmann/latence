@@ -2,7 +2,7 @@
 
 Type: build
 Mode: AFK
-Status: built (15 Nov); open: the owner's decision 1 (option (a) built); the host's command that writes its alias table, and the host-side test
+Status: built (15 Nov); decided by the owner (15 Nov): option (a), as built; open: the host's command that writes its alias table, and the host-side test
 Blocked by: nothing on this side (56 is done); the host's 296 and 297 are decided and built
 Emerges from: the host's drafted ticket B-1 (15 Nov), for its v1; ADR-0073 point 4 (opaque IRIs,
 not built); `latence_ontology/turtle.py` (an IRI is a hash of the name-based id);
@@ -31,7 +31,9 @@ ontology to name the key it is, read from its alias table, never guessed.
 A rebuild after a confirmed rename keeps every IRI; every element that has a host key names it;
 the host accepts the export.
 
-## Open for the owner
+## Decided by the owner (15 Nov): option (a)
+
+The IRI carries over a rename only after a person confirms it; built so.
 
 1. Does a rename that only drift detected keep the IRI?
    - (a) **Recommended, and built:** no, until a person confirms it.
