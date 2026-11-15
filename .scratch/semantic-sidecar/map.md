@@ -127,7 +127,7 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Build: every use case walked in a browser on the local backend](issues/37-every-use-case-walked.md): every browser spec passes, the acceptance run included (14 Nov); the host's Postgres-backed Python tests are the owner's run
 - [Build: live checks on real models, through the owner's runner](issues/38-live-checks-through-the-gate-queue.md): open: the requests through the owner's runner (the landing gate with the guard checks, the user-interface lane, one stability run)
 - [Build: handoff to the main machine and the switch to Databricks](issues/39-handoff-to-the-main-machine.md): open: first the owner's three check commands on the main machine, then the handoff document
-- [Task: defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): open: a spend cap as a hard stop is the owner's to decide; the compose and Helm commands were not run; five defects found and not fixed
+- [Task: defects the documentation pass found and did not fix](issues/24-defects-found-by-the-documentation-pass.md): the five defects done (14 Nov); item 9 checked as far as a machine without a cluster or docker allows (15 Nov: the chart lints and its variants are schema-valid, the compose files valid); `helm install` and `docker compose up` are live requests; the spend cap stays as decided (C)
 - [Task: record the baseline: one text-path run and ULTRA's real link-prediction numbers](issues/08-baseline-measurement.md): open: the baseline of the text path and of link prediction is not recorded
 - [Task: get a Databricks sandbox for the engine](issues/09-databricks-sandbox-access.md): open
 - [Grilling: the upgrade of the resolution engine](issues/13-resolution-engine-upgrade.md): resolved (14 Nov): the owner's answers on the neural stage, scale, a hosted model in the uncertain band and the persistence of human links are in the ticket; the builds follow as their own tickets
@@ -142,13 +142,18 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Build: an actor on every merge decision, and a person's links kept as must-link and cannot-link](issues/47-an-actor-on-every-merge-decision-and-human-links-kept.md): resolved (14 Nov), from 13
 - [Build: a hosted model may decide pairs in the uncertain band, under a stated egress rule](issues/48-a-hosted-model-in-the-uncertain-band.md): built with a stand-in client (14 Nov), from 13; a live run on synthetic data is the owner's
 - [Build: the neural second stage runs as a stage on the owner's machine](issues/49-the-neural-second-stage-on-the-owners-machine.md): open, from 13; needs the owner's machine
-- [Task: measure each older resolution module and keep or retire it](issues/50-measure-each-older-resolution-module.md): open, from 13; needs a text-side gold set first
+- [Task: measure each older resolution module and keep or retire it](issues/50-measure-each-older-resolution-module.md): measured on CPU (15 Nov): the string cascade and the embedding Disambiguator on its hashing default retire (60, 61), Type Consolidation stays; the GPU runs are a live request
 - [Build: the five-state lifecycle, a reviewer's approval and the data owner's certification](issues/51-the-five-state-lifecycle.md): resolved (14 Nov), from 16
 - [Build: approved changes reach the catalog as staged proposals its owner applies](issues/52-approved-changes-reach-the-catalog-as-staged-proposals.md): resolved (14 Nov), from 16; applying a file is the owner's
 - [Build: drift becomes a new proposal, and the old entry is marked stale](issues/53-drift-becomes-a-new-proposal.md): resolved (14 Nov), from 16
 - [Build: a column that turns sensitive is erased from every export and the ledger](issues/54-erasure-when-a-column-turns-sensitive.md): resolved (14 Nov), from 16
-- [Build: classes from an outside vocabulary as a third voice](issues/55-classes-from-an-outside-vocabulary.md): open, split from 42
-- [Build: the estate prototype's code moves into packages under the repository's gates](issues/56-the-prototype-folder-into-packages.md): open, split from 42; the package layout is the owner's question
+- [Build: classes from an outside vocabulary as a third voice](issues/55-classes-from-an-outside-vocabulary.md): the voice and its licence gate built (15 Nov); which vocabulary the vehicle estate reads is the owner's question
+- [Build: the estate prototype's code moves into packages under the repository's gates](issues/56-the-prototype-folder-into-packages.md): resolved (15 Nov): one package, `latence-ontology` (the owner's layout), the vehicle estate's build the same bytes as the prototype's
+- [Build: a persistent IRI, the crosswalk to the host's concept keys, and labels per language](issues/57-a-persistent-iri-the-crosswalk-to-the-hosts-keys-and-labels-per-language.md): built (15 Nov), decided by the owner: an IRI carries over a rename only once a person confirms it; open: the host's command that writes its alias table
+- [Build: the proposal writer writes `match`, `broader` and `labels` entries](issues/58-the-writer-for-match-broader-and-labels-entries.md): built (15 Nov), round trip on the host's tool (3 placed, 0 refused); open: the vehicle estate names no domains
+- [Build: the hub's builder side: approved entries as a merge request through a git port](issues/59-the-hubs-builder-side-merge-requests-on-a-git-port.md): built against a local bare repository (15 Nov); live: a real Forgejo remote, the host's route and page
+- [Task: retire the string cascade's fuzzy rungs from the text path's default](issues/60-retire-the-string-cascade-from-the-text-path.md): open, from 50's measurement
+- [Task: the embedding Disambiguator on its hashing default is retired; its learned run decides the rest](issues/61-the-embedding-disambiguator-on-the-hashing-embedder.md): open, from 50's measurement; the learned run is a live request
 
 ## The owner's decisions (12 Nov)
 
