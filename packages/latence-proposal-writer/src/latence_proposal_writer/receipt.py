@@ -21,8 +21,9 @@ RECEIPT = "layer-receipt/1"  # the format of the receipt this package reads
 
 def read_receipts(paths: tuple[Path, ...]) -> dict[tuple[str, str], dict[str, str]]:
     """What a host's receipts say was placed: (element id, the claim it was placed on) -> the
-    library and the release that placed it. Of several receipts that placed the same, the
-    first given counts, so give them oldest first."""
+    library and the release that placed it (with the release's digest and the tag it was built
+    from, where the receipt states them: the hub's releases, ticket 59). Of several receipts that
+    placed the same, the first given counts, so give them oldest first."""
     taken: dict[tuple[str, str], dict[str, str]] = {}
     for path in paths:
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -32,7 +33,9 @@ def read_receipts(paths: tuple[Path, ...]) -> dict[tuple[str, str], dict[str, st
         if not doc.get("library") or not doc.get("version"):
             raise ConfigError(f"{path}: a receipt names the library and the release that "
                               "took the entries up")
-        release = {"library": str(doc["library"]), "version": str(doc["version"])}
+        release = {"library": str(doc["library"]), "version": str(doc["version"]),
+                   **({"digest": str(doc["digest"])} if doc.get("digest") else {}),
+                   **({"tag": str(doc["tag"])} if doc.get("tag") else {})}
         for line in doc.get("placed") or []:
             taken.setdefault((str(line["element"]), str(line["claim"])), release)
     return taken

@@ -36,6 +36,13 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   reads: a match only with every named domain's data owner's certification and never as a close
   match, a member's roll-up with what the data showed, a concept's words per language approved as
   such; its `SCHEMA_VERSION` is 3 and its receipt reader marks what was placed.
+- **The ontology hub's builder side in `latence-ontology` (`latence-ontology hub`).** Approved
+  entries go to the estate's git repository through a port, as a merge request per domain from
+  the builder's own branch; reviews (a reviewer's approval, the data owner's certification) are
+  written and read back through the port; a certified merge's tag and release are read back. A
+  backend over a local bare repository holds the rules: stewards alone commit to a domain's
+  branch, a conflict blocks a merge until the conformed library's owner resolves it, a revert is
+  a new release.
 - **`latence-proposal-writer`, the optional adapter for a host's semantic layer
   ([ADR-0070](docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).**
   It writes the reviewable proposal file from a build's export and the decisions in force (two

@@ -36,6 +36,10 @@ from .crosswalk import crosswalk, read_alias_tables
 from .drift import find_drift, prior_statements
 from .erasure import erase, turned_sensitive
 from .export import build_export
+from .hub import pull_certifications, push_reviews
+from .hub import submit as submit_to_hub
+from .hub import views as hub_views
+from .hub_local import LocalGitHost
 from .induce import induce
 from .instances import build_instances, merge_values
 from .iris import Iris, confirm, element_ids, read_renames
@@ -495,6 +499,60 @@ def propose(
     return {"file": str(target), **report}
 
 
+def hub(
+    config: Path,
+    out: Path,
+    repo: Path,
+    at: str,
+    receipts: tuple[Path, ...] = (),
+    decided_on: str | None = None,
+) -> dict[str, Any]:
+    """The build's approved entries proposed to the estate's git repository (ticket 59): a
+    merge request per domain, the builder's reviews written on them, the data owners'
+    certifications given on the git host read back into ``certifications.jsonl``, and what the
+    Ontology page shows of it in ``hub.json``. ``repo`` is a bare repository (the local backend
+    of the port); ``receipts`` are the host's receipts of the releases built from its tags."""
+    cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+    domains = cfg.get("domains") or {}
+    if not domains:
+        raise SystemExit("the estate file names no domains (domains: {<name>: {schemas, ...}})")
+    said = cfg.get("propose") or {}
+    export = json.loads((out / "ontology.json").read_text(encoding="utf-8"))
+    certifications = read_certifications(out / "certifications.jsonl")
+    document, _report = proposal(
+        export,
+        read_decisions(out / "decisions.jsonl"),
+        tuple(said.get("names", ())),
+        said.get("spellings_on"),
+        decided_on,
+        links=bool(said.get("links", True)),
+        concepts_too=bool(said.get("concepts", True)),
+        domains=domains,
+        certifications=certifications,
+    )
+    host = LocalGitHost(repo)
+    opened = submit_to_hub(host, document, cfg["name"], domains, at)
+    pulled = pull_certifications(host, cfg["name"], domains, certifications)
+    if pulled:
+        with (out / "certifications.jsonl").open("a", encoding="utf-8") as fh:
+            for line in pulled:
+                fh.write(json.dumps(line, sort_keys=True, ensure_ascii=False) + "\n")
+    written = push_reviews(host, cfg["name"], domains, [*certifications, *pulled], at)
+    releases: dict[str, dict[str, str]] = {}
+    for path in receipts:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if doc.get("tag"):
+            releases[str(doc["tag"])] = {
+                k: str(doc[k]) for k in ("library", "version", "digest") if doc.get(k)
+            }
+    shown = hub_views(host, cfg["name"], releases)
+    (out / "hub.json").write_text(
+        json.dumps(shown, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return {**opened, "reviews_written": written, "certifications_read": len(pulled),
+            "merge_requests": len(shown["merge_requests"])}
+
+
 def stage(config: Path, out: Path, file: Path | None = None) -> dict[str, Any]:
     """Write the staged proposal for the catalog (``staged-catalog.sql``) from the build's export
     and the people's decisions: statements its owner reviews and applies (ticket 52)."""
@@ -760,6 +818,18 @@ def main() -> None:
         "--by", required=True, help="the data owner's id, as the estate file names them"
     )
     ce.add_argument("--at", required=True, help="the day of the certification (YYYY-MM-DD)")
+    hb = sub.add_parser(
+        "hub",
+        help="propose the approved entries to the estate's git repository, a merge request per "
+        "domain, and sync the reviews both ways (ticket 59)",
+    )
+    hb.add_argument("--config", type=Path, required=True)
+    hb.add_argument("--out", type=Path, required=True, help="the build folder")
+    hb.add_argument("--repo", type=Path, required=True, help="the estate's bare git repository")
+    hb.add_argument("--at", required=True, help="the day (YYYY-MM-DD)")
+    hb.add_argument("--receipt", type=Path, action="append", default=[],
+                    help="the host's receipt of a release built from a tag; repeat for more")
+    hb.add_argument("--decided-on", help="the day of the approved decisions that state none")
     rn = sub.add_parser(
         "rename",
         help="a person confirms that an element was renamed: the next build gives the new id "
@@ -800,6 +870,9 @@ def main() -> None:
         print(json.dumps(stage(a.config, a.out, a.file), indent=1, ensure_ascii=False))
     elif a.cmd == "certify":
         print(json.dumps(certify(a.out, a.subject, a.by, a.at), indent=1, ensure_ascii=False))
+    elif a.cmd == "hub":
+        result = hub(a.config, a.out, a.repo, a.at, tuple(a.receipt), a.decided_on)
+        print(json.dumps(result, indent=1, ensure_ascii=False))
     elif a.cmd == "rename":
         line = confirm(a.out, a.old, a.new, a.by, a.at, a.reason)
         print(json.dumps(line, indent=1, ensure_ascii=False))

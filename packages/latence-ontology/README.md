@@ -19,7 +19,14 @@ latence-ontology propose --config estate.yaml --out out/estate      # the propos
 latence-ontology stage --config estate.yaml --out out/estate        # staged statements for the catalog's owner
 latence-ontology certify --out out/estate --subject <id> --by <person> --at <day>
 latence-ontology rename --out out/estate --from <old id> --to <new id> --by <person> --at <day>
+latence-ontology hub --config estate.yaml --out out/estate --repo estate.git --at <day>
 ```
+
+`hub` proposes the approved entries to the estate's git repository through a port (one branch
+per domain, which its stewards alone commit to): a merge request per domain from a branch of the
+builder's own, the reviewers' approvals and the data owners' certifications as its reviews, read
+back both ways, and the tag and release of a certified merge (`hub.json`). The backend here is a
+local bare repository; a hosted forge is another backend of the same port.
 
 Every element has a persistent IRI, minted once and kept in the build folder's ledger
 (`iris.jsonl`); a rename keeps it only once a person confirms it (`rename`). Given a host's
