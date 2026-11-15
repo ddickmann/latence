@@ -18,10 +18,16 @@ here is what the package is run on, and how:
 cd ../../.. && uv sync                       # the workspace, the package included
 cd .scratch/semantic-sidecar/estate
 uv run latence-ontology build --config estates/vehicles.yaml --duckdb <mirror.duckdb> \
-    --metric-views <views.txt> --verified <host catalog.yaml> --out out/vehicles
+    --metric-views <views.txt> --verified <host catalog.yaml> --out out/vehicles \
+    --alias-table ../../../packages/latence-ontology/tests/fixtures/alias/estate-semantics.json
 uv run latence-ontology export --out out/vehicles --ui-dir <host ui>/public/data/ontology
 uv run latence-ontology propose --config estates/vehicles.yaml --out out/vehicles     # the proposal file for a host
 ```
+
+The alias table is the host's (`metis.alias/1`), written by its `metis-dev concepts alias
+--library estate-semantics --out <file>`; the copy named above is the one pinned in the package's
+tests (where it came from: `packages/latence-ontology/tests/fixtures/alias/SOURCE.md`). Against
+the live workspace the host writes it with `--databricks` added.
 
 The modules, by the package's file names (`packages/latence-ontology/src/latence_ontology/`):
 

@@ -30,9 +30,11 @@ local bare repository; a hosted forge is another backend of the same port.
 
 Every element has a persistent IRI, minted once and kept in the build folder's ledger
 (`iris.jsonl`); a rename keeps it only once a person confirms it (`rename`). Given a host's
-alias table (`build --alias-table <file>`), an element the table names by a platform id carries
-the host's concept key (`match`, and `skos:exactMatch` in the Turtle file); a key is never
-derived from a name. Labels carry their language (`skos:prefLabel`, `skos:altLabel`).
+alias table in its published format `metis.alias/1` (`build --alias-table <file>`; a file of
+another format, or whose version is not its table's digest, is refused), an element the table
+names by a platform id carries the host's concept key (`match`, and `skos:exactMatch` in the
+Turtle file), and the table's version is recorded in the export; a key is never derived from a
+name, and a measure or value set the table does not name is listed. Labels carry their language (`skos:prefLabel`, `skos:altLabel`).
 
 Its one seam to a host's semantic layer is the proposal file, written by
 `latence-proposal-writer` from approved decisions only (ADR-0070). It registers no Provider: the

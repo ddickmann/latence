@@ -90,7 +90,8 @@ class MetricView:
     measures: tuple[Field, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
     # The schema the view is in, as the catalog names it (its prefix included); where the view
-    # was read from does not say, empty. A platform id names it (ticket 57).
+    # was read from does not say, empty. A host's platform id names a view by its name only, so
+    # a name two schemas hold is matched by neither (ticket 57, ``crosswalk.py``).
     schema: str = ""
 
 

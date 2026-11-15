@@ -55,17 +55,10 @@ def test_a_vehicle_build_writes_a_match_across_two_domains(tmp_path: Path) -> No
         pytest.skip("the vehicle estate's mirror is written by the host's tools and is not in this "
                     "repository: set LATENCE_ONTOLOGY_VEHICLE_INPUTS to run this check")
     inputs, out = Path(given), tmp_path / "vehicles"
-    # A stand-in for the host's alias table (its shape, the host's 297): the conformed key of the
-    # make, read from the views of both domains. The host has no command that writes one yet.
-    table = tmp_path / "alias.json"
-    table.write_text(json.dumps({
-        "namespace": "conformed",
-        "keys": {"dimension:make": "dimension:conformed.make"},
-        "platform": {"dimension:make": [
-            "dimension:demo.nhtsa_semantics.clean_complaints.make",
-            "dimension:demo.nhtsa_semantics.internal_claims.make"]},
-        "renamed": {},
-    }))
+    # The host's alias table of the vehicle estate's library (metis.alias/1, its ticket 326; where
+    # it was copied from: fixtures/alias/SOURCE.md): the make is one key of the estate namespace,
+    # read from the views of both domains.
+    table = Path(__file__).resolve().parent / "fixtures" / "alias" / "estate-semantics.json"
     config = ESTATE / "vehicles.yaml"
     seed(config, inputs / "vehicles.duckdb", tmp_path / "seeded.duckdb", out, 11)
     kwargs: dict[str, Any] = {
@@ -77,7 +70,7 @@ def test_a_vehicle_build_writes_a_match_across_two_domains(tmp_path: Path) -> No
     build(**kwargs)
     export = json.loads((out / "ontology.json").read_text())
     make = next(c for c in export["concepts"] if c["id"] == "concept:value:make")
-    assert make["match"]["key"] == "dimension:conformed.make"
+    assert make["match"]["key"] == "dimension:estate.make"
     line = {"subject": make["id"], "verdict": "approved", "by": "reviewer-1",
             "claim": make["claim"], "at": "2026-11-15"}
     (out / "decisions.jsonl").write_text(json.dumps(line) + "\n")
@@ -91,7 +84,7 @@ def test_a_vehicle_build_writes_a_match_across_two_domains(tmp_path: Path) -> No
     written = yaml.safe_load((out / "proposal.yaml").read_text())
     assert written["format"] == "layer-proposal/3"
     [entry] = [e for e in written["entries"] if "match" in e]
-    assert entry["match"]["key"] == "dimension:conformed.make" and entry["match"]["close"] is False
+    assert entry["match"]["key"] == "dimension:estate.make" and entry["match"]["close"] is False
     assert [c["domain"] for c in entry["match"]["concepts"]] == ["after_sales", "product_safety"]
     assert all(c["column"] == "make" for c in entry["match"]["concepts"])
     assert [c["by"] for c in entry["origin"]["certified"]] == owners

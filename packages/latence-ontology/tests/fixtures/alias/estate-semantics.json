@@ -1,0 +1,406 @@
+{
+ "catalog": "estate-semantics@1.2.0:sha256:8a042b186d2a6491c09b4a5f0d0b08f2fb474ad4a3a1a98d3a6968653f5ead70",
+ "format": "metis.alias/1",
+ "keys": {
+  "dimension:action_kind": "dimension:estate.action_kind",
+  "dimension:campaign_kind": "dimension:estate.campaign_kind",
+  "dimension:causal_part": "dimension:estate.causal_part",
+  "dimension:claim_ref": "dimension:estate.claim_ref",
+  "dimension:claim_type": "dimension:estate.claim_type",
+  "dimension:clean_bulletins.issued": "dimension:estate.clean_bulletins.issued",
+  "dimension:clean_complaints.received_date": "dimension:estate.clean_complaints.received_date",
+  "dimension:clean_investigations.opened": "dimension:estate.clean_investigations.opened",
+  "dimension:clean_recall_campaigns.report_received": "dimension:estate.clean_recall_campaigns.report_received",
+  "dimension:clean_recalls.report_received": "dimension:estate.clean_recalls.report_received",
+  "dimension:component": "dimension:estate.component",
+  "dimension:component_group": "dimension:estate.component_group",
+  "dimension:crash": "dimension:estate.crash",
+  "dimension:currency": "dimension:estate.currency",
+  "dimension:dealer": "dimension:estate.dealer",
+  "dimension:dealer_contact": "dimension:estate.dealer_contact",
+  "dimension:dealer_group": "dimension:estate.dealer_group",
+  "dimension:dealer_region": "dimension:estate.dealer_region",
+  "dimension:dealer_remark": "dimension:estate.dealer_remark",
+  "dimension:decision_outcome": "dimension:estate.decision_outcome",
+  "dimension:do_not_drive": "dimension:estate.do_not_drive",
+  "dimension:fire": "dimension:estate.fire",
+  "dimension:initiated_by": "dimension:estate.initiated_by",
+  "dimension:internal_campaign": "dimension:estate.internal_campaign",
+  "dimension:internal_claims.decided_date": "dimension:estate.internal_claims.decided_date",
+  "dimension:internal_claims.repair_date": "dimension:estate.internal_claims.repair_date",
+  "dimension:internal_claims.submitted_date": "dimension:estate.internal_claims.submitted_date",
+  "dimension:line_kind": "dimension:estate.line_kind",
+  "dimension:make": "dimension:estate.make",
+  "dimension:manufacturer": "dimension:estate.manufacturer",
+  "dimension:market": "dimension:estate.market",
+  "dimension:model": "dimension:estate.model",
+  "dimension:model_year": "dimension:estate.model_year",
+  "dimension:nhtsa_campaign": "dimension:estate.nhtsa_campaign",
+  "dimension:operation_code": "dimension:estate.operation_code",
+  "dimension:outcome": "dimension:estate.outcome",
+  "dimension:state": "dimension:estate.state",
+  "dimension:system": "dimension:estate.system",
+  "dimension:vin": "dimension:estate.vin",
+  "measure:affected_vehicles": "measure:estate.affected_vehicles",
+  "measure:approved_amount": "measure:estate.approved_amount",
+  "measure:average_labour_hours": "measure:estate.average_labour_hours",
+  "measure:average_paid_per_claim": "measure:estate.average_paid_per_claim",
+  "measure:bulletin_count": "measure:estate.bulletin_count",
+  "measure:campaign_affected_vehicles": "measure:estate.campaign_affected_vehicles",
+  "measure:campaign_completed_vehicles": "measure:estate.campaign_completed_vehicles",
+  "measure:campaign_completion_rate": "measure:estate.campaign_completion_rate",
+  "measure:campaign_settled_vehicles": "measure:estate.campaign_settled_vehicles",
+  "measure:claim_count": "measure:estate.claim_count",
+  "measure:claim_labour_hours": "measure:estate.claim_labour_hours",
+  "measure:claimed_amount": "measure:estate.claimed_amount",
+  "measure:claimed_vehicle_count": "measure:estate.claimed_vehicle_count",
+  "measure:claimed_vehicle_share": "measure:estate.claimed_vehicle_share",
+  "measure:complaint_count": "measure:estate.complaint_count",
+  "measure:crash_share": "measure:estate.crash_share",
+  "measure:days_to_decision": "measure:estate.days_to_decision",
+  "measure:dealer_labour_rate": "measure:estate.dealer_labour_rate",
+  "measure:do_not_drive_share": "measure:estate.do_not_drive_share",
+  "measure:fire_share": "measure:estate.fire_share",
+  "measure:fleet_vehicles": "measure:estate.fleet_vehicles",
+  "measure:goodwill_amount": "measure:estate.goodwill_amount",
+  "measure:goodwill_request_share": "measure:estate.goodwill_request_share",
+  "measure:goodwill_share": "measure:estate.goodwill_share",
+  "measure:injured_count": "measure:estate.injured_count",
+  "measure:investigation_closed_count": "measure:estate.investigation_closed_count",
+  "measure:investigation_count": "measure:estate.investigation_count",
+  "measure:investigation_recall_share": "measure:estate.investigation_recall_share",
+  "measure:investigation_with_recall_count": "measure:estate.investigation_with_recall_count",
+  "measure:labour_line_count": "measure:estate.labour_line_count",
+  "measure:labour_overrun_share": "measure:estate.labour_overrun_share",
+  "measure:nhtsa_completion_rate": "measure:estate.nhtsa_completion_rate",
+  "measure:nhtsa_involved": "measure:estate.nhtsa_involved",
+  "measure:nhtsa_remedied": "measure:estate.nhtsa_remedied",
+  "measure:nhtsa_unreachable": "measure:estate.nhtsa_unreachable",
+  "measure:own_campaign_count": "measure:estate.own_campaign_count",
+  "measure:paid_amount": "measure:estate.paid_amount",
+  "measure:recall_campaign_count": "measure:estate.recall_campaign_count",
+  "measure:recall_record_count": "measure:estate.recall_record_count",
+  "measure:rejection_rate": "measure:estate.rejection_rate",
+  "measure:repeat_repair_count": "measure:estate.repeat_repair_count",
+  "measure:repeat_repair_rate": "measure:estate.repeat_repair_rate",
+  "measure:repeat_repair_vehicle_count": "measure:estate.repeat_repair_vehicle_count",
+  "measure:standard_hours": "measure:estate.standard_hours"
+ },
+ "namespace": "estate",
+ "platform": {
+  "dimension:action_kind": [
+   "dimension:lakehouse.clean_investigations.action_kind"
+  ],
+  "dimension:campaign_kind": [
+   "dimension:lakehouse.internal_campaigns.campaign_kind"
+  ],
+  "dimension:causal_part": [
+   "dimension:lakehouse.internal_claim_lines.causal_part",
+   "dimension:lakehouse.internal_claims.causal_part"
+  ],
+  "dimension:claim_ref": [
+   "dimension:lakehouse.internal_claim_lines.claim_ref",
+   "dimension:lakehouse.internal_claims.claim_ref"
+  ],
+  "dimension:claim_type": [
+   "dimension:lakehouse.internal_claim_lines.claim_type",
+   "dimension:lakehouse.internal_claims.claim_type"
+  ],
+  "dimension:clean_bulletins.issued": [
+   "dimension:lakehouse.clean_bulletins.issued"
+  ],
+  "dimension:clean_complaints.received_date": [
+   "dimension:lakehouse.clean_complaints.received_date"
+  ],
+  "dimension:clean_investigations.opened": [
+   "dimension:lakehouse.clean_investigations.opened"
+  ],
+  "dimension:clean_recall_campaigns.report_received": [
+   "dimension:lakehouse.clean_recall_campaigns.report_received"
+  ],
+  "dimension:clean_recalls.report_received": [
+   "dimension:lakehouse.clean_recalls.report_received"
+  ],
+  "dimension:component": [
+   "dimension:lakehouse.clean_complaints.component",
+   "dimension:lakehouse.clean_recalls.component"
+  ],
+  "dimension:component_group": [
+   "dimension:lakehouse.internal_claim_lines.component_group",
+   "dimension:lakehouse.internal_claims.component_group"
+  ],
+  "dimension:crash": [
+   "dimension:lakehouse.clean_complaints.crash"
+  ],
+  "dimension:currency": [
+   "dimension:lakehouse.internal_claim_lines.currency",
+   "dimension:lakehouse.internal_claims.currency"
+  ],
+  "dimension:dealer": [
+   "dimension:lakehouse.internal_campaign_completion.dealer",
+   "dimension:lakehouse.internal_claim_lines.dealer",
+   "dimension:lakehouse.internal_claims.dealer",
+   "dimension:lakehouse.internal_dealers.dealer",
+   "dimension:lakehouse.internal_vehicles.dealer"
+  ],
+  "dimension:dealer_contact": [
+   "dimension:lakehouse.internal_campaign_completion.dealer_contact",
+   "dimension:lakehouse.internal_claim_lines.dealer_contact",
+   "dimension:lakehouse.internal_claims.dealer_contact",
+   "dimension:lakehouse.internal_dealers.dealer_contact",
+   "dimension:lakehouse.internal_vehicles.dealer_contact"
+  ],
+  "dimension:dealer_group": [
+   "dimension:lakehouse.internal_campaign_completion.dealer_group",
+   "dimension:lakehouse.internal_claim_lines.dealer_group",
+   "dimension:lakehouse.internal_claims.dealer_group",
+   "dimension:lakehouse.internal_dealers.dealer_group",
+   "dimension:lakehouse.internal_vehicles.dealer_group"
+  ],
+  "dimension:dealer_region": [
+   "dimension:lakehouse.internal_campaign_completion.dealer_region",
+   "dimension:lakehouse.internal_claim_lines.dealer_region",
+   "dimension:lakehouse.internal_claims.dealer_region",
+   "dimension:lakehouse.internal_dealers.dealer_region",
+   "dimension:lakehouse.internal_vehicles.dealer_region"
+  ],
+  "dimension:dealer_remark": [
+   "dimension:lakehouse.internal_claim_lines.dealer_remark",
+   "dimension:lakehouse.internal_claims.dealer_remark"
+  ],
+  "dimension:decision_outcome": [
+   "dimension:lakehouse.internal_claim_lines.decision_outcome",
+   "dimension:lakehouse.internal_claims.decision_outcome",
+   "dimension:lakehouse.internal_decided_claims.decision_outcome"
+  ],
+  "dimension:do_not_drive": [
+   "dimension:lakehouse.clean_recall_campaigns.do_not_drive",
+   "dimension:lakehouse.clean_recalls.do_not_drive",
+   "dimension:lakehouse.internal_campaign_completion.do_not_drive",
+   "dimension:lakehouse.internal_claim_lines.do_not_drive",
+   "dimension:lakehouse.internal_claims.do_not_drive",
+   "dimension:lakehouse.marts_recall_completion.do_not_drive"
+  ],
+  "dimension:fire": [
+   "dimension:lakehouse.clean_complaints.fire"
+  ],
+  "dimension:initiated_by": [
+   "dimension:lakehouse.clean_recall_campaigns.initiated_by",
+   "dimension:lakehouse.clean_recalls.initiated_by",
+   "dimension:lakehouse.internal_campaign_completion.initiated_by",
+   "dimension:lakehouse.internal_claim_lines.initiated_by",
+   "dimension:lakehouse.internal_claims.initiated_by",
+   "dimension:lakehouse.marts_recall_completion.initiated_by"
+  ],
+  "dimension:internal_campaign": [
+   "dimension:lakehouse.internal_campaign_completion.internal_campaign",
+   "dimension:lakehouse.internal_campaigns.internal_campaign",
+   "dimension:lakehouse.internal_claim_lines.internal_campaign",
+   "dimension:lakehouse.internal_claims.internal_campaign"
+  ],
+  "dimension:internal_claims.repair_date": [
+   "dimension:lakehouse.internal_claim_lines.repair_date",
+   "dimension:lakehouse.internal_claims.repair_date"
+  ],
+  "dimension:line_kind": [
+   "dimension:lakehouse.internal_claim_lines.line_kind"
+  ],
+  "dimension:make": [
+   "dimension:lakehouse.clean_bulletins.make",
+   "dimension:lakehouse.clean_complaints.make",
+   "dimension:lakehouse.clean_investigations.make",
+   "dimension:lakehouse.clean_recalls.make",
+   "dimension:lakehouse.internal_campaigns.make",
+   "dimension:lakehouse.internal_claim_lines.make",
+   "dimension:lakehouse.internal_claims.make",
+   "dimension:lakehouse.internal_labour_times.make",
+   "dimension:lakehouse.internal_vehicles.make"
+  ],
+  "dimension:manufacturer": [
+   "dimension:lakehouse.clean_investigations.manufacturer",
+   "dimension:lakehouse.clean_recall_campaigns.manufacturer",
+   "dimension:lakehouse.clean_recalls.manufacturer",
+   "dimension:lakehouse.internal_campaign_completion.manufacturer",
+   "dimension:lakehouse.internal_claim_lines.manufacturer",
+   "dimension:lakehouse.internal_claims.manufacturer",
+   "dimension:lakehouse.marts_recall_completion.manufacturer"
+  ],
+  "dimension:market": [
+   "dimension:lakehouse.internal_campaign_completion.market",
+   "dimension:lakehouse.internal_claim_lines.market",
+   "dimension:lakehouse.internal_claims.market",
+   "dimension:lakehouse.internal_dealers.market",
+   "dimension:lakehouse.internal_vehicles.market"
+  ],
+  "dimension:model": [
+   "dimension:lakehouse.clean_bulletins.model",
+   "dimension:lakehouse.clean_complaints.model",
+   "dimension:lakehouse.clean_investigations.model",
+   "dimension:lakehouse.clean_recalls.model",
+   "dimension:lakehouse.internal_campaigns.model",
+   "dimension:lakehouse.internal_claim_lines.model",
+   "dimension:lakehouse.internal_claims.model",
+   "dimension:lakehouse.internal_labour_times.model",
+   "dimension:lakehouse.internal_vehicles.model"
+  ],
+  "dimension:model_year": [
+   "dimension:lakehouse.clean_bulletins.model_year",
+   "dimension:lakehouse.clean_complaints.model_year",
+   "dimension:lakehouse.clean_investigations.model_year",
+   "dimension:lakehouse.clean_recalls.model_year",
+   "dimension:lakehouse.internal_claim_lines.model_year",
+   "dimension:lakehouse.internal_claims.model_year",
+   "dimension:lakehouse.internal_vehicles.model_year"
+  ],
+  "dimension:nhtsa_campaign": [
+   "dimension:lakehouse.clean_recall_campaigns.nhtsa_campaign",
+   "dimension:lakehouse.clean_recalls.nhtsa_campaign",
+   "dimension:lakehouse.internal_campaign_completion.nhtsa_campaign",
+   "dimension:lakehouse.internal_claim_lines.nhtsa_campaign",
+   "dimension:lakehouse.internal_claims.nhtsa_campaign",
+   "dimension:lakehouse.marts_recall_completion.nhtsa_campaign"
+  ],
+  "dimension:operation_code": [
+   "dimension:lakehouse.internal_claim_lines.operation_code",
+   "dimension:lakehouse.internal_labour_times.operation_code"
+  ],
+  "dimension:outcome": [
+   "dimension:lakehouse.internal_claim_lines.outcome",
+   "dimension:lakehouse.internal_claims.outcome"
+  ],
+  "dimension:state": [
+   "dimension:lakehouse.clean_complaints.state"
+  ],
+  "dimension:system": [
+   "dimension:lakehouse.clean_complaints.system",
+   "dimension:lakehouse.clean_investigations.system",
+   "dimension:lakehouse.clean_recalls.system",
+   "dimension:lakehouse.internal_claim_lines.system",
+   "dimension:lakehouse.internal_claims.system"
+  ],
+  "dimension:vin": [
+   "dimension:lakehouse.internal_claim_lines.vin",
+   "dimension:lakehouse.internal_claims.vin",
+   "dimension:lakehouse.internal_vehicles.vin"
+  ],
+  "measure:affected_vehicles": [
+   "measure:lakehouse.clean_recall_campaigns.affected_vehicles"
+  ],
+  "measure:approved_amount": [
+   "measure:lakehouse.internal_decided_claims.approved_amount"
+  ],
+  "measure:average_labour_hours": [
+   "measure:lakehouse.internal_claims.average_labour_hours"
+  ],
+  "measure:average_paid_per_claim": [
+   "measure:lakehouse.internal_claims.average_paid_per_claim"
+  ],
+  "measure:bulletin_count": [
+   "measure:lakehouse.clean_bulletins.bulletin_count"
+  ],
+  "measure:campaign_affected_vehicles": [
+   "measure:lakehouse.internal_campaign_completion.campaign_affected_vehicles"
+  ],
+  "measure:campaign_completed_vehicles": [
+   "measure:lakehouse.internal_campaign_completion.campaign_completed_vehicles"
+  ],
+  "measure:campaign_completion_rate": [
+   "measure:lakehouse.internal_campaign_completion.campaign_completion_rate"
+  ],
+  "measure:campaign_settled_vehicles": [
+   "measure:lakehouse.internal_campaign_completion.campaign_settled_vehicles"
+  ],
+  "measure:claim_count": [
+   "measure:lakehouse.internal_claims.claim_count"
+  ],
+  "measure:claim_labour_hours": [
+   "measure:lakehouse.internal_claims.claim_labour_hours"
+  ],
+  "measure:claimed_amount": [
+   "measure:lakehouse.internal_claims.claimed_amount"
+  ],
+  "measure:complaint_count": [
+   "measure:lakehouse.clean_complaints.complaint_count"
+  ],
+  "measure:crash_share": [
+   "measure:lakehouse.clean_complaints.crash_share"
+  ],
+  "measure:days_to_decision": [
+   "measure:lakehouse.internal_claims.days_to_decision"
+  ],
+  "measure:dealer_labour_rate": [
+   "measure:lakehouse.internal_dealers.dealer_labour_rate"
+  ],
+  "measure:do_not_drive_share": [
+   "measure:lakehouse.clean_recall_campaigns.do_not_drive_share"
+  ],
+  "measure:fire_share": [
+   "measure:lakehouse.clean_complaints.fire_share"
+  ],
+  "measure:fleet_vehicles": [
+   "measure:lakehouse.internal_vehicles.fleet_vehicles"
+  ],
+  "measure:goodwill_amount": [
+   "measure:lakehouse.internal_claims.goodwill_amount"
+  ],
+  "measure:goodwill_request_share": [
+   "measure:lakehouse.internal_claims.goodwill_request_share"
+  ],
+  "measure:goodwill_share": [
+   "measure:lakehouse.internal_claims.goodwill_share"
+  ],
+  "measure:injured_count": [
+   "measure:lakehouse.clean_complaints.injured_count"
+  ],
+  "measure:investigation_closed_count": [
+   "measure:lakehouse.clean_investigations.investigation_closed_count"
+  ],
+  "measure:investigation_count": [
+   "measure:lakehouse.clean_investigations.investigation_count"
+  ],
+  "measure:investigation_recall_share": [
+   "measure:lakehouse.clean_investigations.investigation_recall_share"
+  ],
+  "measure:investigation_with_recall_count": [
+   "measure:lakehouse.clean_investigations.investigation_with_recall_count"
+  ],
+  "measure:labour_line_count": [
+   "measure:lakehouse.internal_claim_lines.labour_line_count"
+  ],
+  "measure:labour_overrun_share": [
+   "measure:lakehouse.internal_claim_lines.labour_overrun_share"
+  ],
+  "measure:nhtsa_completion_rate": [
+   "measure:lakehouse.marts_recall_completion.nhtsa_completion_rate"
+  ],
+  "measure:nhtsa_involved": [
+   "measure:lakehouse.marts_recall_completion.nhtsa_involved"
+  ],
+  "measure:nhtsa_remedied": [
+   "measure:lakehouse.marts_recall_completion.nhtsa_remedied"
+  ],
+  "measure:nhtsa_unreachable": [
+   "measure:lakehouse.marts_recall_completion.nhtsa_unreachable"
+  ],
+  "measure:own_campaign_count": [
+   "measure:lakehouse.internal_campaigns.own_campaign_count"
+  ],
+  "measure:paid_amount": [
+   "measure:lakehouse.internal_claims.paid_amount"
+  ],
+  "measure:recall_campaign_count": [
+   "measure:lakehouse.clean_recalls.recall_campaign_count"
+  ],
+  "measure:recall_record_count": [
+   "measure:lakehouse.clean_recalls.recall_record_count"
+  ],
+  "measure:rejection_rate": [
+   "measure:lakehouse.internal_claims.rejection_rate"
+  ],
+  "measure:standard_hours": [
+   "measure:lakehouse.internal_labour_times.standard_hours"
+  ]
+ },
+ "renamed": {},
+ "version": "sha256:28e1a4f6a7983bc55f6040375e3ba536dcd68cd4e5de9878f822466ba201fc07"
+}

@@ -1,8 +1,10 @@
 """Persistent IRIs, the crosswalk to a host's concept keys, and labels per language (ticket 57).
 
-The alias table here is synthetic, in the shape the host's alias table states itself
-(``{namespace, keys, platform, renamed}``, the host's 297): its platform ids name the toy
-estate's metric view ``semantics.shop_claims`` as an import of it would."""
+The alias tables here are written for the toy estate in the host's published format
+``metis.alias/1`` (the host's ticket 326; its real table for the vehicle estate is held in
+``test_ontology_alias_table.py``): their platform ids name the toy estate's metric view
+``shop_claims`` as the host's import of it would (``<kind>:<source>.<view>.<field>``), and
+their version is their table's digest."""
 
 from __future__ import annotations
 
@@ -17,10 +19,17 @@ import rdflib
 from _ontology_toy import Project
 from latence_ontology import SCHEMAS
 from latence_ontology.cli import build
+from latence_ontology.crosswalk import table_version
 from latence_ontology.iris import Iris, confirm, minted
 
 SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
 SKOS = rdflib.Namespace("http://www.w3.org/2004/02/skos/core#")
+
+
+def alias_file(table: dict[str, Any]) -> dict[str, Any]:
+    """An alias file (``metis.alias/1``) holding ``table``."""
+    return {**table, "format": "metis.alias/1", "catalog": "toy@1.0.0", "version": table_version(table)}
+
 
 TABLE: dict[str, Any] = {
     "namespace": "shop",
@@ -30,8 +39,8 @@ TABLE: dict[str, Any] = {
         "measure:claim_count": "measure:shop.claim_count",
     },
     "platform": {
-        "dimension:make": ["dimension:demo.semantics.shop_claims.make"],
-        "measure:claim_count": ["measure:demo.semantics.shop_claims.claim_count"],
+        "dimension:make": ["dimension:lakehouse.shop_claims.make"],
+        "measure:claim_count": ["measure:lakehouse.shop_claims.claim_count"],
     },
     "renamed": {},
 }
@@ -155,7 +164,7 @@ def test_the_hosts_key_comes_from_its_alias_table_and_is_never_guessed(
     project: Project, tmp_path: Path
 ) -> None:
     table = tmp_path / "alias.json"
-    table.write_text(json.dumps(TABLE))
+    table.write_text(json.dumps(alias_file(TABLE)))
     build(**project, alias_tables=(table,))
     export = _export(project)
     jsonschema.validate(export, SCHEMA)
@@ -185,11 +194,11 @@ def test_the_hosts_key_comes_from_its_alias_table_and_is_never_guessed(
 
 def test_two_keys_for_one_element_give_it_none(project: Project, tmp_path: Path) -> None:
     other = {**TABLE, "namespace": "sales", "keys": {"dimension:brand": "dimension:sales.brand"},
-             "platform": {"dimension:brand": ["dimension:prod.semantics.shop_claims.make"]}}
+             "platform": {"dimension:brand": ["dimension:sales.shop_claims.make"]}}
     paths = []
     for n, t in enumerate((TABLE, other)):
         paths.append(tmp_path / f"alias{n}.json")
-        paths[-1].write_text(json.dumps(t))
+        paths[-1].write_text(json.dumps(alias_file(t)))
     build(**project, alias_tables=tuple(paths))
     export = _export(project)
     make = next(c for c in export["concepts"] if c["id"] == "concept:value:make")

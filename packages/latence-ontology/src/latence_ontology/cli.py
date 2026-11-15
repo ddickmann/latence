@@ -744,8 +744,8 @@ def main() -> None:
         type=Path,
         action="append",
         default=[],
-        help="a host's alias table (its keys and the platform ids they were read from); an "
-        "element it names carries the host's key; repeat for more",
+        help="a host's alias file (metis.alias/1: its keys and the platform ids they were read "
+        "from); an element it names carries the host's key; repeat for more",
     )
     b.add_argument(
         "--receipt",

@@ -242,7 +242,54 @@
       "without_key",
       "several_keys"
      ],
-     "description": "The host's alias tables read, and which elements got no key or several (ticket 57)."
+     "description": "The host's alias tables read (metis.alias/1, each with its version and the catalog version it was read from), and which elements got no key or several (ticket 57).",
+     "properties": {
+      "tables": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "required": [
+         "format",
+         "namespace",
+         "version",
+         "catalog",
+         "read_from"
+        ],
+        "properties": {
+         "format": {
+          "const": "metis.alias/1"
+         },
+         "namespace": {
+          "type": "string"
+         },
+         "version": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+         },
+         "catalog": {
+          "type": "string"
+         },
+         "read_from": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+         }
+        }
+       }
+      },
+      "without_key": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "views_named_twice": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "description": "Metric view names two schemas of the estate hold: a platform id names a view by its name only, so neither is matched."
+      }
+     }
     }
    }
   },

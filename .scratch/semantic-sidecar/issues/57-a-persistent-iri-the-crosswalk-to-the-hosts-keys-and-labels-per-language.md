@@ -2,7 +2,7 @@
 
 Type: build
 Mode: AFK
-Status: built (15 Nov); decided by the owner (15 Nov): option (a), as built; open: the host's command that writes its alias table, and the host-side test
+Status: resolved (15 Nov): built, decided by the owner (option (a)), and the crosswalk read from the host's real alias table (`metis.alias/1`, its 326); live: the crosswalk against the workspace (`--databricks`), the owner's step
 Blocked by: nothing on this side (56 is done); the host's 296 and 297 are decided and built
 Emerges from: the host's drafted ticket B-1 (15 Nov), for its v1; ADR-0073 point 4 (opaque IRIs,
 not built); `latence_ontology/turtle.py` (an IRI is a hash of the name-based id);
@@ -105,3 +105,85 @@ Built in `latence-ontology`, option (a) of the open decision.
 - **The host-side test** ("a test on both sides"): the host's guard was run here against the
   export; a test in the host's suite holding an export with `iri`, `labels` and `match` is the
   host's to add (this repository never writes there).
+
+## Result: the host's real alias table (15 Nov, second pass)
+
+The host now writes its alias table: `metis-dev concepts alias --library estate-semantics --out
+<file>` (its 326), in its published format `metis.alias/1`. The table of the vehicle estate's
+library is copied in as a test fixture, byte for byte, with where it came from beside it
+(`packages/latence-ontology/tests/fixtures/alias/estate-semantics.json` and `SOURCE.md`: the
+host's commit `e4b71867c57a537bb4c7203b801df487f3cdd788`, its
+`tools/dev/tests/fixtures/alias/estate-semantics.json`). No code of the host came in.
+
+- **The real shape differed from the stand-in on two points**, and the reader is fixed to it
+  (`crosswalk.py`). (1) The file states `format`, `catalog` and `version` around the table;
+  `version` is the table's digest (`sha256:` of the RFC 8785 canonical JSON of `{namespace,
+  keys, platform, renamed}`), which this side recomputes from the format and checks. (2) A
+  platform id is `<kind>:<source>.<view>.<field>`, where `<source>` is the host's name for the
+  catalog source in its layer (`lakehouse`), not `<kind>:<catalog>.<schema>.<view>.<field>` as
+  57 assumed: 57's reader compared `clean_complaints.make` with
+  `nhtsa_semantics.clean_complaints.make` and named no key at all on the vehicle estate. It now
+  compares kind, view and field; the source part is the host's own name and is not compared. A
+  view name two schemas of the estate hold is matched by neither, and listed
+  (`meta.crosswalk.views_named_twice`).
+- **Refused**: a file whose `format` is not `metis.alias/1` (the stand-in's shape, which stated
+  none, among them), a file whose `version` is not its table's digest, a key that is no key of
+  the host's kinds, a platform id not of the host's shape.
+- **Recorded**: `meta.crosswalk.tables` carries each table's `format`, `namespace`, `version`,
+  `catalog` and `read_from`; `without_key` now lists every measure and value set the tables do
+  not name, a value set no view's dimension reads among them (before, only those a view read).
+- **The vehicle estate with the host's table**: all 39 measures and 7 of 10 value sets name
+  their key (46 matched, the make as `dimension:estate.make` from the views of both domains);
+  `concept:value:kind` is claimed by `dimension:estate.campaign_kind` and
+  `dimension:estate.line_kind` (one column name over two objects) and gets neither, listed in
+  `several_keys`; `distance_unit` and `subject` (no view's dimension reads them) get none and are
+  listed in `without_key`. Nothing is named from a name: the table holds keys with no platform
+  id (`measure:claimed_vehicle_count` and six others), and an element of that name gets none.
+- **The export stays `graph-export/3`**: the elements' `match` is unchanged in shape; what is
+  added is in `meta.crosswalk`, which the version's schema left open, now stated in the JSON
+  Schema (each table's fields). Not bumped, because the host's guard serves `graph-export/3`
+  only and the change adds no field to an element it checks.
+- **The host's guard accepts it**: the host's own `refusals()` (its 238,
+  `metis_service.ontology_export`, run read-only from its checkout at the commit above) returns
+  nothing for the vehicle export built with the real table (46 elements with `match`); this
+  side's emulation (`test_ontology_host_guard.what_a_host_refuses`) is run on the same export in
+  the new test.
+- **Replaced everywhere**: the toy tests' tables are written in `metis.alias/1` with platform
+  ids of the host's shape (`test_ontology_identity.py`); the vehicle estate's test reads the
+  host's table, not the stand-in (`test_ontology_vehicle_estate.py`, key `dimension:estate.make`);
+  the estate's README run names `--alias-table`. The stand-in is gone.
+- **Tests, red first** (`tests/test_ontology_alias_table.py`, 6): on the tree before this
+  change 5 failed and 1 passed (the file was read; nothing checked its format or version, and
+  the vehicle build named no key); all pass now. They hold: (a) every element with a key names
+  exactly the key the table gives its platform id; (b) the make is `dimension:estate.make` with
+  `members: code`, and in the Turtle file the set is `skos:exactMatch` the key and each member
+  a (key, code) pair; (c) the table's version and catalog are in the export; (d) a measure or
+  value set the table does not name has no `match` and no `exactMatch`, and is listed; (e) a
+  file of another format, or with a wrong version, is refused. The build test needs the
+  vehicle mirror (`LATENCE_ONTOLOGY_VEHICLE_INPUTS`); it was run here with inputs written by
+  the host's tools at the commit above.
+
+### Live, the owner's step
+
+The crosswalk against the workspace, with the table read from the live import:
+
+```bash
+cd $METIS && uv run metis-dev concepts alias --library estate-semantics --databricks \
+    --out /tmp/estate-semantics.alias.json
+cd $LATENCE/.scratch/semantic-sidecar/estate
+PYTHONHASHSEED=0 uv run latence-ontology build --config estates/vehicles.yaml \
+    --catalog <workspace catalog> --verified $METIS/tools/synth/estates/catalog.yaml \
+    --class-answer estates/vehicles.classes_answer.gpt-6-luna.json \
+    --alias-table /tmp/estate-semantics.alias.json --out out/vehicles
+```
+
+Expected: `meta.crosswalk.tables[0].version` is the live table's, `several_keys` holds
+`concept:value:kind`, and the host's guard accepts the export.
+
+### Asked of the host (not this repository's)
+
+The host's own test of its guard holds a tracked export without `iri`, `labels` or `match`
+(`packages/metis-service/tests/test_ontology_export.py`, its fixture
+`reference-ui/e2e/fixtures/ontology.json`); refreshing that fixture from a build with the alias
+table is the host's change.
+
