@@ -12,7 +12,7 @@ import pytest
 import yaml
 from _ontology_toy import VIEWS
 from _ontology_uc_standin import StandIn
-from latence_ontology.reader_databricks import DatabricksReader, WarehouseError
+from latence_ontology.reader_databricks import DatabricksReader, WarehouseError, _http
 from latence_ontology.reader_duckdb import DuckDBReader
 from test_ontology_dialect import _all
 
@@ -197,3 +197,74 @@ def test_lineage_row_filters_and_column_masks_are_read_and_labelled_and_a_masked
 
 def test_a_mirror_reads_no_lineage_and_its_export_says_nothing_of_it(reader: DuckDBReader) -> None:
     assert reader.lineage() is None
+
+
+# ---- credentials travel only over https, to the host they were given for -------------------------
+
+
+def test_a_service_principal_secret_is_never_sent_to_a_plaintext_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheme is checked before the token exchange, not after it: a host given as plain http
+    gets no request at all, so the client secret never leaves in the clear."""
+    sent: list[str] = []
+
+    def http(method: str, url: str, headers: dict[str, str], body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
+        sent.append(url)
+        return 200, {}, b'{"access_token": "t"}'
+
+    monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+    monkeypatch.setenv("DATABRICKS_HOST", "http://workspace.invalid")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh1")
+    monkeypatch.setenv("DATABRICKS_CLIENT_ID", "principal")
+    monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", "s3cret")  # pragma: allowlist secret
+    with pytest.raises(ValueError, match="https://"):
+        DatabricksReader.from_env("demo", ("shop",), http=http)
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["http://127.0.0.1.attacker.invalid", "http://127.0.0.1@attacker.invalid", "http://workspace.invalid", "ftp://workspace.invalid", "https://"],
+)
+def test_only_https_or_the_loopback_address_is_accepted_as_a_host(host: str) -> None:
+    with pytest.raises(ValueError, match="https://"):
+        DatabricksReader(host, "good", "demo", ("shop",), "wh1")
+
+
+def test_a_redirect_is_refused_and_the_token_goes_nowhere_else() -> None:
+    """``urllib`` replays the request's headers to the host a redirect names, the bearer token
+    among them; the reader's wire turns every redirect into an error instead of following it."""
+    seen: list[str | None] = []
+
+    class Elsewhere(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args: Any) -> None:
+            return None
+
+    other = ThreadingHTTPServer(("127.0.0.1", 0), Elsewhere)
+
+    class Redirecting(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{other.server_port}/harvest")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirecting)
+    for s in (server, other):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        status, _headers, _body = _http("GET", f"http://127.0.0.1:{server.server_port}/api", {"Authorization": "Bearer good"})
+        assert status == 302
+        assert seen == []
+    finally:
+        server.shutdown()
+        other.shutdown()

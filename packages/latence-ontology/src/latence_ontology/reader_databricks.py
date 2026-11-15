@@ -61,12 +61,39 @@ class WarehouseError(RuntimeError):
     """The catalog or the warehouse did not give what was asked for."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is answered as what it is, never followed: ``urllib`` replays a request's
+    headers to the host a redirect names, and the token rides in one of them."""
+
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def checked_host(host: str) -> str:
+    """The workspace's address, refused unless it is ``https://<host>`` (or plain http to this
+    machine's loopback address, for a local stand-in): a token or a client secret is sent there."""
+    parts = urllib.parse.urlsplit(host)
+    if not (
+        parts.hostname
+        and parts.username is None
+        and (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in _LOOPBACK))
+    ):
+        raise ValueError("the host is given as https://<workspace>")
+    return host.rstrip("/")
+
+
 def _http(
     method: str, url: str, headers: dict[str, str], body: bytes | None = None, timeout: float = 60
 ) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers=headers)  # noqa: S310 - the scheme is checked where the host is given
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as answer:  # noqa: S310
+        with _OPENER.open(request, timeout=timeout) as answer:
             return answer.status, dict(answer.headers), answer.read()
     except urllib.error.HTTPError as err:
         return err.code, dict(err.headers), err.read()
@@ -93,10 +120,8 @@ class DatabricksReader:
         give_up_after: float = 900.0,
         http: Any = _http,
     ) -> None:
-        if not host.startswith("https://") and not host.startswith("http://127.0.0.1"):
-            raise ValueError("the host is given as https://<workspace>")
         self.host, self.token, self.catalog, self.schemas = (
-            host.rstrip("/"),
+            checked_host(host),
             token,
             catalog,
             tuple(schemas),
@@ -127,7 +152,7 @@ class DatabricksReader:
         ]
         if missing:
             raise WarehouseError(f"not set in the environment: {', '.join(missing)}")
-        host = os.environ["DATABRICKS_HOST"]
+        host = checked_host(os.environ["DATABRICKS_HOST"])  # before any secret is sent there
         token = os.environ.get("DATABRICKS_TOKEN") or cls._service_token(
             host, more.get("http", _http)
         )
