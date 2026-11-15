@@ -304,10 +304,10 @@ testpaths = ["packages"]
 faulthandler_timeout = 900
 
 # Coverage is SURFACED in CI (job summary + artifact + a badge-ready number), with a
-# floor in ci.yml (`--cov-fail-under=91`, set 2026-11-15 one point below the measured
-# 91.10%, branches included). The heavy/endpoint Providers' real backends are
-# monkeypatched, not executed, which is why the floor sits below the measured number
-# rather than at it. This config only shapes what the
+# floor in ci.yml (`--cov-fail-under=91`, set 2026-11-15 at the whole percent below the
+# measured 91.10%, branches included). The heavy/endpoint Providers' real backends are
+# monkeypatched, not executed, so a CI leg may read a little differently; the floor is
+# rounded down for that reason. This config only shapes what the
 # number MEANS: measure the packages' src, omit tests/conftest and the vendored ULTRA
 # subset so it reflects framework source coverage. It is inert unless `--cov` is passed
 # (CI does; scripts/verify-local.sh runs a plain `pytest` and is unaffected).
