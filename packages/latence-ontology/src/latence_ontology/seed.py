@@ -46,7 +46,7 @@ TOWN = {
     "Nürnberg": ("Nuernberg",),
     "Düsseldorf": ("Duesseldorf",),
 }
-TAIL = {"DE": ("Service", "Werkstatt", "Aftersales"), "GB": ("Service", "Workshop", "Aftersales")}
+TAIL = {"DE": ("Service", "Werkstatt", "Kundendienst"), "GB": ("Service", "Workshop", "Servicing")}
 
 
 @dataclass(frozen=True)

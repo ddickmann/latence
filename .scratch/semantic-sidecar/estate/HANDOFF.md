@@ -65,8 +65,10 @@ PYTHONHASHSEED=0 uv run latence-ontology build --config estates/vehicles.yaml \
 uv run latence-ontology export --out out/vehicles --ui-dir $METIS/reference-ui/public/data/ontology
 ```
 
-The build takes about a minute, most of it the record linker. Expected on the vehicle estate:
-39 concepts, 87 relations, 38 measures; 2,514 entities; 938 of 1,274 accounts linked.
+The build takes about a minute, most of it the record linker. Expected on the vehicle estate
+(15 Nov, with the host's inputs at its staging head): 40 concepts, 89 relations, 39 measures;
+2,514 entities; 963 of 1,274 accounts linked (938 before the seed's name tails changed,
+ticket 58).
 
 **5. The page**
 
@@ -267,8 +269,9 @@ answer's `upstreams[].tableInfo`) are the documented ones and have not met a wor
   them. The entity view draws the graph around one entity; choosing a box walks on from there.
 - **The second source is seeded.** The service accounts are generated from the dealers; the
   page marks them. They are there to show linking, not as a finding about the estate.
-- **What the machine links, it links under a certified line:** 938 accounts, at least 95%
-  right by the test, 916 right against the seed. In this build every label came from the
+- **What the machine links, it links under a certified line:** 963 accounts, at least 95%
+  right by the test, 939 right against the seed (938 and 916 before the seed's name tails
+  changed, ticket 58). In this build every label came from the
   seed's truth in place of a reviewer, and the page says so. A reviewer's labels are read
   when they exist; this was run once with 64 answers.
 - **On an estate this small the labels are most of the work** (1,300 labels for 1,274

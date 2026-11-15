@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import duckdb
-from latence_ontology.seed import NOTE, _key, create_sql, insert_sql, seed_accounts
+from latence_ontology.seed import NOTE, TAIL, _key, create_sql, insert_sql, seed_accounts
 
 DEALERS: list[dict[str, str | None]] = [
     {"dealer_id": "H1", "name": "Autohaus Elmhaus GmbH", "city": "Bremen", "market": "DE"},
@@ -70,3 +70,18 @@ def test_the_table_is_marked_as_seeded_and_holds_no_answer() -> None:
     assert not {"dealer_id", "cluster", "truth"} & {n for n, _ in cols}  # which dealer an account belongs to is not in the catalog
     held = con.execute("SELECT account_name FROM partner.service_accounts WHERE account_name ILIKE '%dell%'").fetchall()
     assert held and all("'" in n or "dell" in n.lower() for (n,) in held)  # an apostrophe survives the load
+
+
+def test_the_seeded_names_use_the_service_words_a_host_shows_its_clients() -> None:
+    # A host's client-terms guard lists the English word the seed used for a service
+    # department; the seeded accounts' name tails are "Kundendienst" (DE) and "Servicing" (GB)
+    # (ticket 58), and no other words.
+    assert TAIL == {"DE": ("Service", "Werkstatt", "Kundendienst"),
+                    "GB": ("Service", "Workshop", "Servicing")}
+    tails: dict[str, set[str]] = {"DE": set(), "GB": set()}
+    for seed in range(20):
+        accounts, _ = seed_accounts(DEALERS, seed=seed, others=6)
+        for a in accounts:
+            words = set(a.account_name.lower().split())
+            tails[a.country] |= words & {"kundendienst", "servicing", "werkstatt", "workshop"}
+    assert "kundendienst" in tails["DE"] and "servicing" in tails["GB"]

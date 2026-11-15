@@ -4,7 +4,11 @@ was meant to. ``PROTOTYPE`` holds the digests recorded from the estate prototype
 ``VEHICLES`` the digests of the files as they are now, re-recorded by the ticket that changed
 them: 57 added ``iri``, ``labels`` and ``match`` to the export and labels to the Turtle file, 58
 the labels' claims, and nothing else (the export without those three fields is still the prototype's bytes, which the
-toy estate's test checks on every run). The toy
+toy estate's test checks on every run). One change to the vehicle estate's input since: the
+seeded partner accounts' English service-department name tail became "Kundendienst" (DE)
+and "Servicing" (GB) (ticket 58), which changes 152 account labels of the export and nothing else (compared
+line by line when it was made); its prototype digest is re-recorded for that seed, the
+prototype's own beside it. The toy
 estate is built here on every run. The vehicle estate needs the host's mirror, its metric views,
 its usage log and its verified joins, which this repository does not hold, so its test runs when
 ``LATENCE_ONTOLOGY_VEHICLE_INPUTS`` names a folder with ``vehicles.duckdb``,
@@ -30,7 +34,8 @@ FILES = ("ontology.json", "ontology.ttl", "ontology.shacl.ttl", "ontology.prov.t
 
 PROTOTYPE = {
     "toy": "b284d1c462f5de81fdd237e853e2f487182747374b2ebb2fb963dc827ab45b57",  # pragma: allowlist secret
-    "vehicles": "05163c0730929426c3f0887315e8ced8eb2bd66fbd3035689b8dc758b2ca525f",  # pragma: allowlist secret
+    # The prototype's own was 05163c07...525f, with the seed's earlier name tails (ticket 58).
+    "vehicles": "b0067ef0c76435d9270ae4f95b18bc8d90ef29e3f83fb7e1bb21dedba59eb8f7",  # pragma: allowlist secret
 }
 """The export (``ontology.json``) of each estate as the prototype wrote it."""
 
@@ -44,7 +49,7 @@ TOY = {
 }
 
 VEHICLES = {
-    "ontology.json": "c7ad0afbbb6890b8d887e6e96841d3bfb22dcf19d9b8c7e51b6995ea58fb10d6",  # pragma: allowlist secret
+    "ontology.json": "aa9229141beae4f5493cba29e257b1a4a45da2545a137a1f79f5fdfd0be857a0",  # pragma: allowlist secret
     "ontology.ttl": "94da7765d4d71f9e745d0d7ad75f7247d3ed4c6ea4fed64fcfb6dc71c95bfd3f",  # pragma: allowlist secret
     "ontology.shacl.ttl": "cd661e923a370da7f7c44120be47618fb98a779e9ad1b269972e4a5a4f0b2afa",  # pragma: allowlist secret
     "ontology.prov.ttl": "3ffe9059465768154e6bcde294997b33d65bdc572c6560225a524bb40dc88038",  # pragma: allowlist secret

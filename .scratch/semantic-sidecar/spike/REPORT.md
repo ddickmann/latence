@@ -408,7 +408,9 @@ the way, each fixed with a test that failed first:
 
 With these: 938 of the 1,274 accounts are linked to a dealer by the machine, 916 of them
 right (97.7%), which is 85% of the accounts that belong to a dealer; 304 pairs wait for a
-person; both lines are certified. It cost 1,300 labels, about as many as there are accounts:
+person; both lines are certified. Re-run on 15 Nov after the seed's English service-department
+name tail became "Kundendienst" (DE) and "Servicing" (GB) (ticket 58): 963 linked, 939 right (97.5%),
+87% of the accounts that belong to a dealer, 152 pairs wait for a person, both lines certified. It cost 1,300 labels, about as many as there are accounts:
 **on an estate this small the labels are most of the work, and the gain is in the size.**
 
 **What this says about new data.**

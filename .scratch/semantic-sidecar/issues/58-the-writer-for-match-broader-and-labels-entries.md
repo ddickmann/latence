@@ -115,3 +115,36 @@ roles, no person's name); **proposed, and confirmed by the owner on 15 Nov.**
   make], close: false}` with both certifications in its origin, in a file of format
   `layer-proposal/3`. The test of the domains themselves (every schema in one domain, a role as
   each data owner, the derived layer in none) runs everywhere.
+
+## Result: the seed's service-department word (15 Nov)
+
+The host's client-terms guard lists the English word the seed used as a tail of the seeded
+partner accounts' names. The tails are now "Kundendienst" (DE) and "Servicing" (GB), the
+word the host's test export already uses (`latence_ontology/seed.py`, `TAIL`); the random
+draws are unchanged (the same number of tails per market). Red first:
+`test_ontology_seed.py::test_the_seeded_names_use_the_service_words_a_host_shows_its_clients`
+failed on the tree before and passes now. No copy of the seed is left in the estate folder.
+
+The vehicle estate rebuilt with the host's inputs (its staging head, `e4b71867`), the seed
+11, the record linker (`--resolver ../spike`, `requirements-link.txt`) and the kept class
+answer, before and after:
+
+| | before | after |
+|---|---|---|
+| accounts linked to a dealer | 938 of 1,274 | 963 of 1,274 |
+| right against the seed | 916 (0.9765) | 939 (0.9751) |
+| share of the accounts that belong to a dealer found | 0.845 | 0.8662 |
+| pairs accepted / rejected / for a person | 938 / 38,867 / 304 | 963 / 38,994 / 152 |
+| candidate pairs | 40,109 | 40,109 |
+| both lines certified (target 0.95, simulated labels, 1,300) | yes | yes |
+| review items in the export | 207 | 159 |
+| edges | 7,656 | 7,681 |
+| concepts / relations / measures / entities | 40 / 89 / 39 / 2,514 | unchanged |
+
+Pinned bytes (the same-bytes test, the build without the record linker): `ontology.json`
+`c7ad0afb…10d6` → `aa922914…57a0`; the export as the prototype wrote it `05163c07…525f` →
+`b0067ef0…b8f7`. The two exports differ only in 152 seeded account labels whose tail changed
+(compared line by line); the Turtle, SHACL and PROV-O files are unchanged. The digests were
+re-recorded, no check was loosened, and the before build was checked first to reproduce the
+recorded digests. `HANDOFF.md` and the spike's `REPORT.md` state the new numbers with the old
+beside them.
