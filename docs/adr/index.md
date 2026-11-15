@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 73 records numbered 0001–0074.
+    the sequence simply skipped it), so the log holds 74 records numbered 0001–0075.
 
 ## Re-scope: the semantic-resolution and ontology engine
 
@@ -25,6 +25,7 @@ wayfinder map in `.scratch/semantic-sidecar/map.md`.
 | [0072](0072-on-databricks-the-engine-runs-as-jobs-in-the-workspace-and-keeps-its-state-in-delta.md) | On Databricks the engine runs as jobs in the customer's workspace and keeps the ledger, results and review state in Delta tables in Unity Catalog; the review surface is an in-workspace app with a local mode; neural models run on GPU job compute; review explanations are built in, hosted ones opt-in |
 | [0073](0073-the-schema-level-is-induced-by-voting-signals-validated-on-data-and-exported-in-w3c-standards.md) | The schema level is induced by several voting signals (declared constraints, data statistics, names, a model as one voice); a proposed constraint is run against the data before review; v1 exports OWL 2 QL, SHACL 1.1, SKOS, PROV-O and metric-view YAML; identifiers are opaque and the private vocabulary goes |
 | [0074](0074-a-host-shows-the-engines-export-in-a-read-only-screen-of-its-own-off-the-answer-path.md) | A host application shows the engine's ontology and graph in a screen it owns, written in its own style; the two share only the export's file format. The screen is read-only and off the answer path, the export is a file first and a service route later, and reviewer decisions travel back as a file. |
+| [0075](0075-older-resolution-modules-that-a-measurement-shows-add-no-value-are-retired-from-the-shipped-stacks.md) | Older resolution modules a measurement shows add no value are retired from the shipped stacks and the demo: the string cascade and the embedding Disambiguator on its hashing default; `latence stack check` warns on a retired use; the Providers stay registered; Type Consolidation stays |
 
 ## Foundations & scope
 

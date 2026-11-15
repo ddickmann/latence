@@ -79,6 +79,7 @@ from latence_core.errors import ConfigError
 from latence_core.pipeline import Pipeline, removed_config_keys
 from latence_core.reuse_overlay import stage_produces
 from latence_core.run_store import stage_output_type
+from latence_core.stacks.retired import retired_use
 from latence_core.subprovider import (
     class_satisfies_capability,
     slots_for,
@@ -104,8 +105,9 @@ _TYPO_RATIO = 0.9
 class Severity(StrEnum):
     """Whether a finding blocks (``error``) or merely informs (``warning``).
 
-    Only ``error`` fails :attr:`StackCheck.ok`. A ``warning`` is for something this HOST cannot
-    decide — the one case being a Provider package that is legitimately not installed here.
+    Only ``error`` fails :attr:`StackCheck.ok`. A ``warning`` is for something that should not
+    stop a run: a Provider package that is legitimately not installed on this host, or a
+    Provider a measurement retired (ADR-0075), which still runs where a Pipeline names it.
     """
 
     ERROR = "error"
@@ -117,7 +119,8 @@ class Finding:
     """One thing wrong with a stack, addressed to the operator who has to fix it.
 
     ``check`` names the family (``structure`` / ``phase_boundary`` / ``capability`` / ``provider``
-    / ``sub_provider`` / ``config_key`` / ``wiring``) so CI can filter; ``stage`` is the Stage it
+    / ``sub_provider`` / ``config_key`` / ``wiring`` / ``retired``) so CI can filter; ``stage`` is
+    the Stage it
     belongs to (``None`` for a whole-document finding); ``message`` says what to change.
     """
 
@@ -211,10 +214,20 @@ def check_stack(
         findings.extend(_sub_provider_findings(stage, installed, registry))
         findings.extend(_config_key_findings(stage))
         findings.extend(_wiring_findings(stage, pipeline))
+        findings.extend(_retired_findings(stage))
     return StackCheck(tuple(findings))
 
 
 # -- the individual checks -----------------------------------------------------
+
+
+def _retired_findings(stage: Stage) -> tuple[Finding, ...]:
+    """A Provider a measurement retired (ADR-0075): a WARNING naming the measurement and what to
+    use instead. The Pipeline still runs; no shipped stack names one."""
+    why = retired_use(stage.provider, stage.config)
+    if why is None:
+        return ()
+    return (Finding(check="retired", severity=Severity.WARNING, message=why, stage=stage.name),)
 
 
 def _phase_boundary_findings(pipeline: Pipeline) -> tuple[Finding, ...]:

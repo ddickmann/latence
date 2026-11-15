@@ -60,7 +60,7 @@ and four planted dangerous files. It reports:
 
 ```
   documents: 4 ingested, 3 quarantined, 1 flagged
-  graph:     6 nodes, 33 edges, 2 KB-linked, 33 edges with Evidence
+  graph:     7 nodes, 34 edges, 3 KB-linked, 34 edges with Evidence
   contracts: complete
   screening checks:
     - archive.zip: expected quarantine:zip_bomb, got quarantine:zip_bomb [ok]
@@ -71,7 +71,7 @@ and four planted dangerous files. It reports:
 
 The zip bomb, the oversized file and the `.pdf` that is not a PDF are quarantined before parsing.
 The prompt-injection document is flagged and kept in the corpus with its marker, so a consumer
-can exclude it. Each of the 33 graph edges carries the sentence it came from. `latence-demo`
+can exclude it. Each of the 34 graph edges carries the sentence it came from. `latence-demo`
 exits non-zero if any of that stops being true.
 
 **Swapping a model is one line.** The pipeline does not change:
@@ -151,7 +151,7 @@ interface such as `Parser`, `EntityExtractor` or `Embedder`, and the core never 
 Providers live in their own installable packages, so nothing pulls torch into your environment
 unless you ask for it. A **Runner** executes a Pipeline. **Storage** is one fsspec seam. Every
 record carries Provenance and Classification, validated at every Stage boundary. The reasoning
-behind each choice is written down: **73 architecture decisions** in [`docs/adr/`](./docs/adr/),
+behind each choice is written down: **74 architecture decisions** in [`docs/adr/`](./docs/adr/),
 and the glossary that fixes the vocabulary in [`CONTEXT.md`](./CONTEXT.md).
 
 ---

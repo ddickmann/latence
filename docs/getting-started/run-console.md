@@ -47,9 +47,9 @@ how many documents it read, when it started and finished, and a status:
 **The Quality Report view.** Select a run and the report is rendered as headline verdicts
 first — plain sentences with the numbers in them:
 
-> *Every one of the 82 pieces of output can be traced back to the exact page it came from.*
+> *Every one of the 86 pieces of output can be traced back to the exact page it came from.*
 >
-> *The knowledge graph holds 6 things connected by 33 relationships, 100.0% of which quote the
+> *The knowledge graph holds 7 things connected by 34 relationships, 100.0% of which quote the
 > sentence they came from.*
 >
 > *3 files were held back as unsafe and 1 item was flagged for review.*

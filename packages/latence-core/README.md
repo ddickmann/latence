@@ -197,8 +197,12 @@ The CPU reference path is required and works with **no embedder and no KB** (the
 token-similarity stand-in and the empty-KB fallback); a FAISS/GPU blocking Provider is a
 pluggable option behind the same `Disambiguator` seam, **not** required (ADR-0026).
 
-- **`disambiguation.cascade`** ships in core (pure-Python, deterministic, no model
-  download). Config: `aliases`, `min_confidence` (0.82), `alias_confidence` (0.95),
+- **`disambiguation.exact_surface`** is the shipped stacks' Disambiguator: exact normalised
+  surfaces, configured `aliases` and the same KB linking. **`disambiguation.cascade`** (the
+  five-rung cascade below) ships in core but is retired from the shipped stacks (ADR-0075: its
+  fuzzy rungs lowered precision by 0.19 for 0.019 F1 on the text-side gold set), and
+  `latence stack check` warns on a stack that names it. The cascade is pure-Python,
+  deterministic and needs no model download. Config: `aliases`, `min_confidence` (0.82), `alias_confidence` (0.95),
   `acronym_confidence` (0.9), `embedding_threshold` (0.75), `min_substring_ratio` (0.5),
   `enable_embedding` (true); `kb` + `kb_threshold` (0.5) for linking; `label_aliases`,
   `inverses`, `allowed_labels`, `label_threshold` (0.6) for relation normalisation.
@@ -206,7 +210,7 @@ pluggable option behind the same `Disambiguator` seam, **not** required (ADR-002
   ```yaml
     - name: disambiguate
       capability: disambiguation
-      provider: disambiguation.cascade
+      provider: disambiguation.exact_surface
       depends_on: [entities, relations]   # relations is optional (entity-only otherwise)
   ```
 

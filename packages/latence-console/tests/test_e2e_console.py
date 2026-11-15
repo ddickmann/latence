@@ -67,7 +67,7 @@ def test_the_console_serves_the_demo_corpus_over_a_real_socket(demo_corpus: str)
 
         # The demo's own headline facts, rendered as sentences (not JSON).
         assert "can be traced back to the exact page it came from" in page
-        assert "knowledge graph holds 6 things connected by 33 relationships" in page
+        assert "knowledge graph holds 7 things connected by 34 relationships" in page
         assert "3 files held back as unsafe, 1 item flagged for review." in page
         assert "zip compression ratio" in page
         assert render.external_references(page) == []
@@ -130,12 +130,12 @@ def test_the_deepened_views_work_on_the_demo_corpus(demo_corpus: str) -> None:
     assert "Sensitivity" in inspected
     assert "Redaction" in inspected
 
-    # 3. The KG browser shows the demo's 6 entities and every one of its 33 edges, each
+    # 3. The KG browser shows the demo's 7 entities and every one of its 34 edges, each
     #    with the Evidence that justifies it — the demo's own headline graph numbers.
     graph = page("/run/demo/graph")
-    assert "Entities (6)" in graph
-    assert "Relations (33)" in graph
-    assert graph.count("Evidence — confidence") == 33
+    assert "Entities (7)" in graph
+    assert "Relations (34)" in graph
+    assert graph.count("Evidence — confidence") == 34
 
     entity_hrefs = re.findall(r'href="(/run/demo/entity\?id=[^"]+)"', graph)
     assert entity_hrefs

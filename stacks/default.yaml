@@ -12,7 +12,7 @@
 #     -> Relation Extraction   (relation.pattern: deterministic windowed relations)
 #     -> Redaction             (redaction.hybrid_rule: comprehensive-by-default PII, H-C1)
 #     -> Profiling             (profiling.statistical: corpus-level quality features)
-#     -> Disambiguation        (disambiguation.cascade: ported 5-strategy resolver + merge)
+#     -> Disambiguation        (disambiguation.exact_surface: exact surfaces + aliases + KB; ADR-0075)
 #     -> Graph Assembly        (graph.canonical: nodes/edges + per-edge Evidence)
 #     -> Export (KG)           (export.knowledge_graph: Parquet + TTL + GraphML)
 #     -> Export (RAG corpus)   (export.jsonl_parquet: the redacted, chunked, embeddable corpus)
@@ -96,7 +96,7 @@ stages:
 
   - name: disambiguate
     capability: disambiguation
-    provider: disambiguation.cascade   # ported EntityResolver cascade (S8)
+    provider: disambiguation.exact_surface   # exact surfaces + aliases (ADR-0075: the cascade is retired)
     depends_on: [entities, relations]
     config:
       kb:

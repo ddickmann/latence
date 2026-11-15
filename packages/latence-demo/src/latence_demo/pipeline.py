@@ -151,7 +151,7 @@ def build_pipeline(
         Stage(
             name="disambiguate",
             capability=CapabilityKind.DISAMBIGUATION,
-            provider="disambiguation.cascade",
+            provider="disambiguation.exact_surface",  # ADR-0075: the cascade is retired
             config={
                 "kb": [
                     {"kb_id": "Q1", "name": "Acme", "entity_type": "ORG"},

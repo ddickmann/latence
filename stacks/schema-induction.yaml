@@ -124,7 +124,7 @@ stages:
 
   - name: disambiguate
     capability: disambiguation
-    provider: disambiguation.cascade
+    provider: disambiguation.exact_surface   # ADR-0075: the cascade is retired
     depends_on: [extract]
     config:
       kb:

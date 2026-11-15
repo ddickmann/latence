@@ -62,7 +62,7 @@ uv run latence-demo --storage-uri file://$PWD/demo-out --run-id demo
 
 ```
   documents: 4 ingested, 3 quarantined, 1 flagged
-  graph:     6 nodes, 33 edges, 2 KB-linked, 33 edges with Evidence
+  graph:     7 nodes, 34 edges, 3 KB-linked, 34 edges with Evidence
   contracts: complete
   screening checks:
     - archive.zip: expected quarantine:zip_bomb, got quarantine:zip_bomb [ok]
@@ -79,9 +79,9 @@ this command is a smoke test as well as a display.
 The last line prints a `file://` URL for a **self-contained** HTML viewer — one file, inlined CSS,
 no CDN, no network. Open it.
 
-✓ **look for** — the six-node graph, and beneath it a table headed **"Edges & per-edge Evidence"**
+✓ **look for** — the seven-node graph, and beneath it a table headed **"Edges & per-edge Evidence"**
 with a row per edge: head, relation, tail, confidence, the **evidence mentions** the edge was built
-from, and the source documents. All 33 edges carry it. Evidence on every edge is a contract, not a
+from, and the source documents. All 34 edges carry it. Evidence on every edge is a contract, not a
 nicety — it is what makes an assembled graph auditable rather than merely plausible.
 
 ---

@@ -2,7 +2,7 @@
 
 Type: task
 Mode: HITL (the learned run needs a GPU: the owner's machine)
-Status: open
+Status: resolved on CPU (15 Nov): the hashing default is retired (ADR-0075); open: the learned run (live request)
 Blocked by: the learned run (a live request)
 Emerges from: 50 (measured 15 Nov: retire on the hashing embedder)
 
@@ -28,3 +28,19 @@ On the owner's machine, with a GPU: run `benchmark/resolution-modules/measure.py
 embedding Disambiguator configured as `stacks/gpu-sota.yaml` configures it
 (`embedding.sentence_transformers` on `cuda`), and the GLinker linker as
 `stacks/gpu-sota-glinker.yaml` does, and record both results beside `results.json`.
+
+## Result (15 Nov)
+
+ADR-0075, with 60. The ADR chose the second option of the goal in the form of the first ticket's
+retirement: no shipped stack runs it on the hashing default (none did: the GPU stacks configure
+`embedding.sentence_transformers`), and `latence stack check` gives a `retired` WARNING for
+`disambiguation.embedding` with no `embedder`, naming the measurement (−0.043 F1, −0.33
+precision) and what to configure instead. Making the Provider refuse without an embedder was
+rejected: its offline tests and the conformance suite run it on the hashing embedder. Tested in
+`test_retired_providers.py` (warned without an embedder, silent with a learned one).
+
+### Live request (unchanged)
+
+On a GPU host: `benchmark/resolution-modules/measure.py` with the embedding Disambiguator
+configured as `stacks/gpu-sota.yaml` configures it, and the GLinker linker as
+`stacks/gpu-sota-glinker.yaml` does; the GPU stacks are then judged by the same rule.
