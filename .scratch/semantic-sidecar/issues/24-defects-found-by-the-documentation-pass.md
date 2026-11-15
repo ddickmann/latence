@@ -2,7 +2,7 @@
 
 Type: task
 Mode: HITL
-Status: open: the five defects found and not fixed are done (14 Nov); item 9 (compose and Helm) is still not run, and the spend cap stays as decided (C)
+Status: open: the five defects are done (14 Nov); item 9 checked as far as this machine allows (15 Nov: the chart rendered, linted and schema-valid; the compose files valid against the Compose specification); `helm install` and `docker compose up` are a live request; the spend cap stays as decided (C)
 Decided by the owner (12 Nov): Should the benchmark campaign's spend cap be a hard stop; Decide
 when the campaign is next used
 Blocked by:
@@ -217,3 +217,27 @@ tree before the fix and is green after it.
 **Still open:** item 9 (needs `helm` and a docker daemon; neither is here: a live request on the
 owner's machine: the compose and Helm commands of `docs/deployment.md`, as written). The spend cap
 stays as decided on 12 Nov (C: decided when the campaign is next used).
+
+## Item 9, checked (15 Nov)
+
+What runs without a cluster and without a docker daemon, run on the commands of
+`docs/deployment.md` as written, with helm v3.16 and kubeconform:
+
+- `helm lint deploy/helm/latence` and `helm lint --strict`: 0 charts failed (one INFO: no icon).
+- `helm template rel deploy/helm/latence` (the doc's render command), and four more variants of
+  the doc's values: the CronJob (`--set pipeline.kind=cronjob --set pipeline.schedule="0 2 * * *"`,
+  `concurrencyPolicy: Forbid` rendered), the LLM server on (`vllmLlm.enabled=true`), an external
+  OCR endpoint (`vllmOcr.enabled=false`, `stack.ocrBaseUrl=...`: the stack's `base_url` is the
+  given one), and an existing Secret, metrics on and an existing data claim. Every one renders,
+  and `kubeconform -strict -kubernetes-version 1.30.0` finds every resource valid (6, 6, 8, 4 and
+  5 resources; 0 invalid, 0 errors, 0 skipped).
+- The stack each variant renders into its ConfigMap passes `latence stack check` (0 errors,
+  0 warnings), as does `deploy/stacks/served-ocr.yaml`, the stack the compose file runs.
+- `deploy/docker-compose.yml` and `demo/docker-compose.yml` are valid against the Compose
+  specification's published JSON Schema (fetched from the compose-spec repository).
+
+**Not run, and why:** `helm install` needs a Kubernetes cluster, and `docker compose up --build`
+needs a docker daemon and, for `vllm-ocr`, a GPU with the NVIDIA Container Toolkit: none is on
+this machine (docker is not available here). **Live request** (the owner's machine): the
+`docker compose up --build` of Option A on a GPU host, and `helm install latence
+deploy/helm/latence -n latence --create-namespace` on a cluster, as the doc writes them.
