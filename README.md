@@ -39,8 +39,9 @@ The framework names no model. Each Stage depends on a narrow interface, a **Capa
 key. Every Stage has a deterministic reference Provider that runs on a laptop with no GPU and no
 network.
 
-This page describes what the code does today. The project has been re-scoped, and that work is
-not built: see [Where this is going](#where-this-is-going).
+This page describes what the code does today. The project has been re-scoped into an ontology
+engine; its first part, the ontology build over a data estate, ships as `latence-ontology`, and
+the rest is not built yet: see [Where this is going](#where-this-is-going).
 
 ---
 
@@ -209,8 +210,21 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down:
 
 ## Where this is going
 
-**Nothing in this section is built.** It states decisions that are recorded and accepted. The
-code described above does not implement them.
+This section states decisions that are recorded and accepted. Part of them is built, in two
+packages outside the document pipeline described above:
+
+- **`latence-ontology`** reads an estate's catalog (a DuckDB mirror, or Unity Catalog through the
+  Databricks REST API), induces the schema level of its ontology with the evidence for every
+  element, keeps assertions and decisions in an append-only ledger whose replay is the layer,
+  and writes the `graph-export/3` file with OWL 2 QL and SKOS Turtle, SHACL shapes and PROV-O
+  beside it. Its command is `latence-ontology`; [its README](./packages/latence-ontology/README.md)
+  has the commands.
+- **`latence-proposal-writer`** writes the proposal file, the one seam to a host's semantic
+  layer, from approved decisions only.
+
+Not built: the engine running as jobs in a customer's workspace with its state in Delta tables
+(ADR-0072 below), and the document path feeding the ontology. Neither package is on PyPI; both
+install from a clone like everything else here.
 
 The project was re-scoped in November 2026
 ([ADR-0067](./docs/adr/0067-latence-is-re-scoped-into-a-semantic-resolution-and-ontology-engine-standalone-and-as-a-metis-sidecar.md)).

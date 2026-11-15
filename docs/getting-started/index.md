@@ -84,6 +84,18 @@ CLI stays dependency-thin:
 | --- | --- |
 | `latence-console <location>` | Serve the read-only run console over a Storage location ([Read the results](run-console.md)). |
 
+## The other packages in a clone
+
+Each has its own README under `packages/`. `uv sync` installs the first three;
+`latence-label-profiler` has no dependencies and its tests import it from its source.
+
+| Package | What it is |
+|---|---|
+| `latence-ontology` | The ontology build over a data estate (`latence-ontology build`), with Turtle, SHACL and PROV-O beside its export. |
+| `latence-proposal-writer` | Writes the proposal file a host's semantic layer reads, from approved decisions only. |
+| `latence-benchmark` | The public benchmark harness (`latence-benchmark`, `latence-campaign`, `latence-label`). |
+| `latence-label-profiler` | The model-free corpus profiler behind `label_inducer.lexicon` (`latence-label-profile`). |
+
 ## Where to go next
 
 - Want to show a run to a non-engineer? [Read the results](run-console.md) — the run console.
