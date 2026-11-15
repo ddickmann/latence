@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The campaign wizard: byte-determinism, contradiction rejection, extensible parsing."""
 
 from __future__ import annotations

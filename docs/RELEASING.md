@@ -314,7 +314,9 @@ corporate SCA scanners hard-block the `PolyForm-Noncommercial-1.0.0` SPDX identi
 publishing would have put the artifact in a channel whose majority consumer was, by the
 licence's own terms, unlicensed.
 
-[ADR-0063](adr/0063-relicence-to-apache-2-0.md) relicensed the project to **Apache-2.0**, and
+[ADR-0063](adr/0063-relicence-to-apache-2-0.md) relicensed the project to **Apache-2.0** (since
+superseded for the private line by [ADR-0076](adr/0076-relicence-the-private-line-to-proprietary.md),
+under which nothing is published), and
 every one of those premises is now false: `pip install` consumers are licensed, no scanner
 blocks `Apache-2.0`, and there is no retained-subset invisibility problem because there is no
 retained subset. ADR-0062's own revisit condition ("reopen if the `pip install` audience

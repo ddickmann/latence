@@ -1,40 +1,31 @@
 Latence Framework
-Copyright 2026 Dennis Dickmann (latence.ai)
+Copyright (c) 2026 The Metis authors. All rights reserved.
 
-Required Notice: Copyright 2026 Dennis Dickmann
-(https://github.com/ddickmann/latence)
-
-This product includes software developed by Dennis Dickmann (latence.ai).
-Licensed under the Apache License, Version 2.0 — SPDX identifier Apache-2.0,
-reproduced verbatim in the LICENSE file. Commercial use is granted by that
-licence; no separate agreement is required.
+This software is proprietary — SPDX identifier LicenseRef-Proprietary, its terms
+reproduced verbatim in the LICENSE file. No licence is granted without the
+written permission of the copyright holders. The repository's public snapshot of
+2026-11-11 remains available under the Apache License, Version 2.0, the licence
+it was released under; nothing added or changed after it is (ADR-0076).
 
 PROVENANCE (not part of the licence terms): this repository carried an
 Apache-2.0 LICENSE from its first commit until 2026-07-29, was relicensed to
 PolyForm Noncommercial 1.0.0 on that date (ADR-0055), and was relicensed back to
-Apache-2.0 on 2026-08-15 (ADR-0063, which supersedes ADR-0055). Neither change
-reached anyone, because the software was never published under either: the
-development repository was private throughout, the public repository's history
-begins at an Apache-2.0 snapshot committed on 2026-11-11, no
-distribution was ever published to PyPI, no release was ever cut, no version tag
-exists, every commit is authored by the sole copyright holder, and no contributor
-licence agreement has ever been signed. So no one holds a grant under either
-superseded state, and Apache-2.0 is the only licence this software has ever been
-distributed under. The reasoning is in
-docs/adr/0063-relicence-to-apache-2-0.md; the LICENSE file itself is the
-canonical Apache-2.0 text and nothing else, so that scanners match it byte for
-byte.
+Apache-2.0 on 2026-08-15 (ADR-0063, which supersedes ADR-0055). Neither of those
+changes reached anyone, because the software was never published under either:
+the development repository was private throughout, no distribution was ever
+published to PyPI, no release was ever cut, no version tag exists, every commit
+until then was authored by the sole copyright holder, and no contributor licence
+agreement had been signed. The public repository's history begins at an
+Apache-2.0 snapshot committed on 2026-11-11; that grant was made and cannot be
+withdrawn, so that snapshot stays Apache-2.0 for anyone who holds it. On
+2026-11-15 the private line became proprietary (ADR-0076, which supersedes
+ADR-0063 for it): docs/adr/0076-relicence-the-private-line-to-proprietary.md.
+The earlier reasoning is in docs/adr/0063-relicence-to-apache-2-0.md.
 
-Under Apache-2.0 this project's inbound and outbound terms are the same, and
-commercial use — including use inside a for-profit company, in a product, or as
-a hosted service — needs no permission and no agreement from the copyright
-holder. COMMERCIAL.md exists only to say so to readers arriving from the
-superseded PolyForm-era pages.
-
-That licence covers the Latence Framework's own code and nothing else. The
+These terms cover the Latence Framework's own code and nothing else. The
 third-party software, model weights and datasets listed below and in
-THIRD-PARTY-LICENSES.md carry THEIR OWN licences, which the framework's licence
-neither changes nor overrides.
+THIRD-PARTY-LICENSES.md carry THEIR OWN licences, which the framework's terms
+neither change nor override.
 
 ================================================================================
 Third-party model weights offered as DEFAULT reference Providers

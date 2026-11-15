@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The ``latence-campaign`` staged-run engine (e2e-sota-run S1).
 
 This package productizes the shape ``benchmark/e2e/supervise.sh`` proved on the pod — a

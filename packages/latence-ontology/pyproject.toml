@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "The ontology build over a data estate: reads a catalog (a DuckDB mirror or Unity Catalog), induces the schema level of its ontology with the evidence for every element, keeps assertions and a person's decisions in an append-only ledger, and writes the graph-export/4 file with its Turtle, SHACL and PROV-O companions."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "LicenseRef-Proprietary"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "ontology", "semantic-layer", "data-catalog", "unity-catalog", "review"]

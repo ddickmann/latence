@@ -176,7 +176,7 @@ edges**.
 
 Everything else in the roster is a **zero-model Provider**: the plain-text parser, the chunker,
 both screeners, the profiler, the type consolidator, the exact-surface disambiguator, the graph
-assembler and both exports are deterministic, carry the repository's own Apache-2.0 licence and
+assembler and both exports are deterministic, carry the repository's own licence (`LicenseRef-Proprietary`) and
 load no weights. That is not an accident of scope — it is the reason a CPU host can execute most
 of the DAG.
 

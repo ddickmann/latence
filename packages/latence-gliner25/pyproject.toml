@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "GLiNER 2.5 Providers (fused zero-shot Entity+Relation extraction AND PII redaction) over the fastino gliner2 2.x boundary architecture, for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "LicenseRef-Proprietary"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "entity-extraction", "relation-extraction", "pii", "redaction", "gliner", "gliner2", "gliner25", "fused", "zero-shot"]

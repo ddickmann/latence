@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Third-party material in the tracked tree whose licence asks for attribution is named in NOTICE.
 
 ``NOTICE`` is the file Apache-2.0 §4(d) has every redistributor carry, so it is where a copy of

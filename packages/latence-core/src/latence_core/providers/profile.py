@@ -53,9 +53,11 @@ REPO_LICENSE_SOURCE = "LICENSE"
 # literals kept telling evaluators the code was permissive. It has since relicensed BACK to
 # Apache-2.0 (2026-08-15, ADR-0063) — which is exactly why this stays a single constant: the
 # value has now moved twice, and a hardcoded literal would have been wrong after each move.
+# On 2026-11-15 it moved a third time, to the proprietary ``LicenseRef-Proprietary``
+# (ADR-0076); the public snapshot of 2026-11-11 keeps ``Apache-2.0``.
 # Third-party library and weights licences are NOT this constant — they cite their own
 # upstream source.
-REPO_LICENSE_CODE = "Apache-2.0"
+REPO_LICENSE_CODE = "LicenseRef-Proprietary"
 
 # The compute a provider requires: it runs on CPU only, needs a GPU, or runs on
 # either (following the requested device / availability). Drives device routing and

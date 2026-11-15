@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The s3-pipeline stage, fully offline: gating, the dataset registry, preps, the pod loop.
 
 Same posture as the s2 suite: no ssh, no GPU, no OpenRouter — the pod is a scripted

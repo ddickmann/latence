@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "The optional adapter for a host's semantic layer (ADR-0070): writes the reviewable proposal file from the approved decisions of an ontology build, and reads back the receipt the host's tool writes when it has placed the file."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "LicenseRef-Proprietary"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "ontology", "semantic-layer", "review", "proposal", "data-catalog"]

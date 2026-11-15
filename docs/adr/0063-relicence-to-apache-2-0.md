@@ -1,6 +1,6 @@
 # Relicence to Apache-2.0 — the licence the intended adopter is allowed to install
 
-**Status: accepted (2026-08-15).** The project's outbound licence is the **Apache License
+**Status: accepted (2026-08-15); superseded for the private line by [ADR-0076](0076-relicence-the-private-line-to-proprietary.md) (2026-11-15), which keeps the public snapshot of 2026-11-11 on Apache-2.0.** The project's outbound licence is the **Apache License
 2.0** (SPDX `Apache-2.0`), replacing PolyForm Noncommercial 1.0.0. **Supersedes**
 [ADR-0055](0055-relicence-to-polyform-noncommercial.md) in its entirety, and restores the
 publication licence originally recorded in

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Every e-mail address in the tracked tree is one no one can receive mail at.
 
 Fixtures, examples and synthetic corpora are full of addresses, because PII is what this

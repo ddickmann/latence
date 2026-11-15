@@ -1,35 +1,28 @@
 # Third-party licenses
 
-> **The framework's own licence is Apache-2.0** (SPDX: `Apache-2.0`), see
-> [`LICENSE`](./LICENSE). It has moved twice: Apache-2.0 from the first commit,
-> PolyForm Noncommercial 1.0.0 from 2026-07-29 (ADR-0055), and back to Apache-2.0
-> on 2026-08-15 (ADR-0063, which supersedes it). It was **never published
-> publicly** under either superseded state — the development repository was private
-> throughout, the public repository's history begins at an Apache-2.0 snapshot of
-> 2026-11-11, nothing on PyPI,
-> no release cut, no tag, sole copyright holder across every commit — so both
-> relicences are clean and nobody holds a grant under a superseded one. The
-> verified provenance record is in [`NOTICE`](./NOTICE).
+> **The framework's own terms are proprietary** (SPDX: `LicenseRef-Proprietary`), see
+> [`LICENSE`](./LICENSE): all rights reserved, and no licence is granted without the
+> copyright holders' written permission (ADR-0076, 2026-11-15). The public snapshot of
+> 2026-11-11 was released under Apache-2.0 and stays so. Before that the licence moved
+> twice, while nothing was published: PolyForm Noncommercial 1.0.0 from 2026-07-29
+> (ADR-0055), and back to Apache-2.0 on 2026-08-15 (ADR-0063). The verified provenance
+> record is in [`NOTICE`](./NOTICE).
 >
-> **What that changes in this file, and what it does not.** The verified facts
-> below are unchanged: every licence, version, and verification date still holds,
-> across both relicences. What moves is the *framing*, and the honest version of
-> it has been the same throughout:
+> **What that changes in this file, and what it does not.** The verified facts below
+> are unchanged: every licence, version, and verification date still holds. What moves
+> is the *framing*:
 >
-> * **The outbound licence is not a shield.** Third-party terms bind the *user* of
->   this framework directly, independently of what licence the framework itself
->   carries. The LGPL-3.0, Gemma, NVIDIA-EULA and non-commercial-dataset
->   obligations recorded below bind you under Apache-2.0 exactly as they did under
->   PolyForm. Apache-2.0 grants you broad rights in *this* code and nothing else —
->   in particular, it does **not** make a research-only corpus or a
+> * **The project's terms are not a shield.** Third-party terms bind the *user* of this
+>   framework directly, whatever terms the framework itself carries. The LGPL-3.0,
+>   Gemma, NVIDIA-EULA and non-commercial-dataset obligations recorded below bind you
+>   under a written permission exactly as they did under Apache-2.0 — in particular, no
+>   permission from the copyright holders makes a research-only corpus or a
 >   CC-BY-NC-SA-licensed checkpoint usable commercially.
-> * **Inbound compatibility is easy in both directions, and always was.** Every
->   default-path dependency is permissive, so nothing here conflicts with an
->   Apache-2.0 outbound grant. Nothing became incompatible at either relicence.
-> * **Reciprocal licences are still the thing to watch.** A future inbound
->   GPL/AGPL dependency would be a problem — and is now a *harder* problem than it
->   was under PolyForm, because an Apache-2.0 outbound grant cannot absorb a
->   copyleft obligation. There is none today.
+> * **Inbound compatibility.** Every default-path dependency is permissive, so nothing
+>   here conflicts with distributing the framework on proprietary terms.
+> * **Reciprocal licences are still the thing to watch.** A future inbound GPL/AGPL
+>   dependency would impose its copyleft on a distribution of the framework, which
+>   proprietary terms cannot absorb. There is none today.
 >
 > This file records verified facts. It is not legal advice.
 

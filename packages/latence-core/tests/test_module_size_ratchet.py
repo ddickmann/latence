@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """No source module grows past 1,000 lines, and the ones already past it do not grow at all.
 
 A module past a thousand lines is one a reviewer can no longer hold in mind, and where an

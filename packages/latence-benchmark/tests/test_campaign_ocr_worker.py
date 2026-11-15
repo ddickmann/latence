@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The pod worker's pipelined scheduler, fully offline.
 
 Loads the REAL ``benchmark/sota-campaign/pod/ocr_worker.py`` with the package's

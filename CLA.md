@@ -28,11 +28,11 @@ arrived on *noncommercial* terms and could not lawfully have been included in a 
 grant — so every commercial licence issued afterwards would have been partly unauthorised.
 That was the entire reason this was a CLA and not a DCO.
 
-The project is now published under the **Apache License 2.0** ([`LICENSE`](./LICENSE),
-ADR-0063, which supersedes ADR-0055). Apache-2.0 §5 places every contribution under the same
-terms as the Work, there is no separate commercial grant to authorise, and **a DCO would now
-be sufficient**. Whether to replace this agreement with one is an open decision for the
-Maintainer, recorded in ADR-0063 and listed under
+Under the Apache License 2.0 (ADR-0063, 2026-08-15 to 2026-11-15) a DCO would have been
+sufficient. The Work is now **proprietary** ([`LICENSE`](./LICENSE), ADR-0076, which supersedes
+ADR-0063 for the private line): no licence is granted without the copyright holders' written
+permission, so Section 2 is again the grant that lets the Maintainer include a contribution in
+the Work it licenses. The public snapshot of 2026-11-11 stays Apache-2.0; see
 [Notes for the reviewer](#notes-for-the-reviewer).
 
 Until that decision is taken, `CONTRIBUTING.md` requires this agreement and it is the
@@ -111,7 +111,7 @@ Maintainer to license and sublicense Your Contributions, and derivative works of
 any licence terms the Maintainer chooses, including commercial and proprietary terms**, and to
 distribute them as part of the Work under terms other than those under which the Work is
 published at the time of Your Contribution. You acknowledge that the Work is currently
-published under the Apache License 2.0, which already permits commercial use by anyone
+proprietary, with no licence granted without written permission
 ([`COMMERCIAL.md`](./COMMERCIAL.md)), and that this Section grants the Maintainer a right that
 survives a future change to the Work's licence — it does not depend on the Work's licence at
 the time You sign.

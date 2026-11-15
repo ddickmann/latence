@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Every package in ``packages/`` is named on a page a newcomer reads first.
 
 A distribution no front-door page names is one a reader of this public repository cannot find:

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Stage ``s1-corpus`` — acquire the campaign datasets behind the license gate.
 
 The order of operations is the point: the **license gate runs before any byte moves**

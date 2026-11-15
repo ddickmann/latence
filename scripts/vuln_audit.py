@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Known-vulnerability gate over every committed lock file.
 
 Exports each lock (the workspace's ``uv.lock`` and ``packages/latence-gliner25/uv.lock``, which

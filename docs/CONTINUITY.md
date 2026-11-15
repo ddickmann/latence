@@ -34,39 +34,21 @@ outside any employer.
 
 ## 2. What survives the maintainer: license & fork posture
 
-- **Apache License 2.0** (SPDX `Apache-2.0`), repository root `LICENSE` — the canonical
-  text byte for byte — with `NOTICE` and per-package `license = "Apache-2.0"` metadata on
-  every publishable distribution. **Any** fork, commercial included, needs nobody's
-  permission and does not depend on the maintainer's cooperation or continued existence.
-  This is the single biggest change to this page's risk profile: the project carried
-  PolyForm Noncommercial from 2026-07-29 to 2026-08-15 (ADR-0055), under which the
-  commercial lane ran through one reachable person; [ADR-0063](adr/0063-relicence-to-apache-2-0.md)
-  relicensed back to Apache-2.0 and removed that dependency entirely. Read §1 and §5 with
-  that in mind — the bus factor still bites for *maintenance*, no longer for *rights*.
-- **No carve-outs, no exceptions.** Every file in the repository is Apache-2.0, and
-  `packages/latence-core/tests/test_publish_readiness.py` fails the build if any source
-  header, package manifest or licence document disagrees. (Under PolyForm, seven query-time
-  retrieval modules kept a file-level Apache-2.0 grant so those
-  algorithms stayed commercially reusable; that exception was dissolved by the relicence, and
-  the retrieval package itself has since been removed — ADR-0068.)
-- **The patent grant is broad and contributor-wide.** Apache-2.0 §3 grants a patent licence
-  from **every contributor**, for any purpose, terminating only if you initiate patent
-  litigation alleging the software infringes (§3's defensive-termination clause). This is
-  the clause enterprise legal reads after the identifier, and it is the reason ADR-0063
-  chose Apache-2.0 over MIT, which grants no patent licence at all.
-- **The grant is irrevocable.** Apache-2.0 §2 and §3 are perpetual and irrevocable, so a
-  fork is durable unconditionally. There is no cure-period clause that can end your rights,
-  and no field-of-use boundary anyone has to interpret.
-- **A CLA is currently required, though the reason it existed has gone.**
-  `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement*
-  requires a signed CLA on every contribution, including one-line and documentation
-  changes. It was written for the PolyForm model, where the owner could only grant
-  commercial licences over code he held sufficient rights in; Apache-2.0 §5 makes every
-  contribution arrive on the Work's own terms, so a DCO would now suffice and whether to
-  switch is an open decision (ADR-0063). While it stands, it is a real concentration of
-  rights in one person — it is the
-  deliberate trade for the commercial lane, not an oversight, and it is the opposite of
-  the inbound-equals-outbound posture this section previously described.
+- **Proprietary** (SPDX `LicenseRef-Proprietary`), repository root `LICENSE`: "Copyright
+  (c) 2026 The Metis authors. All rights reserved.", with no licence granted without the
+  copyright holders' written permission ([ADR-0076](adr/0076-relicence-the-private-line-to-proprietary.md)).
+  `NOTICE` and per-package `license = "LicenseRef-Proprietary"` metadata say the same on
+  every distribution. A fork of the current line needs that permission. A fork of the
+  public snapshot of 2026-11-11 does not: that snapshot was released under Apache-2.0 and
+  stays so, with Apache-2.0 §2's and §3's perpetual copyright and patent grants.
+- **No carve-outs, no exceptions.** Every file of the current line carries the same terms,
+  and `packages/latence-core/tests/test_publish_readiness.py` fails the build if any source
+  header, package manifest or licence document disagrees.
+- **A CLA is required.** `CONTRIBUTING.md` → *Before you write code: the Contributor
+  Licence Agreement* requires a signed CLA on every contribution, including one-line and
+  documentation changes. Under proprietary terms it is what lets the copyright holders
+  include a contribution in the work they license; it concentrates rights with them by
+  design.
 - **Permissive dependencies only.** `THIRD-PARTY-LICENSES.md` records every runtime
   dependency and every default model with its licence, and
   [ADR-0012](adr/0012-permissive-only-reference-providers-gemma-opt-in.md) makes
@@ -264,12 +246,13 @@ Regulation applies from 11 December 2027.
   project being FOSS released by an individual with "no monetisation attached to it". That
   premise ended on 2026-07-29 when the project relicensed to PolyForm Noncommercial and
   began offering commercial licences, and was restored on 2026-08-15 by
-  [ADR-0063](adr/0063-relicence-to-apache-2-0.md): the licence is Apache-2.0, there is no
-  commercial licence to sell, and nothing is monetised. Recorded rather than left implicit,
+  [ADR-0063](adr/0063-relicence-to-apache-2-0.md), and changed again on 2026-11-15 by
+  [ADR-0076](adr/0076-relicence-the-private-line-to-proprietary.md): the current line is
+  proprietary, and use needs the copyright holders' written permission. Recorded rather than left implicit,
   because the intervening state is in the git history and a reader will find it.
-- **Apache-2.0 is an OSI-approved open-source licence**, so the CRA's FOSS-specific
-  carve-outs are available to this repository on the same footing as before the PolyForm
-  interlude. Under PolyForm they were not, because it restricts the field of use.
+- **The proprietary line is not FOSS**, so the CRA's FOSS-specific carve-outs do not apply to
+  it; they apply to the Apache-2.0 snapshot of 2026-11-11 only. Under PolyForm they did not
+  apply either, because it restricts the field of use.
 - What has **not** changed, and still bears on the analysis: there is no legal person
   behind the project (§1), no hosted service, no phone-home, and no paid support
   contract or contractual response time (§4, §5.1). Charging for a commercial licence
@@ -302,7 +285,7 @@ you will be asked for:
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
 | Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
 | Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `docs/evidence/G1-RESULTS.md` |
-| Ability to remediate independently of the supplier | Apache-2.0 §2's irrevocable right to prepare and distribute derivative works + reproducible local gate (§2) — for **any** use, commercial included, with no agreement and no dependence on the maintainer |
+| Ability to remediate independently of the supplier | Under the written permission a licensee holds, plus the reproducible local gate (§2); for the Apache-2.0 snapshot of 2026-11-11, Apache-2.0 §2's irrevocable right to prepare and distribute derivative works |
 
 **What it does not give you**, and you must cover yourself: automated dependency-CVE
 gating (§5.5), a supported-version lifetime with backports (§4), and any contractual
@@ -318,7 +301,7 @@ goes red — so this page cannot quietly become aspirational.
 
 | Claim | Artifact |
 | --- | --- |
-| Apache-2.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md), [ADR-0063](adr/0063-relicence-to-apache-2-0.md) |
+| Proprietary (ADR-0076); the 2026-11-11 snapshot Apache-2.0 | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md), [ADR-0063](adr/0063-relicence-to-apache-2-0.md) |
 | Single maintainer, every path | `.github/CODEOWNERS` |
 | CLA required on every contribution | `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement* |
 | Docs-as-handover discipline | `CONTEXT.md`, [`docs/adr/`](adr/index.md), `CONTRIBUTING.md` → *ADR + CONTEXT discipline* |

@@ -3,18 +3,16 @@
 Deterministic, offline, dependency-free repo-hygiene tests. Each one fails if the
 publish-readiness fix is reverted:
 
-* the ``LICENSE`` really is the Apache License 2.0, reproduced VERBATIM (checked by
-  digest over the WHOLE file against the canonical text, not by keyword), and it is
-  mirrored byte-identically into every package that ships a wheel;
-* ``NOTICE`` carries the copyright, the current grant, and the relicence provenance
-  record — under Apache-2.0 the ``LICENSE`` file has to stay byte-canonical, so
-  NOTICE (the file Apache-2.0 §4(d) gives operative force to) is where this project's
-  own statements about its licence live;
+* the ``LICENSE`` is the proprietary notice ADR-0076 decided, reproduced VERBATIM (checked
+  by digest over the WHOLE file, not by keyword), and it is mirrored byte-identically into
+  every package that ships a wheel;
+* ``NOTICE`` carries the copyright, the current terms, and the relicence provenance record,
+  including the fact that the public snapshot of 2026-11-11 stays Apache-2.0;
 * ``COMMERCIAL.md`` and the governance/security docs exist at the repo root with the
-  expected, load-bearing content — including the fact that commercial use is GRANTED
-  BY THE LICENCE and needs no separate agreement;
+  expected, load-bearing content — including the fact that NO licence is granted without
+  the copyright holders' written permission;
 * every publishable workspace package's ``pyproject`` carries the PyPI metadata a
-  release needs — the ``Apache-2.0`` SPDX expression, no deprecated ``License ::``
+  release needs — the ``LicenseRef-Proprietary`` SPDX expression, no deprecated ``License ::``
   classifier, Python-version classifiers, ``keywords``, and ``project.urls`` — and
   none of it silently displaced the package's ``dependencies`` (the
   ``[project.urls]`` sub-table must come after every plain ``[project]`` key or TOML
@@ -37,6 +35,13 @@ source file's SPDX header — fails the build rather than shipping a distributio
 declared licence and shipped licence text disagree. They are deliberately as strict
 about Apache-2.0 as their predecessors were about PolyForm: a licence claim is only
 worth anything if it is falsifiable.
+
+On 2026-11-15 the private line became proprietary (ADR-0076, superseding ADR-0063 for that
+line). The public snapshot of 2026-11-11 stays Apache-2.0, because a grant made cannot be
+withdrawn; everything after it is "All rights reserved". The gates below moved with that
+decision, pin for pin: the canonical-text digest now pins the proprietary notice, the SPDX
+pin is ``LicenseRef-Proprietary``, and the NOTICE and COMMERCIAL.md facts are the new terms.
+None was deleted, and each is exactly as strict about the new terms as it was about the old.
 """
 
 from __future__ import annotations
@@ -72,31 +77,34 @@ def _mkdocs_site_url() -> str:
 
 _MKDOCS_SITE_URL = _mkdocs_site_url()
 
-# The project's outbound licence, as the SPDX License List spells it.
-_SPDX_LICENSE = "Apache-2.0"
+# The project's terms, as an SPDX expression: no licence is granted (ADR-0076). A
+# ``LicenseRef-`` identifier is how SPDX and PEP 639 spell terms not on the License List.
+_SPDX_LICENSE = "LicenseRef-Proprietary"
+# The licence the public snapshot of 2026-11-11 was released under, and which stays its
+# licence (ADR-0076): any file of the private line still declaring it is a leftover.
+_PUBLIC_SNAPSHOT_SPDX_LICENSE = "Apache-2.0"
+_COPYRIGHT_LINE = "Copyright (c) 2026 The Metis authors. All rights reserved."
 # The licence this project carried between 2026-07-29 and 2026-08-15. Asserting its
 # ABSENCE is what makes these gates catch a partial revert (e.g. one pyproject, one
 # README paragraph or one source header quietly left behind on the old identifier).
 _SUPERSEDED_SPDX_LICENSE = "PolyForm-Noncommercial-1.0.0"
 
-# SHA-256 of the canonical Apache License 2.0 plain text as published by the Apache
-# Software Foundation (https://www.apache.org/licenses/LICENSE-2.0.txt) — the same bytes
-# `git show ab110b4^:LICENSE` restores, and the file whose MD5 is the widely-recognised
-# 3b83ef96387f14655fc854ddc3c6bd57 that licence scanners key on.
-#
-# Under PolyForm this project wrapped the licence body in BEGIN/END markers so its own
-# framing (provenance, Required Notice, pointers) could sit in the same file without
-# being mistaken for terms; the digest was taken over the body between them. Apache-2.0
-# has no such markers, and adding any would make the file stop matching what every
-# scanner and every `licensecheck`-style tool expects. So the digest is now taken over
-# the WHOLE file — which is STRICTER, not weaker: not only may no clause be edited, no
-# preamble, footer or "helpful note" may be added either. Everything this project wants
-# to say ABOUT its licence goes in NOTICE, which Apache-2.0 §4(d) already carries
-# downstream. A keyword check ("Apache" in text) is not an acceptable substitute: it
-# would pass happily on a licence with its patent grant or its warranty disclaimer
-# quietly removed, which is precisely the failure that matters here.
-_APACHE_TEXT_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-_APACHE_TEXT_MD5 = "3b83ef96387f14655fc854ddc3c6bd57"
+# The whole of ``LICENSE``, as ADR-0076 decided it, and its digest. Checked over the WHOLE
+# file, as the Apache-2.0 text was before it: no clause may be edited, and no preamble,
+# footer or "helpful note" may be added. A keyword check ("All rights reserved" in text)
+# would pass on a notice with its no-licence clause quietly removed, which is precisely the
+# failure that matters here. Third-party terms and the provenance record belong in NOTICE.
+_LICENSE_TEXT = (
+    "Copyright (c) 2026 The Metis authors. All rights reserved.\n"
+    "\n"
+    "This software and its documentation are proprietary. No licence or other right to use,\n"
+    "copy, modify, merge, publish, distribute, sublicense or sell them, in whole or in part,\n"
+    "is granted except by the written permission of the copyright holders.\n"
+    "\n"
+    "Material that carries its own licence (third-party code, data and model weights) stays\n"
+    "under that licence; see NOTICE and THIRD-PARTY-LICENSES.md.\n"
+)
+_LICENSE_SHA256 = "cb81b9bcffdf8f8c824faa32b6da5dab538573907008663bbd0d0205c38f94f9"
 
 # A file declares its own outbound grant with an SPDX identifier on a COMMENT line
 # in its header. Only source files are scanned: in Markdown a leading ``#`` is a
@@ -254,47 +262,37 @@ def _declared_file_licences() -> dict[str, str]:
     return found
 
 
-def test_license_is_apache_2_0_verbatim() -> None:
-    """LICENSE is the canonical Apache License 2.0 text, byte for byte, and NOTHING else.
+def test_license_is_the_proprietary_notice_verbatim() -> None:
+    """LICENSE is the proprietary notice ADR-0076 decided, byte for byte, and NOTHING else.
 
-    Checked by digest over the WHOLE file, because the whole value of using a
-    professionally drafted licence is lost the moment a clause is silently edited — and a
-    keyword assertion ("Apache" in text) would happily pass on a licence with its §3
-    patent grant or its §7 warranty disclaimer removed.
-
-    Whole-file rather than a delimited body (which is what the PolyForm version of this
-    gate checked) because Apache-2.0 is recognised by scanners on exactly these bytes: an
-    added preamble, a "friendly note" or a trailing pointer would leave the file matching
-    nothing, and every SCA tool in an enterprise procurement pipeline reads this file
-    before a human does. Anything this project wants to SAY about its licence belongs in
-    ``NOTICE`` — the file Apache-2.0 §4(d) already carries downstream — and the test
-    below asserts it is there.
+    Checked by digest over the WHOLE file, as the Apache-2.0 text was before it: an edited
+    clause, an added preamble or a trailing pointer all fail. Anything this project wants to
+    SAY about its licence history belongs in ``NOTICE``, and the test below asserts it is
+    there.
     """
     raw = (_REPO_ROOT / "LICENSE").read_bytes()
-
     sha256 = hashlib.sha256(raw).hexdigest()
-    md5 = hashlib.md5(raw, usedforsecurity=False).hexdigest()
-    assert sha256 == _APACHE_TEXT_SHA256 and md5 == _APACHE_TEXT_MD5, (
-        "LICENSE is NOT the canonical Apache License 2.0 plain text.\n"
-        f"  expected sha256: {_APACHE_TEXT_SHA256}\n  actual sha256:   {sha256}\n"
-        f"  expected md5:    {_APACHE_TEXT_MD5}\n  actual md5:      {md5}\n"
-        "Restore it verbatim from https://www.apache.org/licenses/LICENSE-2.0.txt. Note "
-        "that ADDING text is a failure here too, by design: the copyright line, the "
-        "provenance record and every pointer belong in NOTICE, not in LICENSE."
+    assert hashlib.sha256(_LICENSE_TEXT.encode("utf-8")).hexdigest() == _LICENSE_SHA256
+    assert sha256 == _LICENSE_SHA256, (
+        "LICENSE is NOT the proprietary notice ADR-0076 decided.\n"
+        f"  expected sha256: {_LICENSE_SHA256}\n  actual sha256:   {sha256}\n"
+        "Restore it verbatim from _LICENSE_TEXT in this module. ADDING text is a failure "
+        "too, by design: the provenance record and every pointer belong in NOTICE."
     )
-
     # Sanity anchors that a digest alone would not make legible in a failure report.
     text = raw.decode("utf-8")
-    assert "Apache License" in text and "Version 2.0, January 2004" in text
-    assert "3. Grant of Patent License." in text, "the patent grant is missing"
-    # ...and the superseded licence must not be lurking in the terms.
-    assert "PolyForm" not in text
+    assert text.startswith(_COPYRIGHT_LINE + "\n")
+    assert "No licence or other right" in text and "written permission" in text
+    # ...and neither superseded licence is lurking in the terms.
+    assert "PolyForm" not in text and "Apache License" not in text
 
 
 def test_notice_carries_the_relicence_provenance_record() -> None:
     """The provenance note is what a future reader, acquirer or lawyer looks for FIRST.
 
-    Both relicences are clean only because no grant ever reached anyone. That claim has
+    The first two relicences were clean only because no grant had reached anyone. The third
+    (ADR-0076) is different, and the record must say so: the public snapshot of 2026-11-11
+    was released under Apache-2.0 and stays so, and only what came after it is proprietary. That claim has
     to be written down as CHECKABLE FACTS, or it is folklore that dies with the person
     who remembers it — and it matters more now, not less: the tree previously carried a
     PolyForm identifier in 129 file headers and 33 package manifests, so a future reader
@@ -322,17 +320,17 @@ def test_notice_carries_the_relicence_provenance_record() -> None:
         "private",
         "pypi",
         "sole copyright holder",
+        "2026-11-11",  # the public snapshot, which stays Apache-2.0
+        "apache-2.0",
+        "proprietary",
     ):
         assert fact in lowered, f"the provenance record does not state: {fact}"
     # The reasoning has to be reachable, not just the fact.
-    assert "adr-0063" in lowered or "0063-" in lowered, (
-        "the provenance record does not point at the ADR that decided the relicence"
-    )
-    # Apache-2.0 §4(d) attribution: the notice a downstream copy has to carry.
-    assert "Required Notice: Copyright 2026 Dennis Dickmann" in text, (
-        "NOTICE carries no `Required Notice:` line, so no downstream copy can carry the "
-        "copyright attribution Apache-2.0 §4(d) propagates"
-    )
+    for adr in ("0063", "0076"):
+        assert f"adr-{adr}" in lowered or f"{adr}-" in lowered, (
+            f"the provenance record does not point at ADR-{adr}, which decided a relicence"
+        )
+    assert _COPYRIGHT_LINE in text, "NOTICE does not carry the copyright line LICENSE opens with"
     assert f"SPDX identifier {_SPDX_LICENSE}" in text or f"SPDX: {_SPDX_LICENSE}" in text
 
 
@@ -346,6 +344,19 @@ def test_every_shipped_package_license_matches_the_root_license() -> None:
     court reads.
     """
     root = (_REPO_ROOT / "LICENSE").read_bytes()
+    # The copy is only shipped, and only the licence the metadata declares, if the package
+    # says both: a manifest missing ``license`` or ``license-files`` ships a wheel whose
+    # licence is unstated, whatever file sits beside it.
+    undeclared = [
+        pp.parent.name
+        for pp in _package_pyprojects()
+        if (proj := tomllib.loads(pp.read_text())["project"]).get("license") != _SPDX_LICENSE
+        or proj.get("license-files") != ["LICENSE"]
+    ]
+    assert not undeclared, (
+        f"these packages do not declare license = {_SPDX_LICENSE!r} and "
+        f'license-files = ["LICENSE"]: {undeclared}'
+    )
     drifted = [
         pkg.name
         for pkg in sorted(_PACKAGES.iterdir())
@@ -359,20 +370,20 @@ def test_every_shipped_package_license_matches_the_root_license() -> None:
 
 
 def test_notice_asserts_copyright_licence_and_gemma_optin() -> None:
-    """NOTICE carries the copyright, the CURRENT licence, and the EmbeddingGemma carve-out."""
+    """NOTICE carries the copyright, the CURRENT terms, and the EmbeddingGemma carve-out."""
     text = (_REPO_ROOT / "NOTICE").read_text()
     assert "Latence Framework" in text
-    assert _SPDX_LICENSE in text, "NOTICE does not name the project's actual licence"
-    assert "Apache License, Version 2.0" in text
-    # A NOTICE that names the licence but leaves commercial use ambiguous is the exact
-    # doubt an enterprise reader is here to resolve — say it, in the file. Compared on
-    # whitespace-collapsed text because NOTICE is hard-wrapped at 79 columns and a
-    # sentence that reflows across a line break is the same sentence.
-    assert "Commercial use is granted by that licence" in " ".join(text.split()), (
-        "NOTICE does not state that the licence itself grants commercial use, so a "
-        "reader who remembers the PolyForm period is left guessing"
+    assert _SPDX_LICENSE in text, "NOTICE does not name the project's actual terms"
+    # A NOTICE that names the terms but leaves the reader's rights ambiguous is the exact
+    # doubt it is read to resolve — say it, in the file. Compared on whitespace-collapsed
+    # text because NOTICE is hard-wrapped and a reflowed sentence is the same sentence.
+    flat = " ".join(text.split())
+    assert "No licence is granted without the written permission of the copyright holders" in (
+        flat
+    ), "NOTICE does not state that no licence is granted without written permission"
+    assert "remains available under the Apache License, Version 2.0" in flat, (
+        "NOTICE does not say that the public snapshot of 2026-11-11 stays Apache-2.0"
     )
-    assert "Required Notice:" in text
     assert not any(p.search(text) for p in _POLYFORM_GRANT_PATTERNS), (
         "NOTICE still grants the superseded PolyForm Noncommercial licence"
     )
@@ -471,21 +482,17 @@ def test_citation_cff_is_parseable_and_claims_nothing_unreleased() -> None:
         )
 
 
-def test_commercial_md_says_commercial_use_is_granted_and_gates_nothing() -> None:
-    """COMMERCIAL.md must now REMOVE a gate, not describe one.
+def test_commercial_md_says_no_licence_is_granted_without_written_permission() -> None:
+    """COMMERCIAL.md states the terms of the private line (ADR-0076), and invents none.
 
-    The page kept its name and its inbound links — README, NOTICE, CONTRIBUTING, the docs
-    nav, `mkdocs.yml`, ADR-0055 and ADR-0062 all reach it, and ADR-0055's pointer is
-    exactly the route by which a reader arrives believing they need to buy something. So
-    deleting it would have left every one of those readers at a 404 with their last
-    information being "commercial use requires a separate written agreement".
-
-    Under Apache-2.0 that sentence is false. This gate is therefore the mirror image of
-    the one it replaces, and just as strict: the old version asserted the page routed a
-    commercial request and invented no terms; this one asserts the page GRANTS, in so many
-    words, and that no gate has crept back in — no agreement requirement, no price, no
-    tier, no "contact us before you deploy". The one thing it may still say no about is
-    third-party terms, which an outbound licence never covered and still does not.
+    The page keeps its name and its inbound links — README, NOTICE, CONTRIBUTING, the docs
+    nav, `mkdocs.yml` and several ADRs reach it — so a reader arriving from any of them gets
+    the current answer: no licence is granted without the copyright holders' written
+    permission, and the public snapshot of 2026-11-11 stays Apache-2.0. It is as strict as
+    the gate it replaces: no price, no tier, no invented term, and none of the PolyForm
+    model's phrasings, which framed a noncommercial use as free (it is not, now). The one
+    thing it must still say no about is third-party terms, which the project's terms never
+    reached.
     """
     text = (_REPO_ROOT / "COMMERCIAL.md").read_text()
     lowered = text.lower()
@@ -494,10 +501,11 @@ def test_commercial_md_says_commercial_use_is_granted_and_gates_nothing() -> Non
 
     assert _SPDX_LICENSE in text
     # The headline answer, unambiguous enough that a reader can stop reading here.
-    assert "no separate agreement is required" in flat, (
-        "COMMERCIAL.md does not state plainly that commercial use needs no agreement — "
-        "which is the single fact a reader arriving from ADR-0055 or an old README is "
-        "here to have corrected"
+    assert "no licence is granted without the written permission of the copyright holders" in (
+        flat
+    ), "COMMERCIAL.md does not state plainly that no licence is granted without permission"
+    assert "2026-11-11" in flat and _PUBLIC_SNAPSHOT_SPDX_LICENSE.lower() in flat, (
+        "COMMERCIAL.md does not say that the public snapshot of 2026-11-11 stays Apache-2.0"
     )
     assert "ddickmann81@gmail.com" in text, "no contact for the maintainer"
 
@@ -505,19 +513,19 @@ def test_commercial_md_says_commercial_use_is_granted_and_gates_nothing() -> Non
     for pattern in (*_POLYFORM_GRANT_PATTERNS, *_NONCOMMERCIAL_ONLY_CLAIM_PATTERNS):
         offending = [ln.strip() for ln in text.splitlines() if pattern.search(ln)]
         assert not offending, (
-            "COMMERCIAL.md re-imposes a commercial gate the licence does not impose:\n  "
+            "COMMERCIAL.md uses the PolyForm model's framing, which ADR-0076 does not:\n  "
             + "\n  ".join(offending)
         )
     assert not re.search(r"[$€£]\s?\d", text), "COMMERCIAL.md quotes a price"
     for invented in ("per seat", "per-seat", "annual fee", "subscription fee", "free trial"):
         assert invented not in lowered, f"COMMERCIAL.md invents a commercial term: {invented}"
 
-    # It must not claim to be legal advice, and must still be honest about what an
-    # outbound grant does NOT reach — that asymmetry survives the relicence untouched.
+    # It must not claim to be legal advice, and must still be honest about what the
+    # project's terms do NOT reach — that asymmetry survives every relicence untouched.
     assert "not legal advice" in lowered
     assert "easydict" in lowered, (
-        "COMMERCIAL.md must tell a commercial user that third-party terms — the LGPL-3.0 "
-        "easydict extra above all — are not reached by this project's outbound licence"
+        "COMMERCIAL.md must tell a licensee that third-party terms — the LGPL-3.0 "
+        "easydict extra above all — are not reached by this project's terms"
     )
 
 
@@ -557,7 +565,7 @@ def test_no_owned_licence_document_still_grants_polyform_noncommercial() -> None
             elif any(p.search(line) for p in _NONCOMMERCIAL_ONLY_CLAIM_PATTERNS):
                 claim_offenders.append(f"{rel}: {line.strip()}")
     assert not grant_offenders and not claim_offenders, (
-        "the outbound licence is Apache-2.0, which grants commercial use outright.\n"
+        "the terms are ADR-0076's; no owned document may grant PolyForm or frame use by it.\n"
         + ("  STILL GRANTS PolyForm:\n    " + "\n    ".join(grant_offenders) + "\n" if grant_offenders else "")
         + (
             "  STILL CLAIMS commercial use is restricted:\n    " + "\n    ".join(claim_offenders)
@@ -609,7 +617,7 @@ def test_no_package_readme_claims_its_own_code_is_polyform_or_noncommercial() ->
 
 
 def test_every_declared_file_licence_is_the_outbound_licence() -> None:
-    """The file-level SPDX topology is UNIFORM: every declaring file says Apache-2.0.
+    """The file-level SPDX topology is UNIFORM: every declaring file says LicenseRef-Proprietary.
 
     This replaces the pinned seven-module carve-out that the PolyForm model needed, and it
     is a strictly stronger statement than that pin was: the old gate allowed a bounded set
@@ -631,9 +639,10 @@ def test_every_declared_file_licence_is_the_outbound_licence() -> None:
     assert not divergent, (
         f"these source files declare a licence other than the repository's {_SPDX_LICENSE}:\n  "
         + "\n  ".join(divergent)
-        + "\nThere is no carve-out any more (ADR-0063). If one of these is "
-        + f"{_SUPERSEDED_SPDX_LICENSE}, it is a leftover from the 2026-07-29 relicence; flip "
-        "it. If a genuine exception is ever wanted, it must be decided in an ADR, stated in "
+        + "\nThere is no carve-out (ADR-0076). If one of these is "
+        + f"{_PUBLIC_SNAPSHOT_SPDX_LICENSE} or {_SUPERSEDED_SPDX_LICENSE}, it is a leftover from "
+        "a relicence; flip it. If a genuine exception is ever wanted (a file that is "
+        "third-party code, say), it must be decided in an ADR, stated in "
         "the file, and pinned here — not left to be discovered by a scanner."
     )
 
@@ -735,7 +744,7 @@ def test_every_package_has_pypi_release_metadata() -> None:
     """Each publishable package advertises the SPDX licence + classifiers + keywords + urls.
 
     The license assertion is the PEP 639 form the flip-public rehearsal validated: a bare
-    SPDX expression (``license = "Apache-2.0"``, which hatchling emits as
+    SPDX expression (``license = "LicenseRef-Proprietary"``, which hatchling emits as
     ``License-Expression``), a ``license-files`` glob that resolves to a real file inside
     the distribution root, and NO deprecated ``License ::`` classifier alongside it. One
     package left on the old identifier would publish a wheel that declares PolyForm while
@@ -835,10 +844,10 @@ def test_every_package_has_pypi_release_metadata() -> None:
 def test_the_declared_licence_is_a_real_spdx_expression() -> None:
     """PyPI rejects a non-SPDX ``License-Expression``, and a typo is invisible by eye.
 
-    ``Apache-2.0`` is on the SPDX License List and PEP 639 accepts it — but only spelled
-    exactly that way. This runs the same normalisation the build backend and twine run, so
-    a plausible-looking ``Apache 2.0`` or ``Apache-2`` fails here rather than at upload
-    time. It is not redundant with the equality check above: ``canonicalize`` also accepts
+    ``LicenseRef-Proprietary`` is a valid SPDX ``LicenseRef-`` identifier and PEP 639
+    accepts it — but only spelled exactly that way. This runs the same normalisation the
+    build backend and twine run, so a plausible-looking ``LicenseRef Proprietary`` or
+    ``Proprietary`` fails here rather than at build time. It is not redundant with the equality check above: ``canonicalize`` also accepts
     deprecated spellings and compound expressions that a bare string comparison would
     reject with a less useful message.
     """

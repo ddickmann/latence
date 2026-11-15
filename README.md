@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-00CFD1"></a>
+  <a href="./LICENSE"><img alt="License: proprietary" src="https://img.shields.io/badge/license-proprietary-00CFD1"></a>
   <a href="./pyproject.toml"><img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-00CFD1"></a>
   <a href="https://github.com/ddickmann/latence/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ddickmann/latence/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#status"><img alt="status pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-orange"></a>
@@ -152,7 +152,7 @@ interface such as `Parser`, `EntityExtractor` or `Embedder`, and the core never 
 Providers live in their own installable packages, so nothing pulls torch into your environment
 unless you ask for it. A **Runner** executes a Pipeline. **Storage** is one fsspec seam. Every
 record carries Provenance and Classification, validated at every Stage boundary. The reasoning
-behind each choice is written down: **74 architecture decisions** in [`docs/adr/`](./docs/adr/),
+behind each choice is written down: **75 architecture decisions** in [`docs/adr/`](./docs/adr/),
 and the glossary that fixes the vocabulary in [`CONTEXT.md`](./CONTEXT.md).
 
 ---
@@ -288,8 +288,9 @@ The full map is in [Install](./docs/getting-started/index.md).
 
 ## Licence & security
 
-Apache-2.0 ([`LICENSE`](./LICENSE)). Commercial use is granted by the licence; no separate agreement
-is needed ([`COMMERCIAL.md`](./COMMERCIAL.md)). Reference Providers ship **permissive weights only**;
+Proprietary ([`LICENSE`](./LICENSE)): all rights reserved, and no licence is granted without the
+copyright holders' written permission ([`COMMERCIAL.md`](./COMMERCIAL.md), ADR-0076). The public
+snapshot of 2026-11-11 stays Apache-2.0. Reference Providers ship **permissive weights only**;
 restricted-license models are opt-in, and every Provider declares its verified weights-and-code
 licence ([`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md)). The project's licence statements
 have not been reviewed by counsel.

@@ -19,9 +19,10 @@ merged.** No exceptions, including for one-line fixes and documentation.
 **Why:** the CLA was written for the licence the project carried between 2026-07-29 and
 2026-08-15 — PolyForm Noncommercial, where commercial rights were reserved to the owner and
 an inbound contribution had to arrive with an explicit grant or those rights became
-unenforceable. The project is now **Apache-2.0** (ADR-0063), whose §5 places every
-contribution under the same licence as the work, so a DCO would be sufficient and the CLA's
-original reason is gone.
+unenforceable. Under Apache-2.0 (ADR-0063, 2026-08-15 to 2026-11-15) a DCO would have been
+sufficient. The project is now **proprietary** (ADR-0076): no licence is granted without the
+copyright holders' written permission, and the CLA is again the grant that lets them include
+a contribution in the work they license.
 
 **Whether to replace it with a DCO is an open decision for the maintainer, recorded in
 ADR-0063.** Until he takes it, this requirement stands as written — a stated precondition

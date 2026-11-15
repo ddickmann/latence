@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """Every tool a gate fetches on the fly is pinned to an exact version.
 
 The workspace's own tools (ruff, mypy, pytest) are pinned by ``uv.lock``. The ones the gates

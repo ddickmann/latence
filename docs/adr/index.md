@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 74 records numbered 0001–0075.
+    the sequence simply skipped it), so the log holds 75 records numbered 0001–0076.
 
 ## Re-scope: the semantic-resolution and ontology engine
 
@@ -37,7 +37,8 @@ wayfinder map in `.scratch/semantic-sidecar/map.md`.
 | [0015](0015-python-core-declarative-yaml-rust-for-hot-paths.md) | Python core, declarative-YAML Pipeline contract, Rust only for proven hot paths |
 | [0055](0055-relicence-to-polyform-noncommercial.md) | ~~Relicence to PolyForm Noncommercial — free for research, commercial by agreement~~ — **SUPERSEDED by [0063](0063-relicence-to-apache-2-0.md)**; kept as the dated record of a decision that was made and reversed |
 | [0062](0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md) | Distribution is signed GitHub Releases only — no PyPI — **rationale SUPERSEDED by [0063](0063-relicence-to-apache-2-0.md), decision REOPENED**; the `pypi-publish` job stays disabled pending a new decision |
-| [0063](0063-relicence-to-apache-2-0.md) | Relicence to Apache-2.0 — the licence the intended adopter is allowed to install (supersedes 0055, restores 0001's grant; reopens 0062) |
+| [0063](0063-relicence-to-apache-2-0.md) | Relicence to Apache-2.0 — the licence the intended adopter is allowed to install (supersedes 0055, restores 0001's grant; reopens 0062) — **SUPERSEDED for the private line by [0076](0076-relicence-the-private-line-to-proprietary.md)**; the public snapshot of 2026-11-11 stays Apache-2.0 |
+| [0076](0076-relicence-the-private-line-to-proprietary.md) | Relicence the private line to proprietary terms (All rights reserved, `LicenseRef-Proprietary`); the public snapshot of 2026-11-11 stays Apache-2.0 (supersedes 0063 for the private line) |
 
 ## The core seams
 

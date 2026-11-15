@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The ticket-21 labeling harness — the manual gold set.
 
 Browse the exported corpus (an S1 export's ``records.jsonl`` / ``records.parquet``), write a

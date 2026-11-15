@@ -109,7 +109,7 @@ def test_continuity_statement_exists_and_covers_every_required_topic() -> None:
     lowered = text.lower()
     required = {
         "maintainer model / bus factor": "bus factor",
-        "license & fork posture": "apache-2.0",
+        "license & fork posture": "licenseref-proprietary",
         "docs-as-handover": "handover",
         "support lifetime": "support-lifetime statement",
         "CVD policy": "coordinated",

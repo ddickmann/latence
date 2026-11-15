@@ -225,22 +225,25 @@ pass.
 
 ### 4. The licence topology is uniform, and it is pinned
 
-The repository is **Apache-2.0**, everywhere, with no exception and no carve-out (ADR-0063, which
-supersedes ADR-0055's relicence to PolyForm Noncommercial). Every source file that declares an SPDX
-identifier declares `Apache-2.0`, and `LICENSE` is the canonical Apache-2.0 text byte for byte —
-nothing added, not even a copyright line, because scanners identify that file by its bytes.
+The repository is **proprietary**, everywhere, with no exception and no carve-out (ADR-0076, which
+supersedes ADR-0063's Apache-2.0 for the private line; the public snapshot of 2026-11-11 stays
+Apache-2.0). Every source file that declares an SPDX identifier declares `LicenseRef-Proprietary`,
+every package declares `license = "LicenseRef-Proprietary"`, and `LICENSE` is the notice ADR-0076
+decided ("Copyright (c) 2026 The Metis authors. All rights reserved." and its no-licence clause),
+byte for byte, in the root and in every package.
 
 `test_publish_readiness.py` scans every `.py`/`.pyi`/`.rs`/`.sh` header in the tree and fails on
-**any** identifier that is not `Apache-2.0`, digests `LICENSE` against the canonical text, and
-checks that no owned document still grants PolyForm or claims commercial use needs an agreement.
+**any** identifier that is not `LicenseRef-Proprietary`, digests `LICENSE` against the pinned text,
+and checks that no owned document still grants PolyForm and that `NOTICE` and `COMMERCIAL.md` state
+the current terms.
 
-So: if you add an SPDX header to a new file, it says `Apache-2.0` and nothing else. Do not invent a
+So: if you add an SPDX header to a new file, it says `LicenseRef-Proprietary` and nothing else. Do not invent a
 per-file exception — if one is ever genuinely wanted it needs an ADR, a statement in the file, and a
 pin in that test, in one commit, so the code, the licence document and the gate cannot disagree.
 
 One thing is NOT licence drift and must survive: **third-party noncommercial terms.**
 Research-only corpora like OmniDocBench are still noncommercial and still gated behind their
-opt-in flags. The framework's outbound licence does not touch a third party's terms.
+opt-in flags. The framework's own terms do not touch a third party's terms.
 
 ### 5. `-q` on the command line resolves to `-qq`
 
@@ -403,7 +406,7 @@ be helpful.
 | Running it on a real corpus | [`docs/getting-started/index.md`](./docs/getting-started/index.md) |
 | What is proven and what is not | [`README.md`](./README.md) · [`RELEASE-GATES.md`](./RELEASE-GATES.md) |
 | Security-relevant surfaces, and how to report a vulnerability privately | [`SECURITY.md`](./SECURITY.md) |
-| Licence terms (Apache-2.0, uniform) and what commercial use needs (nothing) | [`LICENSE`](./LICENSE) · [`NOTICE`](./NOTICE) · [`COMMERCIAL.md`](./COMMERCIAL.md) |
+| Licence terms (proprietary, uniform; ADR-0076) and how to ask for permission | [`LICENSE`](./LICENSE) · [`NOTICE`](./NOTICE) · [`COMMERCIAL.md`](./COMMERCIAL.md) |
 
 **Do not open a public issue or pull request for a suspected vulnerability.** Report it privately as
 described in [`SECURITY.md`](./SECURITY.md).

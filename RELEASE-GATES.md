@@ -75,12 +75,15 @@ and neither is claimed. Gate 6 holds the claims that replace them.
       `test_release_the_licence_is_declared_consistently_across_every_package` fails the release
       check on any divergent package, and it has a negative control proving the check still fires.
       Verified by hand at the time of ticking —
-      `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `30
-      license = "Apache-2.0"` (re-verified on 2026-11-10, after ADR-0068 removed four packages)
+      `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `32
+      license = "LicenseRef-Proprietary"` (re-verified on 2026-11-15, after ADR-0076)
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [x] `CONTRIBUTING.md` states the CLA requirement
-- [x] **The benchmark corpus's own licence flags are coherent.** Met by ADR-0063, which dissolved
+- [ ] **The benchmark corpus's own licence flags are coherent.** Reopened by ADR-0076: the
+      synthetic PII corpus still declares `Apache-2.0` and `commercial_use=True`, which holds for
+      the 2026-11-11 snapshot and not for the proprietary line; changing the flags changes
+      recorded benchmark output, so it is its own change. It was met by ADR-0063, which dissolved
       the contradiction rather than resolving it: `latence_benchmark/redaction_suite.py` declares the
       synthetic PII corpus `dataset_license="Apache-2.0", code_license="Apache-2.0",
       commercial_use=True`, and with the repository back on Apache-2.0 all three are true together.
@@ -88,11 +91,9 @@ and neither is claimed. Gate 6 holds the claims that replace them.
       `commercial_use=True` stated two contradictory things, and `commercial_use=False` would have
       gated the project's OWN corpus behind `--accept-non-commercial`.
 - [ ] **Legal review completed** — the LGPL interaction, any prior PyPI publication, and the
-      contributor position (whether to keep `CLA.md` or move to a DCO, now that Apache-2.0's
-      inbound=outbound removes the reason the CLA was written — ADR-0063). The licence *choice* no
-      longer needs review in itself: Apache-2.0 is reproduced verbatim and digest-pinned, and the
-      retained-Apache-subset exception a reviewer would have had to see is gone with the
-      noncommercial model that needed it. This gate is not satisfiable by an automated check.
+      contributor position (whether to keep `CLA.md` or move to a DCO, under the
+      proprietary terms of ADR-0076), and the boundary between the Apache-2.0 snapshot of
+      2026-11-11 and the proprietary line after it. This gate is not satisfiable by an automated check.
 
 ## Gate 4 — Documentation truthfulness
 

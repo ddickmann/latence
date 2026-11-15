@@ -269,8 +269,8 @@ verification date.
 
 | Provider | Package | Model (`_DEFAULT_MODEL`) | Weights / code licence | Compute | Deterministic | Source |
 |---|---|---|---|---|---|---|
-| `parser.plaintext` | `latence-parser-plaintext` | *none* | Apache-2.0 (framework code) | cpu | yes | `provider.py:75` |
-| `parser.document` | `latence-parser-document` | *none* (`pypdf`, BSD-3-Clause) | Apache-2.0 (framework code) | cpu | yes | `provider.py:96` |
+| `parser.plaintext` | `latence-parser-plaintext` | *none* | LicenseRef-Proprietary (framework code) | cpu | yes | `provider.py:75` |
+| `parser.document` | `latence-parser-document` | *none* (`pypdf`, BSD-3-Clause) | LicenseRef-Proprietary (framework code) | cpu | yes | `provider.py:96` |
 | `parser.pdfplumber` | `latence-parser-pdfplumber` | *none* (`pdfplumber`) | MIT / MIT | cpu | yes | `provider.py:151` |
 | `parser.render` | `latence-parser-render` | *none* — delegates OCR | Apache-2.0; deps pypdfium2 Apache-2.0/BSD-3, Pillow HPND, python-docx/openpyxl/python-pptx MIT, LibreOffice MPL-2.0 as an external subprocess | either | **no** (OCR is delegated) | `provider.py:208` |
 | `parser.lighton` | `latence-parser-lighton` | `lightonai/LightOnOCR-1B-1025` | Apache-2.0 / Apache-2.0, verified 2026-07-08 | gpu | **no** | `provider.py:243` |

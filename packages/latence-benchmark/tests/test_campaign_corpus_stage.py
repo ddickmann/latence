@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Proprietary
 """The s1-corpus stage: gate-before-bytes, fetcher seam, manifest + metrics artifacts.
 
 Everything here is offline: real fetchers are exercised only against ``file://`` URLs and
