@@ -2,7 +2,7 @@
 
 Type: build
 Mode: AFK
-Status: built (15 Nov), round trip done on the host's tool at its head of the concepts branch; open: the vehicle estate states no domains (see below)
+Status: built (15 Nov), round trip done on the host's tool at its head of the concepts branch; the vehicle estate's domains proposed (15 Nov), the owner confirms them at the final review
 Blocked by: 57 (the crosswalk names the conformed key a match is written to); the host's 304
 (decided and built on its side, 15 Nov)
 Emerges from: the host's drafted ticket B-2 (15 Nov); ADR-0070 (the proposal file is the one
@@ -90,3 +90,28 @@ tested against the shapes).
 - The vehicle estate states no domains and the host has no command that writes its alias table
   (57), so a vehicle build writes no `match` yet. Both are inputs, not code: the domains are the
   owner's to name in `estates/vehicles.yaml`, the alias table a request to the host.
+
+## Decided by the owner (15 Nov): the builder proposes the vehicle estate's domains
+
+The builder proposes them from the estate's schemas, each with a data-owner role (synthetic
+roles, no person's name); **proposed, the owner confirms them at the final review.**
+
+## Result: the vehicle estate's domains (15 Nov)
+
+- **Proposed** in `estates/vehicles.yaml` (`domains`): `product_safety` (schema `clean`: the
+  public safety data, complaints, recalls, investigations, bulletins) with
+  `role:product-safety-data-owner`; `after_sales` (schema `internal`: claims, warranty, parts,
+  dealers, campaigns) with `role:after-sales-data-owner`; `partner_channel` (schema `partner`,
+  the seeded source, so nothing of it is ever written) with `role:partner-channel-data-owner`.
+  `marts` is derived from the others and belongs to no domain. A finer split (dealers as a sales
+  domain apart from warranty) would need domains by object, which the writer does not read
+  today; it reads them by schema.
+- **A vehicle build writes a `match`** (`test_a_vehicle_build_writes_a_match_across_two_domains`,
+  run here with the host's mirror; skipped without it, as the same-bytes test): with a stand-in
+  for the host's alias table in its shape (the make's conformed key, read from a view of each
+  domain; the host has no command that writes one yet), the make value set is matched; a
+  reviewer's approval and both domains' data-owner roles' certifications make `propose` write
+  `match: {key: dimension:conformed.make, concepts: [after_sales ... make, product_safety ...
+  make], close: false}` with both certifications in its origin, in a file of format
+  `layer-proposal/3`. The test of the domains themselves (every schema in one domain, a role as
+  each data owner, the derived layer in none) runs everywhere.

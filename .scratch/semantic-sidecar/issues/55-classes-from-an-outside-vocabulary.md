@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: the voice is built (15 Nov); open for the owner: which vocabulary for the vehicle estate
+Status: resolved (15 Nov): schema.org, the owner's choice, as a curated extract; open: the licence to be confirmed against the live terms page (a live step)
 Blocked by: nothing
 Emerges from: 42 (split out on 14 Nov: the third of its four parts)
 
@@ -55,7 +55,9 @@ voice alone). The vocabulary's licence is checked and recorded before it is used
   share-alike licence is refused unless allowed and then recorded, an unstated licence and a
   class under no top class are refused.
 
-## Open for the owner: which vocabulary for the vehicle estate
+## Decided by the owner (15 Nov): option (b), schema.org
+
+The question as it was put:
 
 The vocabulary is a published class hierarchy whose licence travels with what the build
 derives from it, so it is the owner's choice. The voice reads any of these once a file in the
@@ -78,3 +80,33 @@ each mapped to one of the six top classes).
 
 Recommendation (a): no licence duty, multilingual labels, ids that stay stable. Until the owner
 chooses, the vehicle estate file names no vocabulary and builds as before.
+
+## Result: schema.org for the vehicle estate (15 Nov)
+
+- **The extract** (`estates/vehicles.vocabulary.schemaorg.json`, written by
+  `estates/schemaorg_extract.py` from `data/releases/30.1/schemaorg-current-https.jsonld` of the
+  schema.org repository at commit `9004a665`, read on 15 Nov): 16 classes the estate's concepts
+  can match, each with its schema.org IRI as id, its own label from the release, the labels the
+  estate uses, and one of the six top classes. The script checks each class exists in the
+  release. Left out by meaning, not by name: schema.org's `Claim` is a factual claim, not a
+  warranty claim; it has no class for a complaint, a recall or a campaign; a part is a property
+  there, not a class.
+- **The licence: CC BY-SA 3.0.** Read from the source of schema.org's terms page in its own
+  repository (`docs/terms.html` at the same commit): "The Sponsors' copyrights in the schema are
+  licensed to website publishers and other third parties under the Creative Commons
+  Attribution-ShareAlike License (version 3.0)." **schema.org itself was refused by this
+  machine's network, so the live page is to be confirmed (a live step):** open
+  https://schema.org/docs/terms.html and check the same sentence. The file states the licence,
+  its source and the attribution; the extract is an adaptation, offered under the same licence.
+- **Allowed by the estate file only:** `classes.vocabulary.licences_allowed: [CC-BY-SA-3.0]` in
+  `estates/vehicles.yaml`; the terms are recorded in `THIRD-PARTY-LICENSES.md` (a new section:
+  outside vocabularies in estate files).
+- **Tests, red first** (`tests/test_ontology_vehicle_estate.py`): the extract is refused without
+  the estate's allowance and read with it (red before: no file, no `classes.vocabulary`); the
+  third-party licence file records it (red before the section was written).
+- **On the vehicle estate** (a build with the host's mirror): the vocabulary speaks on 9
+  concepts. It agrees with the placement on 7 (vehicles, dealers, owners, warranty contracts,
+  make, model, manufacturer communications) and sides with one voice on 2 that were already
+  contested (recall reports: document; the internal vehicles: product). It contests nothing that
+  was settled. The same-bytes test builds without the vocabulary (as the bytes were recorded),
+  and still matches.

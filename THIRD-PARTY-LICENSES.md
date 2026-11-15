@@ -436,3 +436,19 @@ repository's Apache-2.0 badge describes its evaluation toolkit, not its corpus.
 The RED^FM row is the same discipline with the opposite outcome — both artifacts
 verified, both permissive, and the ShareAlike obligation reasoned about explicitly
 rather than assumed away.
+
+## Outside vocabularies in estate files
+
+An ontology build may take an outside vocabulary as the third voice on its class tree
+(`latence-ontology`, `classes.vocabulary` in an estate file). The build checks the vocabulary's
+licence before it reads a class: only public-domain dedications and attribution-only licences
+pass by default, and a share-alike licence only where the estate file allows it by name. One
+vocabulary is in this repository:
+
+| Vocabulary | Where | Licence | Verified | Obligations |
+|---|---|---|---|---|
+| schema.org, release 30.1 (a curated extract of 16 classes for the vehicle estate) | `.scratch/semantic-sidecar/estate/estates/vehicles.vocabulary.schemaorg.json` | CC BY-SA 3.0 ("The Sponsors' copyrights in the schema are licensed ... under the Creative Commons Attribution-ShareAlike License (version 3.0)") | Read on 2026-11-15 from the source of https://schema.org/docs/terms.html in the schema.org repository (`docs/terms.html` at commit `9004a665`); schema.org itself was refused by that machine's network, so the live page is still to be checked | Attribution, kept in the file and recorded in every export built with it (`classes.voices.vocabulary`). ShareAlike: the extract is an adaptation (a selection of classes, added labels, a mapping to six top classes) and is offered under CC BY-SA 3.0, as the file states. Allowed only in the vehicle estate's file (`licences_allowed: [CC-BY-SA-3.0]`) |
+
+The extract is not part of any distribution: it is an estate file of the semantic sidecar, not
+package data. The licence of the framework's code does not change it, and it does not change
+the framework's code.

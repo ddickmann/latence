@@ -95,8 +95,14 @@ def test_the_vehicle_estate_is_the_recorded_bytes(tmp_path: Path) -> None:
                     "repository: set LATENCE_ONTOLOGY_VEHICLE_INPUTS to run this check")
     inputs = Path(given)
     out = tmp_path / "vehicles"
-    seed(ESTATE / "vehicles.yaml", inputs / "vehicles.duckdb", tmp_path / "seeded.duckdb", out, 11)
-    build(config=ESTATE / "vehicles.yaml", duckdb_path=tmp_path / "seeded.duckdb",
+    # The estate file as these bytes were recorded: without the outside vocabulary the owner
+    # chose later (ticket 55), whose voice changes the class tree by design.
+    said = yaml.safe_load((ESTATE / "vehicles.yaml").read_text(encoding="utf-8"))
+    said["classes"].pop("vocabulary", None)
+    config = tmp_path / "vehicles.yaml"
+    config.write_text(yaml.safe_dump(said), encoding="utf-8")
+    seed(config, inputs / "vehicles.duckdb", tmp_path / "seeded.duckdb", out, 11)
+    build(config=config, duckdb_path=tmp_path / "seeded.duckdb",
           views=inputs / "metric_views.txt", verified=inputs / "catalog.yaml", out=out,
           class_answer=ESTATE / "vehicles.classes_answer.gpt-6-luna.json",
           usage=(inputs / "usage.jsonl",))

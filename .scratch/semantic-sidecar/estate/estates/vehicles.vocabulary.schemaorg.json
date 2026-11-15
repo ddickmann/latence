@@ -1,0 +1,138 @@
+{
+ "name": "schema.org (curated extract for the vehicle estate)",
+ "version": "30.1",
+ "licence": "CC-BY-SA-3.0",
+ "licence_source": "https://schema.org/docs/terms.html, read from its source in the schema.org repository (github.com/schemaorg/schemaorg, docs/terms.html at 9004a6654f69f067e69cfe5d0b3df2b8a4c86238) on 2026-11-15: \"The Sponsors' copyrights in the schema are licensed to website publishers and other third parties under the Creative Commons Attribution-ShareAlike License (version 3.0).\" schema.org itself was refused by the network of the machine that read it: to be confirmed against the live page",
+ "attribution": "Schema.org vocabulary, by the schema.org sponsors (Google, Microsoft, Yahoo, Yandex); CC BY-SA 3.0. This extract is an adaptation: a selection of classes with added labels and a mapping to six top classes, under the same licence.",
+ "source": {
+  "release": "30.1",
+  "file": "data/releases/30.1/schemaorg-current-https.jsonld",
+  "repository": "github.com/schemaorg/schemaorg@9004a6654f69f067e69cfe5d0b3df2b8a4c86238",
+  "read_on": "2026-11-15"
+ },
+ "classes": [
+  {
+   "id": "https://schema.org/Organization",
+   "labels": [
+    "Organization"
+   ],
+   "top": "organisation"
+  },
+  {
+   "id": "https://schema.org/AutoDealer",
+   "labels": [
+    "AutoDealer",
+    "Dealer",
+    "car dealer"
+   ],
+   "top": "organisation"
+  },
+  {
+   "id": "https://schema.org/AutoRepair",
+   "labels": [
+    "AutoRepair",
+    "workshop",
+    "repair shop"
+   ],
+   "top": "organisation"
+  },
+  {
+   "id": "https://schema.org/Person",
+   "labels": [
+    "Person",
+    "Owner"
+   ],
+   "top": "person"
+  },
+  {
+   "id": "https://schema.org/Place",
+   "labels": [
+    "Place"
+   ],
+   "top": "place"
+  },
+  {
+   "id": "https://schema.org/Country",
+   "labels": [
+    "Country"
+   ],
+   "top": "place"
+  },
+  {
+   "id": "https://schema.org/City",
+   "labels": [
+    "City"
+   ],
+   "top": "place"
+  },
+  {
+   "id": "https://schema.org/Product",
+   "labels": [
+    "Product"
+   ],
+   "top": "product"
+  },
+  {
+   "id": "https://schema.org/Vehicle",
+   "labels": [
+    "Vehicle"
+   ],
+   "top": "product"
+  },
+  {
+   "id": "https://schema.org/Car",
+   "labels": [
+    "Car"
+   ],
+   "top": "product"
+  },
+  {
+   "id": "https://schema.org/ProductModel",
+   "labels": [
+    "ProductModel",
+    "Model"
+   ],
+   "top": "product"
+  },
+  {
+   "id": "https://schema.org/Brand",
+   "labels": [
+    "Brand",
+    "Make"
+   ],
+   "top": "product"
+  },
+  {
+   "id": "https://schema.org/Event",
+   "labels": [
+    "Event"
+   ],
+   "top": "event"
+  },
+  {
+   "id": "https://schema.org/Report",
+   "labels": [
+    "Report",
+    "Recall report"
+   ],
+   "top": "document"
+  },
+  {
+   "id": "https://schema.org/Message",
+   "labels": [
+    "Message",
+    "Manufacturer communication"
+   ],
+   "top": "document"
+  },
+  {
+   "id": "https://schema.org/WarrantyPromise",
+   "labels": [
+    "WarrantyPromise",
+    "Warranty contract",
+    "Warranty"
+   ],
+   "top": "document"
+  }
+ ]
+}

@@ -71,6 +71,13 @@ classes:
   # to have cost. Read on 2026-11-11 from third-party price listings; the provider's own price
   # page could not be opened from where this was written. Reasoning tokens are output tokens.
   prices: {input_per_1m: 0.10, output_per_1m: 0.50, read_on: "2026-11-11", source: third-party listings}
+  # The outside vocabulary, the third voice (map ticket 55; the owner chose schema.org on 15 Nov):
+  # a curated extract of schema.org release 30.1 (`schemaorg_extract.py` writes it). schema.org is
+  # licensed CC BY-SA 3.0, a share-alike licence the builder refuses unless the estate allows it,
+  # as it does here; its terms are recorded in THIRD-PARTY-LICENSES.md.
+  vocabulary:
+    file: vehicles.vocabulary.schemaorg.json
+    licences_allowed: [CC-BY-SA-3.0]
 # What a host's semantic layer may be handed in a proposal file (`latence-ontology propose`),
 # from approved decisions only and never from the seeded source.
 # `names`: the master lists whose rows carry a name a question may use. A list that is not
@@ -82,6 +89,20 @@ classes:
 # written and the file stays version 1. `links: false` keeps it at version 1 in any case.
 propose:
   names: [internal.dealers]
+# The estate's domains, by schema, each with its data owner's role (map ticket 58). Proposed by
+# the builder, the owner confirms them at the final review. A `match` entry names two domains'
+# columns and needs both data owners' certification. Roles, not people: whoever holds the role
+# certifies under it. `marts` is derived from the others and belongs to no domain.
+domains:
+  product_safety:
+    schemas: [clean]
+    data_owner: role:product-safety-data-owner
+  after_sales:
+    schemas: [internal]
+    data_owner: role:after-sales-data-owner
+  partner_channel:
+    schemas: [partner]
+    data_owner: role:partner-channel-data-owner
 # The address under which the Turtle export names its elements. Identifiers below it are opaque.
 export:
   base_iri: "https://example.invalid/estate/vehicles/"
