@@ -31,7 +31,10 @@ def _stack(provider: str, config: dict[str, object] | None = None) -> str:
         {"name": "disambiguate", "capability": "disambiguation", "provider": provider,
          "depends_on": ["entities"], **({"config": config} if config else {})},
     ]
-    return yaml.safe_dump({"name": "retired-probe", "storage_uri": "file://out", "stages": stages})
+    text: str = yaml.safe_dump(
+        {"name": "retired-probe", "storage_uri": "file://out", "stages": stages}
+    )
+    return text
 
 
 def test_no_shipped_stack_names_a_retired_provider() -> None:
