@@ -2,7 +2,7 @@
 
 Type: build
 Mode: AFK
-Status: built (15 Nov), round trip done on the host's tool at its head of the concepts branch; the vehicle estate's domains proposed (15 Nov), the owner confirms them at the final review
+Status: built (15 Nov), round trip done on the host's tool at its head of the concepts branch; the vehicle estate's domains proposed and confirmed by the owner (15 Nov)
 Blocked by: 57 (the crosswalk names the conformed key a match is written to); the host's 304
 (decided and built on its side, 15 Nov)
 Emerges from: the host's drafted ticket B-2 (15 Nov); ADR-0070 (the proposal file is the one
@@ -94,7 +94,7 @@ tested against the shapes).
 ## Decided by the owner (15 Nov): the builder proposes the vehicle estate's domains
 
 The builder proposes them from the estate's schemas, each with a data-owner role (synthetic
-roles, no person's name); **proposed, the owner confirms them at the final review.**
+roles, no person's name); **proposed, and confirmed by the owner on 15 Nov.**
 
 ## Result: the vehicle estate's domains (15 Nov)
 

@@ -90,7 +90,7 @@ classes:
 propose:
   names: [internal.dealers]
 # The estate's domains, by schema, each with its data owner's role (map ticket 58). Proposed by
-# the builder, the owner confirms them at the final review. A `match` entry names two domains'
+# the builder and confirmed by the owner (15 Nov). A `match` entry names two domains'
 # columns and needs both data owners' certification. Roles, not people: whoever holds the role
 # certifies under it. `marts` is derived from the others and belongs to no domain.
 domains:
