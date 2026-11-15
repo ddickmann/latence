@@ -1,6 +1,6 @@
 {
  "$schema": "https://json-schema.org/draft/2020-12/schema",
- "title": "graph-export/3",
+ "title": "graph-export/4",
  "type": "object",
  "required": [
   "schema",
@@ -15,7 +15,7 @@
  ],
  "properties": {
   "schema": {
-   "const": "graph-export/3"
+   "const": "graph-export/4"
   },
   "meta": {
    "type": "object",
@@ -366,8 +366,38 @@
       "description": "On a `same_as` link: who made it, `engine` or `human:<id>` (a model's verdict links nothing by itself).",
       "type": "string",
       "pattern": "^(engine|human:.+)$"
+     },
+     "rows": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "On a `broader` edge: the rows within the step's own objects that hold the member under the value it points to."
+     },
+     "member_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "On a `broader` edge (graph-export/4): the member's rows within the step's own objects, whatever the coarser column holds. `rows` counts a subset of them, so `rows / member_rows` is at most 1; the member node's own `rows` is counted over other objects."
      }
-    }
+    },
+    "allOf": [
+     {
+      "if": {
+       "properties": {
+        "kind": {
+         "const": "broader"
+        }
+       },
+       "required": [
+        "kind"
+       ]
+      },
+      "then": {
+       "required": [
+        "rows",
+        "member_rows"
+       ]
+      }
+     }
+    ]
    }
   },
   "review": {

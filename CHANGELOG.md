@@ -30,7 +30,7 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 - **`latence-ontology`, the ontology build over a data estate.** It reads an estate's catalog (a
   DuckDB mirror, or Unity Catalog through the Databricks REST API over the standard library),
   induces the schema level of its ontology with the evidence for every element, keeps assertions
-  and a person's decisions in an append-only ledger, and writes the `graph-export/3` file (its
+  and a person's decisions in an append-only ledger, and writes the `graph-export/4` file (its
   JSON Schema shipped as package data) with Turtle, SHACL and PROV-O beside it; its command is
   `latence-ontology`. The estate prototype's code moved into it under the repository's gates,
   and the vehicle estate's export is the prototype's bytes. It depends on `latence-core`,
@@ -104,6 +104,15 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   that says what was removed and what remains.
 
 ### Changed
+
+- **A roll-up's share is counted over the step's own objects (`graph-export/4`).** Every
+  `broader` edge records `member_rows`, the member's rows within the step's objects, and the
+  proposal file's `support.share` is the edge's rows over that, so it is at most 1. It was the
+  edge's rows over the member node's rows, which are counted over other objects (personal objects
+  are not counted there), and the toy estate wrote 1.0769. `latence-ontology` now checks a
+  proposal file against the shipped schema of the version it states before writing it.
+  Breaking: a reader that pins `graph-export/3` refuses the export, and the proposal writer
+  refuses an export whose `broader` edges carry no `member_rows`.
 
 - **Every merge decision says who made it (`SCHEMA_VERSION` 23).** `MergeDecision.actor` is
   required: `engine`, `model:<name>` or `human:<id>` (ADR-0069's Actor). The built-in resolver's

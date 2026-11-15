@@ -22,7 +22,7 @@ from latence_ontology.cli import build
 from latence_ontology.crosswalk import table_version
 from latence_ontology.iris import Iris, confirm, minted
 
-SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+SCHEMA = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text(encoding="utf-8"))
 SKOS = rdflib.Namespace("http://www.w3.org/2004/02/skos/core#")
 
 

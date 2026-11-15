@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import jsonschema
+import pytest
 import yaml
 from _proposal_estate import claim, in_force, line
+from latence_core.errors import ContractError
 from latence_proposal_writer import in_layer, proposal, read_receipts, schema, to_yaml
 
 DOMAINS = {"sales": {"schemas": ["shop"], "data_owner": "owner-sales"},
@@ -44,11 +46,13 @@ def _estate(key: str | None = KEY) -> dict[str, Any]:
              for m, r in (("ALFA", 500), ("BETA", 300))]
     nodes += [{"id": f"value:model:{m}", "concept": "concept:value:model", "label": m, "rows": r}
               for m, r in (("A1", 200), ("A2", 300), ("B1", 300))]
+    # ``member_rows``: the member's rows within the step's own objects (graph-export/4).
     edges = [{"kind": "broader", "from": f"value:model:{a}", "to": f"value:maker:{b}",
-              "relation": "roll_up:value:model->value:maker", "rows": r}
-             for a, b, r in (("A1", "ALFA", 200), ("A2", "ALFA", 297), ("B1", "BETA", 300))]
+              "relation": "roll_up:value:model->value:maker", "rows": r, "member_rows": w}
+             for a, b, r, w in (("A1", "ALFA", 200, 200), ("A2", "ALFA", 297, 300),
+                                ("B1", "BETA", 300, 300))]
     return {
-        "format": "graph-export/3", "concepts": [maker, model],
+        "format": "graph-export/4", "concepts": [maker, model],
         "relations": [holds("shop.claims", "maker", 2, 10), holds("svc.repairs", "maker", 2, 11),
                       holds("svc.visits", "maker", 1, 12)],
         "measures": [],
@@ -135,6 +139,33 @@ def test_an_approved_step_rolls_each_member_up_with_what_the_data_showed() -> No
     stale = proposal(doc, in_force(line(step, stated=claim(77))))[1]["stale"]
     assert stale == [{"subject": step["id"], "decided_on": claim(77), "now": claim(20)}]
 
+
+def test_the_share_is_counted_over_the_members_rows_within_the_steps_objects() -> None:
+    """The member node's ``rows`` is counted over other objects than the step's (personal
+    objects among them), so it cannot be the denominator: a member with fewer rows on its node
+    than on its edge once wrote a share above 1 (R5). The edge's ``member_rows`` is."""
+    doc = _estate()
+    for n in doc["nodes"]:
+        if n["id"] == "value:model:A2":
+            n["rows"] = 150  # fewer than the 297 the edge carries
+    step = doc["structure"]["roll_ups"][0]
+    document, _ = proposal(doc, in_force(line(step)))
+    shares = {e["broader"]["value"]: e["broader"]["support"] for e in document["entries"]}
+    assert shares["A2"] == {"rows": 297, "share": 0.99}
+    assert all(s["share"] <= 1 for s in shares.values())
+
+
+def test_a_broader_edge_without_member_rows_or_with_fewer_than_it_carries_is_refused() -> None:
+    step = _estate()["structure"]["roll_ups"][0]
+    old = _estate()
+    for e in old["edges"]:
+        del e["member_rows"]
+    with pytest.raises(ContractError, match="graph-export/4"):
+        proposal(old, in_force(line(step)))
+    short = _estate()
+    short["edges"][0]["member_rows"] = 10
+    with pytest.raises(ContractError, match="more than the 10"):
+        proposal(short, in_force(line(step)))
 
 def test_labels_are_written_only_where_a_person_approved_the_words() -> None:
     doc = _estate()

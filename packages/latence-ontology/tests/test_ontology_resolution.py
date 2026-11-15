@@ -107,7 +107,7 @@ def test_the_export_with_links_matches_its_schema(reader: DuckDBReader) -> None:
     concept_of = {c["object_name"]: c["id"] for c in model["concepts"] if c.get("object_name")}
     next(c for c in model["concepts"] if c["id"] == "concept:shop.parts")["seeded"] = True
     export = build_export(model, source="toy", title="Toy", instances=merge(inst, _answer(), LINK, {"P1": "D1"}, concept_of, seeded=True))
-    schema = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text())
+    schema = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text())
     jsonschema.validate(export, schema)
     assert export["meta"]["resolution"]["linked"] == 3
     known = {n["id"] for n in export["nodes"]} | {c["id"] for c in export["concepts"]}

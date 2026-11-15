@@ -6,7 +6,7 @@
   latence-ontology propose --config estates/vehicles.yaml --out out/vehicles
 
 ``build`` appends to ``assertions.jsonl`` in the output folder, reads ``decisions.jsonl``
-there if a person has written one, and writes ``ontology.json`` (graph-export/3).
+there if a person has written one, and writes ``ontology.json`` (graph-export/4).
 ``export`` copies the files a screen reads into the host's static folder.
 ``propose`` writes, from the approved decisions of that folder, the proposal file a host's
 semantic layer may take up (``proposal.yaml``).

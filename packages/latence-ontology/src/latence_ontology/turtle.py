@@ -131,7 +131,7 @@ def to_turtle(
     iris: Mapping[str, str] | None = None,
     key_base: str = KEY_BASE,
 ) -> str:
-    """The Turtle text for an export (``graph-export/3``). The same export gives the same text.
+    """The Turtle text for an export (``graph-export/4``). The same export gives the same text.
     ``iris`` are the local names the ledger holds, by element id."""
     if not re.match(r"^[a-z][a-z0-9+.-]*:", base) or not base.endswith(("/", "#", ":")):
         raise ValueError("the base address must be an absolute IRI that ends in '/', '#' or ':'")

@@ -58,7 +58,9 @@ Nov) make a file ``format: layer-proposal/3``:
   schema, each with its data owner); a close match is never written (``close: false``).
 - ``broader``: an approved step between two value sets (a roll-up the data proved): one entry
   per member of the finer set, naming the codes it rolls up to and what the data showed
-  (``support``: the member's rows and the share of them that carry those codes).
+  (``support``: the member's rows that carry those codes, and their share of the member's rows
+  within the step's own objects, which each ``broader`` edge records as ``member_rows``, so the
+  share is at most 1).
 - ``labels``: a concept's words in one language that a person approved as such (the element
   ``labels:<concept id>@<language>``, decided on its own claim): its preferred label and its
   other labels, on the object and column the host's dimension reads (a value set's column, or a
@@ -78,7 +80,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ContractError
 
 SOURCE = "ontology"  # the kind of source the entries come from, as the host's layer records it
 # The versions of the file. Version 1 states no ``format`` and holds spellings and names;
@@ -94,7 +96,7 @@ CONCEPT_ENTRIES = ("match", "broader", "labels")
 COMMAND = "latence-proposal-writer"  # who wrote the file, as its opening comment says
 
 # The groups of the export a person can decide and this file has no entry for, by the key the
-# export lists them under, with the kind of element each holds (graph-export/3).
+# export lists them under, with the kind of element each holds (graph-export/4).
 STRUCTURE_KINDS = {"roll_ups": "roll_up", "equivalent": "equivalent", "part_of": "part_of",
                    "describes": "describes"}
 CLASS_KINDS = {"classes": "class", "subclass_of": "subclass"}
@@ -270,7 +272,7 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
              ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The proposal file as data, and a report of what was written and what was not.
 
-    ``export`` is a build's ``graph-export/3``; ``decisions`` the decisions in force, by
+    ``export`` is a build's ``graph-export/4``; ``decisions`` the decisions in force, by
     element id. ``names_of`` are the master lists whose records' names may be written, beside
     those the export marks; ``spellings_on`` the object to state a value set's spellings on (by
     column); and ``decided_on`` the day of the approved decisions that state none (the day a
@@ -506,14 +508,21 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
                           {"kind": "match", "key": keys[0], "domains": sorted(per_domain),
                            "_certified": by_domain}))
 
-    node_rows = {str(n["id"]): int(n.get("rows") or 0) for n in export["nodes"]}
     for subject in sorted(s for s in stepped if s in ready):
         step = structure[subject]
         finer, coarser = concepts[str(step["from"])], concepts[str(step["to"])]
         up: dict[str, dict[str, int]] = {}
+        # The member's rows within the step's own objects, as the edge records it
+        # (graph-export/4): the denominator of the share, so the share is at most 1.
+        within: dict[str, int] = {}
         for e in export.get("edges", []):
             if e.get("kind") == "broader" and e.get("relation") == subject:
+                if not isinstance(e.get("member_rows"), int):
+                    raise ContractError(
+                        f"a broader edge of {subject} records no member_rows; the writer reads "
+                        "graph-export/4, whose broader edges carry it")
                 up.setdefault(str(e["from"]), {})[str(e["to"])] = int(e.get("rows") or 0)
+                within[str(e["from"])] = max(within.get(str(e["from"]), 0), int(e["member_rows"]))
         if not up:
             held_back(subject, "no_members")
             continue
@@ -521,7 +530,11 @@ def proposal(export: Mapping[str, Any], decisions: Mapping[str, Mapping[str, Any
         stated_on = _object_of(finer, export["relations"], (spellings_on or {}).get(column))
         for member, parents in sorted(up.items()):
             carried = sum(parents.values())
-            whole = node_rows.get(member) or carried
+            whole = within[member]
+            if carried > whole:
+                raise ContractError(
+                    f"the broader edges of {member} carry {carried} rows, more than the "
+                    f"{whole} the member holds within the step's objects")
             share = round(carried / whole, 4) if whole else 0.0
             body = {"object": stated_on, "column": column, "value": _member_code(member, column),
                     "broader": sorted(_member_code(p, str(coarser["column"])) for p in parents),

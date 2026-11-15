@@ -216,7 +216,7 @@ packages outside the document pipeline described above:
 - **`latence-ontology`** reads an estate's catalog (a DuckDB mirror, or Unity Catalog through the
   Databricks REST API), induces the schema level of its ontology with the evidence for every
   element, keeps assertions and decisions in an append-only ledger whose replay is the layer,
-  and writes the `graph-export/3` file with OWL 2 QL and SKOS Turtle, SHACL shapes and PROV-O
+  and writes the `graph-export/4` file with OWL 2 QL and SKOS Turtle, SHACL shapes and PROV-O
   beside it. Its command is `latence-ontology`; [its README](./packages/latence-ontology/README.md)
   has the commands.
 - **`latence-proposal-writer`** writes the proposal file, the one seam to a host's semantic

@@ -31,7 +31,7 @@ from test_ontology_host_guard import what_a_host_refuses
 TABLE_FILE = Path(__file__).resolve().parent / "fixtures" / "alias" / "estate-semantics.json"
 HOSTS: dict[str, Any] = json.loads(TABLE_FILE.read_text(encoding="utf-8"))
 ESTATE = Path(__file__).resolve().parents[3] / ".scratch" / "semantic-sidecar" / "estate" / "estates"
-SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+SCHEMA = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text(encoding="utf-8"))
 SKOS = rdflib.Namespace("http://www.w3.org/2004/02/skos/core#")
 
 

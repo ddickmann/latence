@@ -12,7 +12,7 @@ from latence_ontology import SCHEMAS
 from latence_ontology.cli import build
 from latence_ontology.ledger import read_decisions
 
-SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text())
+SCHEMA = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text())
 
 
 @pytest.fixture()

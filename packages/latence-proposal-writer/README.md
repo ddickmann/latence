@@ -16,7 +16,7 @@ text = to_yaml(document, "vehicles")          # the file's bytes: the same input
 export, count = in_layer(export, read_receipts((receipt_path,)))
 ```
 
-- `export` is a build's `graph-export/3` document; `decisions` are the decisions in force, by
+- `export` is a build's `graph-export/4` document; `decisions` are the decisions in force, by
   element id (`verdict`, `by`, and the `claim` and the day `at` the decision was made on, a date
   or a timestamp). `decided_on` is the day for decisions that state none; it never replaces a
   stated day.

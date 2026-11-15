@@ -25,7 +25,7 @@ ROWS_MAY_HOLD = {"available", "withheld_personal", "without_personal_columns"}
 
 def what_a_host_refuses(export: dict[str, Any]) -> list[str]:
     """Why a host would not serve the export to every signed-in person; empty when it would."""
-    if export.get("schema") != "graph-export/3":
+    if export.get("schema") != "graph-export/4":
         return ["another format"]
     why: list[str] = []
     concepts = {c["id"]: c for c in export["concepts"]}

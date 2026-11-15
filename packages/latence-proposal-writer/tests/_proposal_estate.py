@@ -1,4 +1,4 @@
-"""A small synthetic estate's export (``graph-export/3``), as a build writes it, for the tests.
+"""A small synthetic estate's export (``graph-export/4``), as a build writes it, for the tests.
 
 A dealer master with names a careless writer would let a reader take for something else, a
 value set of makers in which three pairs of names may be the same (the first name of each pair
@@ -87,7 +87,7 @@ def export() -> dict[str, Any]:
     links = [{"kind": "same_as", "from": f"shop.dealers:D{d}", "to": f"partner.accounts:PA{a}",
               "p": 0.9, "certified_on": "simulated"} for d, a in ((1, 1), (1, 2), (2, 3))]
     return {
-        "format": "graph-export/3", "concepts": concepts, "relations": relations,
+        "format": "graph-export/4", "concepts": concepts, "relations": relations,
         "measures": [{"id": "measure:shop.recalls:count", "concept": "concept:shop.recalls",
                       "expr": "count(*)", "claim": claim(40)}],
         "structure": {"roll_ups": [{"id": "roll_up:market", "claim": claim(41)}]},

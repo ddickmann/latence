@@ -19,7 +19,7 @@ from latence_ontology import SCHEMAS
 from latence_ontology.cli import build
 from latence_ontology.vocabulary import read_vocabulary
 
-SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+SCHEMA = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text(encoding="utf-8"))
 VOCABULARY: dict[str, Any] = {
     "name": "test-vocabulary",
     "version": "1",

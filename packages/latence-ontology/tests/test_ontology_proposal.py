@@ -22,7 +22,7 @@ from latence_ontology import proposal as module
 from latence_ontology.cli import build, propose
 
 FILE_SCHEMA = latence_proposal_writer.schema()
-EXPORT_SCHEMA = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+EXPORT_SCHEMA = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text(encoding="utf-8"))
 
 MAKERS = ("Alfa Works, Inc.", "Beta Motor Corp.", "Delt Cars", "Beta Motor of America", "Gama (GMA US LLC)", "Gama (GMA US, LLC)", "Alfa Works North")
 ODD_NAMES = {7: 'Müller & Söhne: "Autohaus" #7', 8: "0123", 9: "Yes"}  # names a careless writer would let a reader take for something else

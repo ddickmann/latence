@@ -29,9 +29,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import yaml
-from latence_proposal_writer import to_yaml
 
 from .hub_port import DOMAIN_BRANCH, GitHost, MergeRequest, Review
+from .proposal import to_yaml
 
 BUILDER = "engine:latence-ontology"
 PATH = "proposals/{estate}.yaml"

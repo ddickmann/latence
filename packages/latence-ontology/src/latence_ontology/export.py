@@ -1,4 +1,4 @@
-"""The export a screen reads: ``graph-export/3``.
+"""The export a screen reads: ``graph-export/4``.
 
 The schema level (concepts with their signals and attributes, relations with their support on
 the data, measures bound to concepts) and, when instances are built, the instance level: nodes
@@ -27,17 +27,17 @@ from . import SCHEMAS
 from .codes import text
 from .ledger import claim_of
 
-SCHEMA = "graph-export/3"
+SCHEMA = "graph-export/4"
 
 
 @cache
 def _validator() -> jsonschema.protocols.Validator:
-    schema = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+    schema = json.loads((SCHEMAS / "graph-export-4.schema.json").read_text(encoding="utf-8"))
     return jsonschema.Draft202012Validator(schema)
 
 
 def guard(export: dict[str, Any]) -> dict[str, Any]:
-    """The export, refused with every place it breaks its shipped schema (``graph-export/3``):
+    """The export, refused with every place it breaks its shipped schema (``graph-export/4``):
     a host reads the file by that schema, so one that breaks it is never written."""
     broken = sorted(
         "/".join(str(p) for p in e.absolute_path) or "(the file)"

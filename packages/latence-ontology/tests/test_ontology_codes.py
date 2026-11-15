@@ -1,4 +1,4 @@
-"""The contract of ``graph-export/3``: the engine writes codes, not sentences, and every
+"""The contract of ``graph-export/4``: the engine writes codes, not sentences, and every
 proposal a person can decide carries the claim it makes."""
 
 from __future__ import annotations

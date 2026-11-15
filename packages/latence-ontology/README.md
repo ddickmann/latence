@@ -5,7 +5,7 @@ Catalog through the Databricks REST API — and induces the schema level of its 
 relations, value sets, hierarchies, attributes and measure bindings, each with the signals and the
 support it rests on. Assertions and a person's decisions are kept in an append-only ledger, and the
 layer is their replay, so a decision survives every rebuild. The build writes the file a screen
-reads (`graph-export/3`, its JSON Schema shipped as package data) and, beside it, Turtle, SHACL
+reads (`graph-export/4`, its JSON Schema shipped as package data) and, beside it, Turtle, SHACL
 shapes and PROV-O provenance.
 
 ```bash

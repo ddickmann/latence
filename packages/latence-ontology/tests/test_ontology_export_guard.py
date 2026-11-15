@@ -1,5 +1,5 @@
 """The export is checked against its own shipped schema before a byte of it is written: a host
-reads ``graph-export/3`` by that schema, so a file that breaks it is refused, not written."""
+reads ``graph-export/4`` by that schema, so a file that breaks it is refused, not written."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def test_an_export_that_breaks_its_schema_is_refused_and_nothing_is_written(
 
     monkeypatch.setattr(cli, "with_identity", broken)
     out = tmp_path / "out"
-    with pytest.raises(ValueError, match="graph-export/3"):
+    with pytest.raises(ValueError, match="graph-export/4"):
         build(config=_toy(tmp_path), duckdb_path=toy_path, views=tmp_path / "views.txt", verified=None, out=out)
     assert not [p.name for p in out.glob("ontology*")]
 

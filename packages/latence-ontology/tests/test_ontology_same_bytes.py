@@ -8,7 +8,13 @@ toy estate's test checks on every run). One change to the vehicle estate's input
 seeded partner accounts' English service-department name tail became "Kundendienst" (DE)
 and "Servicing" (GB) (ticket 58), which changes 152 account labels of the export and nothing else (compared
 line by line when it was made); its prototype digest is re-recorded for that seed, the
-prototype's own beside it. The toy
+prototype's own beside it. Then R5 (decision D-2 (a), graph-export/4): every ``broader`` edge
+gained ``member_rows`` and the export's ``schema`` became ``graph-export/4``; the toy estate's
+``ontology.json`` digest is re-recorded for that and its three Turtle files did not change. The
+comparison with the prototype drops ``member_rows`` and states the prototype's version string,
+so it still proves nothing else moved. The vehicle estate's ``ontology.json`` digest below is
+still the graph-export/3 one: its inputs are not in this repository, so it is re-recorded where
+they are (the host), and that test fails until it is. The toy
 estate is built here on every run. The vehicle estate needs the host's mirror, its metric views,
 its usage log and its verified joins, which this repository does not hold, so its test runs when
 ``LATENCE_ONTOLOGY_VEHICLE_INPUTS`` names a folder with ``vehicles.duckdb``,
@@ -39,10 +45,11 @@ PROTOTYPE = {
 }
 """The export (``ontology.json``) of each estate as the prototype wrote it."""
 
-ADDED_SINCE = ("iri", "labels", "match")  # ticket 57
+ADDED_SINCE = ("iri", "labels", "match", "member_rows")  # ticket 57; R5 (graph-export/4)
+PROTOTYPE_SCHEMA = "graph-export/3"  # the version string the prototype's bytes state
 
 TOY = {
-    "ontology.json": "123c4fa2f02fefba75047a74479618f839ed5040f4bb11a3dc46045cc379e469",  # pragma: allowlist secret
+    "ontology.json": "8b502124fbfbb77cc40f64e7d40ccf14e3a6de95651e2427938704b5ec4caa52",  # pragma: allowlist secret
     "ontology.ttl": "31fa82f79d7864c4166fcc8f8eafb25eefafb277720fd8c270f85b9b25a5417b",  # pragma: allowlist secret
     "ontology.shacl.ttl": "45c9e8aeaa75c1032d3a0ea5362950257182daeb90a2fbde8182826e17ce59d9",  # pragma: allowlist secret
     "ontology.prov.ttl": "27eaf6b9ff8eff7809afa8709a76ad9b1338604ea53f2baa7c454c57798c6dd0",  # pragma: allowlist secret
@@ -72,6 +79,7 @@ def _without_what_was_added(node: Any) -> Any:
 
 def _as_the_prototype_wrote_it(out: Path) -> str:
     export = _without_what_was_added(json.loads((out / "ontology.json").read_text("utf-8")))
+    export["schema"] = PROTOTYPE_SCHEMA  # the version the bump to graph-export/4 changed
     text = json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

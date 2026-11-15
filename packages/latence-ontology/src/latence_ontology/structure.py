@@ -413,7 +413,13 @@ def broader_edges(
 ) -> list[dict[str, Any]]:
     """For every roll-up between two value sets: which value sits under which, counted over the
     objects that carry both. A value the data puts under two values gets no edge: the step names
-    it among its breaking values, and a person says where it belongs."""
+    it among its breaking values, and a person says where it belongs.
+
+    Each edge also carries ``member_rows``: the member's rows within the step's own objects (the
+    rows where the finer column holds the member, whatever the coarser one holds). ``rows`` counts
+    a subset of those, so ``rows / member_rows`` is a share of at most 1 by construction; the
+    member node's own ``rows`` is counted over other objects and cannot be its denominator
+    (graph-export/4)."""
     objects = {o.full_name: o for o in reader.objects()}
     out = []
     for step, names in sorted(structure["_steps"].items()):
@@ -428,6 +434,18 @@ def broader_edges(
             f"SELECT x, y, count(*) FROM ({' UNION ALL '.join(parts)}) t GROUP BY 1, 2 ORDER BY "
             "1, 3 DESC, 2"
         )
+        member_parts = [
+            f"SELECT {reader.as_text(reader.ident(a))} x FROM {reader.quote(objects[n])} "
+            f"WHERE {reader.ident(a)} IS NOT NULL"
+            for n in names
+        ]
+        member_rows = {
+            x: int(n)
+            for x, n in reader.query(
+                f"SELECT x, count(*) FROM ({' UNION ALL '.join(member_parts)}) t GROUP BY 1 "
+                "ORDER BY 1"
+            )
+        }
         seen: dict[str, int] = {}
         for x, _y, _n in rows:
             seen[x] = seen.get(x, 0) + 1
@@ -442,6 +460,7 @@ def broader_edges(
                 "kind": "broader",
                 "relation": f"roll_up:value:{a}->value:{b}",
                 "rows": int(n),
+                "member_rows": member_rows[x],
             }
             if edge["from"] in known and edge["to"] in known:
                 out.append(edge)
