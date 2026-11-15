@@ -60,6 +60,7 @@ from .standards import to_prov, to_shacl
 from .structure import broader_edges, build_structure, explain_review
 from .turtle import KEY_BASE, to_turtle
 from .usage import attach, read_usage
+from .vocabulary import read_vocabulary
 
 UI_FILES = ("ontology.json", "ontology.ttl")
 
@@ -252,7 +253,20 @@ def build(
     (out / "classes_prompt.json").write_text(
         json.dumps(leaves, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    classes = propose_classes(layer, structure, personal, voice, decisions)
+    # An outside vocabulary as the third voice, its licence checked first (ticket 55); its file
+    # is named relative to the estate file.
+    said_vocabulary = (cfg.get("classes") or {}).get("vocabulary")
+    vocabulary = (
+        read_vocabulary(
+            config.parent / str(said_vocabulary["file"]),
+            tuple(said_vocabulary["licences_allowed"])
+            if said_vocabulary.get("licences_allowed")
+            else None,
+        )
+        if said_vocabulary
+        else None
+    )
+    classes = propose_classes(layer, structure, personal, voice, decisions, vocabulary)
     if isinstance(voice, CachedClassModel) and voice.cost is not None:
         # What the answer in this export cost when it was asked for; a rebuild that asks nothing
         # says the same.

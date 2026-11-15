@@ -379,6 +379,13 @@
   "verified_join": {
    "params": [],
    "en": "verified by the host's layer job"
+  },
+  "vocabulary.matched": {
+   "params": [
+    "vocabulary",
+    "label"
+   ],
+   "en": "the outside vocabulary {vocabulary} has a class called {label}"
   }
  }
 }

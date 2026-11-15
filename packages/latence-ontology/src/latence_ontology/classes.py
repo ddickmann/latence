@@ -12,9 +12,12 @@ Two voices propose it here, and a person decides.
   each concept, may put a class of its own between a concept and a top class, and writes one
   sentence of definition.
 
-There is no outside vocabulary (owner, 2026-11-11): the top classes are the six below. Every
-result is ``proposed``. Where the two voices disagree, both are kept and the proposal is
-marked contested.
+- **an outside vocabulary** (only where the estate file names one, ticket 55; ``vocabulary.py``):
+  a published class hierarchy whose licence was checked proposes the top class of a class whose
+  label the concept's label or name matches. It never settles a placement alone.
+
+The top classes are the six below (owner, 2026-11-11). Every result is ``proposed``. Where the
+voices disagree, all are kept and the proposal is marked contested.
 
 What may be sent to a hosted model is an egress decision per estate (``classes.hosted_model``
 in the estate file). Without it only the pattern voice speaks.
@@ -30,6 +33,7 @@ from typing import Any, Protocol
 
 from .codes import TOP, say, text
 from .ledger import Decisions
+from .vocabulary import recorded, vocabulary_voice
 
 PERSONAL_NAME = re.compile(
     r"^(name|first_?name|last_?name|surname|full_?name|birth|street|address)", re.I
@@ -445,6 +449,7 @@ def propose_classes(
     personal_objects: tuple[str, ...] = (),
     voice: ClassModel | None = None,
     decisions: Decisions | None = None,
+    vocabulary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The class tree as proposals: the six top classes, classes a model put between them and
     the concepts, and for each concept the class it is a kind of, with every voice that said so.
@@ -457,6 +462,7 @@ def propose_classes(
     pack = describe(model, structure, personal_objects)
     known = {c["id"] for c in pack}
     by_pattern = pattern_voice(pack)
+    by_vocabulary = vocabulary_voice(pack, vocabulary) if vocabulary is not None else {}
     answer = voice.propose(pack, TOP) if voice is not None else {"classes": [], "concepts": []}
     served = answer.get("served_by") or (voice.name if voice is not None else None)
     origin = f"model:{served}"
@@ -506,7 +512,7 @@ def propose_classes(
     said = {c["id"]: c for c in answer["concepts"] if c["id"] in known}
     subclass_of = []
     for c in pack:
-        m, p = said.get(c["id"]), by_pattern.get(c["id"])
+        m, p, voc = said.get(c["id"]), by_pattern.get(c["id"]), by_vocabulary.get(c["id"])
         m_parent = standing(names.get(_slug(m["parent"]))) if m else None
         declined = bool(m and m_parent is None and _slug(m["parent"]) == "none")
         p_parent = f"class:{p[0]}" if p else None
@@ -522,9 +528,14 @@ def propose_classes(
         )
         # What each voice proposes, the model first. A parent a person rejected is not proposed
         # again.
+        v_parent = f"class:{voc[0]}" if voc else None
         offers = [
             (parent, signal)
-            for parent, signal in ((m_parent, m_signal), (p_parent, p[1] if p else None))
+            for parent, signal in (
+                (m_parent, m_signal),
+                (p_parent, p[1] if p else None),
+                (v_parent, voc[1] if voc else None),
+            )
             if parent is not None
             and not asked.rejected("subclass", {"id": sid, "concept": c["id"], "parent": parent})
         ]
@@ -539,12 +550,19 @@ def propose_classes(
         ]
         parent = (settled or offers)[0][0]
         both = bool(m_parent and p_parent)
+        v_said = voc[1] if voc else None
+        voiced = [o for o in offers if v_said is None or o[1] is not v_said]  # the older two
         contested = bool(
             p
             and not settled
-            and len(offers) == (2 if both else 1)
+            and len(voiced) == (2 if both else 1)
             and ((m_parent and top_of(m_parent) != p_parent) or declined)
         )
+        # The vocabulary disagrees with another voice: contested, whoever placed it.
+        heard = v_said is not None and any(o[1] is v_said for o in offers)
+        against = [o[0] for o in voiced if heard and (top_of(o[0]) or o[0]) != v_parent]
+        if against and not settled:
+            contested = True
         signals = [signal for _parent, signal in offers if signal is not None]
         if declined and p and m:
             signals.insert(
@@ -565,7 +583,13 @@ def propose_classes(
                     "status": "proposed",
                     "definition": _definitions(m or {}, origin),
                     "contested": contested,
-                    **({"other_parent": p_parent} if contested and p_parent and m_parent else {}),
+                    **(
+                        {"other_parent": p_parent}
+                        if contested and p_parent and m_parent
+                        else {"other_parent": v_parent if parent != v_parent else against[0]}
+                        if contested and against
+                        else {}
+                    ),
                     "signals": signals,
                 },
             )
@@ -596,7 +620,11 @@ def propose_classes(
         ],
         "classes": mid,
         "subclass_of": subclass_of,
-        "voices": {"attribute_pattern": True, "language_model": served},
+        "voices": {
+            "attribute_pattern": True,
+            "language_model": served,
+            **({"vocabulary": recorded(vocabulary)} if vocabulary is not None else {}),
+        },
         "unplaced": sorted(
             c["id"] for c in pack if c["id"] not in {s["concept"] for s in subclass_of}
         ),

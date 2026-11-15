@@ -118,6 +118,10 @@ CODES: dict[str, tuple[tuple[str, ...], str]] = {
     ),
     "language_model.placed": (("model",), "placed by {model}"),
     "language_model.declined": (("model",), "{model} found none of the classes fitting"),
+    "vocabulary.matched": (
+        ("vocabulary", "label"),
+        "the outside vocabulary {vocabulary} has a class called {label}",
+    ),
     "attribute_pattern.place": (("column",), "the column is called {column}"),
     "attribute_pattern.person": (
         ("columns",),

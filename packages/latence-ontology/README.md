@@ -40,3 +40,7 @@ build is not a Stage of a Pipeline.
 
 The same inputs give the same bytes. A hosted model is called only where the estate file switches
 it on with an egress rule, and every call is recorded.
+
+The class tree has up to three voices: attribute patterns, a hosted model (only where the
+estate file allows it) and an outside vocabulary (only where the estate file names one, its
+licence checked before use and recorded in the export). A voice proposes; a person decides.
