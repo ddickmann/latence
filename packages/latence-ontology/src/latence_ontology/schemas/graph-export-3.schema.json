@@ -201,6 +201,48 @@
        "minimum": 0
       }
      }
+    },
+    "renames": {
+     "type": "object",
+     "required": [
+      "carried",
+      "refused"
+     ],
+     "description": "What the renames people confirmed carried, and what was refused, with the reason (ticket 57).",
+     "properties": {
+      "carried": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "required": [
+         "from",
+         "to",
+         "iri"
+        ]
+       }
+      },
+      "refused": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "required": [
+         "from",
+         "to",
+         "reason"
+        ]
+       }
+      }
+     }
+    },
+    "crosswalk": {
+     "type": "object",
+     "required": [
+      "tables",
+      "matched",
+      "without_key",
+      "several_keys"
+     ],
+     "description": "The host's alias tables read, and which elements got no key or several (ticket 57)."
     }
    }
   },
@@ -583,6 +625,9 @@
        },
        "label_code": {
         "type": "string"
+       },
+       "iri": {
+        "$ref": "#/$defs/iri"
        }
       }
      }
@@ -618,6 +663,9 @@
         "items": {
          "$ref": "#/$defs/signal"
         }
+       },
+       "iri": {
+        "$ref": "#/$defs/iri"
        }
       }
      }
@@ -1069,6 +1117,15 @@
     },
     "certification": {
      "$ref": "#/$defs/certification"
+    },
+    "iri": {
+     "$ref": "#/$defs/iri"
+    },
+    "labels": {
+     "$ref": "#/$defs/labels"
+    },
+    "match": {
+     "$ref": "#/$defs/match"
     }
    }
   },
@@ -1130,6 +1187,9 @@
     },
     "certification": {
      "$ref": "#/$defs/certification"
+    },
+    "iri": {
+     "$ref": "#/$defs/iri"
     }
    }
   },
@@ -1166,6 +1226,15 @@
     },
     "certification": {
      "$ref": "#/$defs/certification"
+    },
+    "iri": {
+     "$ref": "#/$defs/iri"
+    },
+    "labels": {
+     "$ref": "#/$defs/labels"
+    },
+    "match": {
+     "$ref": "#/$defs/match"
     }
    }
   },
@@ -1286,6 +1355,54 @@
     "at": {
      "type": "string",
      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+   }
+  },
+  "iri": {
+   "type": "string",
+   "pattern": "^[a-z][a-z0-9+.-]*:\\S*x[0-9a-f]{14}$",
+   "description": "The element's persistent IRI: the base address and the opaque name the ledger holds (iris.jsonl), minted once, carried over a rename a person confirmed (ticket 57)."
+  },
+  "labels": {
+   "type": "object",
+   "required": [
+    "pref",
+    "alt"
+   ],
+   "additionalProperties": false,
+   "description": "skos:prefLabel (one per language) and skos:altLabel, each a text with its language (ticket 57).",
+   "properties": {
+    "pref": {
+     "$ref": "#/$defs/texts"
+    },
+    "alt": {
+     "$ref": "#/$defs/texts"
+    }
+   }
+  },
+  "match": {
+   "type": "object",
+   "required": [
+    "key",
+    "namespace",
+    "read_from"
+   ],
+   "additionalProperties": false,
+   "description": "The host's concept key, read from its alias table by a platform id, never derived from a name (ticket 57). On a value set, members: code says a member is the pair of the key and its code.",
+   "properties": {
+    "key": {
+     "type": "string",
+     "pattern": "^(dataset|dimension|measure):[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*$"
+    },
+    "namespace": {
+     "type": "string"
+    },
+    "read_from": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{16}$"
+    },
+    "members": {
+     "const": "code"
     }
    }
   }

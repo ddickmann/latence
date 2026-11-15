@@ -58,7 +58,7 @@ def _joins(items: Any, schema_prefix: str) -> tuple[Join, ...]:
     return tuple(out)
 
 
-def parse_view(name: str, text: str, schema_prefix: str = "") -> MetricView:
+def parse_view(name: str, text: str, schema_prefix: str = "", schema: str = "") -> MetricView:
     doc = yaml.safe_load(text) or {}
     if not isinstance(doc, dict) or "source" not in doc:
         raise ValueError(f"metric view {name!r} has no source")
@@ -70,6 +70,7 @@ def parse_view(name: str, text: str, schema_prefix: str = "") -> MetricView:
         dimensions=_fields(doc.get("dimensions")),
         measures=_fields(doc.get("measures")),
         raw=doc,
+        schema=schema,
     )
 
 
@@ -80,7 +81,8 @@ def parse_listing(text: str, schema_prefix: str = "") -> list[MetricView]:
         if not block.strip():
             continue
         head, _, body = block.partition("\n")
-        views.append(parse_view(head.strip().split(".")[-1], body, schema_prefix))
+        schema, _, name = head.strip().rpartition(".")
+        views.append(parse_view(name, body, schema_prefix, schema))
     return views
 
 

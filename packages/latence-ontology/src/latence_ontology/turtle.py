@@ -8,9 +8,13 @@
 - a value set is a ``skos:ConceptScheme``, its values are ``skos:Concept`` with ``skos:broader``
   along every roll-up.
 
-Identifiers are opaque (a hash of the element's id under the estate's base address); the
-readable name is the label. A personal column is named and flagged, and no value of it is in
-the file, because no such value is in the export this is written from.
+Identifiers are opaque and persistent: the IRI the ledger holds for the element (``iris.py``:
+minted once from its first id, carried over a rename a person confirmed), under the estate's
+base address; the readable name is the label, ``skos:prefLabel`` per language with its
+``skos:altLabel``s. Where the host's alias table names an element's key, the element is
+``skos:exactMatch`` the key (``crosswalk.py``), and a value of a matched value set names its
+member key: the set's key and its code. A personal column is named and flagged, and no value
+of it is in the file, because no such value is in the export this is written from.
 
 What a person has not yet approved is written too, and marked: ``reviewStatus "proposed"`` on
 the element, or on the axiom where the element itself is settled. A consumer that wants only
@@ -20,9 +24,11 @@ measures are not in this file yet.
 
 from __future__ import annotations
 
-import hashlib
 import re
+from collections.abc import Mapping
 from typing import Any
+
+from .iris import minted
 
 PREFIXES = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -63,15 +69,38 @@ def _xsd(sql_type: str) -> str:
     return "xsd:" + next((x for key, x in XSD if key in t), "string")
 
 
+KEY_BASE = "urn:concept-key:"
+"""Where a host's concept key is written as an IRI (``<urn:concept-key:dimension:ns.make>``),
+unless the estate file names another (``export.key_iri``)."""
+
+
+def _labelled(el: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """``skos:prefLabel`` and ``skos:altLabel`` per language, from the element's ``labels``."""
+    said = el.get("labels") or {}
+    return [
+        (prop, f"{_lit(t['text'])}@{t['lang']}")
+        for prop, part in (("skos:prefLabel", "pref"), ("skos:altLabel", "alt"))
+        for t in said.get(part) or []
+    ]
+
+
 class _Writer:
-    def __init__(self, base: str) -> None:
+    def __init__(
+        self, base: str, iris: Mapping[str, str] | None = None, key_base: str = KEY_BASE
+    ) -> None:
         self.base, self.lines = (
             base,
             [PREFIXES + f"@prefix e: <{base}> .\n@prefix v: <{base}vocabulary/> .\n"],
         )
+        self.iris, self.key_base = dict(iris or {}), key_base
 
     def iri(self, element_id: str) -> str:
-        return "e:x" + hashlib.sha1(element_id.encode("utf-8")).hexdigest()[:14]
+        """The element's IRI as the ledger holds it; an id the ledger does not give one (a row
+        of master data, a value) is named as the ledger would mint it."""
+        return "e:" + self.iris.get(element_id, minted(element_id))
+
+    def key(self, key: str) -> str:
+        return f"<{self.key_base}{key}>"
 
     def add(self, subject: str, pairs: list[tuple[str, str]]) -> None:
         body = " ;\n    ".join(f"{p} {o}" for p, o in pairs)
@@ -96,11 +125,17 @@ def _status(el: dict[str, Any]) -> str:
     )
 
 
-def to_turtle(export: dict[str, Any], base: str) -> str:
-    """The Turtle text for an export (``graph-export/3``). The same export gives the same text."""
+def to_turtle(
+    export: dict[str, Any],
+    base: str,
+    iris: Mapping[str, str] | None = None,
+    key_base: str = KEY_BASE,
+) -> str:
+    """The Turtle text for an export (``graph-export/3``). The same export gives the same text.
+    ``iris`` are the local names the ledger holds, by element id."""
     if not re.match(r"^[a-z][a-z0-9+.-]*:", base) or not base.endswith(("/", "#", ":")):
         raise ValueError("the base address must be an absolute IRI that ends in '/', '#' or ':'")
-    w = _Writer(base)
+    w = _Writer(base, iris, key_base)
     w.add(
         "v:reviewStatus",
         [
@@ -136,6 +171,12 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
         )
     w.add("v:rollsUpTo", [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit("rolls up to"))])
     w.add("v:partOf", [("a", "owl:ObjectProperty"), ("rdfs:label", _lit("part of"))])
+    for name, label in (
+        ("v:member", "member key: a value's dimension key and its code, as the host keys it"),
+        ("v:dimension", "the dimension key of a member"),
+        ("v:code", "the stored code of a member"),
+    ):
+        w.add(name, [("a", "owl:AnnotationProperty"), ("rdfs:label", _lit(label))])
     w.add(
         "e:ontology",
         [
@@ -190,6 +231,9 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
                 ("rdfs:label", _lit(c["label"])),
                 ("v:reviewStatus", _lit(status)),
             ]
+        pairs.extend(_labelled(c))
+        if c.get("match"):
+            pairs.append(("skos:exactMatch", w.key(str(c["match"]["key"]))))
         pairs.extend(
             _defined(c.get("definition") or (kind_of.get(c["id"]) or {}).get("definition"))
         )
@@ -277,15 +321,23 @@ def to_turtle(export: dict[str, Any], base: str) -> str:
             )
 
     of_scheme = {n["id"]: n for n in export.get("nodes", []) if n["concept"] in schemes}
+    matched = {c["id"]: c for c in export["concepts"] if c.get("match")}
     for n in of_scheme.values():
-        w.add(
-            w.iri(n["id"]),
-            [
-                ("a", "skos:Concept"),
-                ("skos:inScheme", w.iri(n["concept"])),
-                ("skos:prefLabel", _lit(n["label"])),
-            ],
-        )
+        pairs = [
+            ("a", "skos:Concept"),
+            ("skos:inScheme", w.iri(n["concept"])),
+            ("skos:prefLabel", _lit(n["label"])),
+        ]
+        scheme = matched.get(n["concept"])
+        if scheme is not None:  # a member: its dimension's key and its code, never one string
+            code = str(n["id"]).removeprefix(f"value:{scheme['column']}:")
+            pairs.append(
+                (
+                    "v:member",
+                    f"[ v:dimension {w.key(str(scheme['match']['key']))} ; v:code {_lit(code)} ]",
+                )
+            )
+        w.add(w.iri(n["id"]), pairs)
     for e in export.get("edges", []):
         if e["kind"] == "broader" and e["from"] in of_scheme and e["to"] in of_scheme:
             # A value sits under another because of a step; until a person approves the step,

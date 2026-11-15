@@ -32,11 +32,14 @@ from .classes import (
     propose_classes,
 )
 from .codes import TOP
+from .crosswalk import crosswalk, read_alias_tables
 from .drift import find_drift, prior_statements
 from .erasure import erase, turned_sensitive
 from .export import build_export
 from .induce import induce
 from .instances import build_instances, merge_values
+from .iris import Iris, confirm, element_ids, read_renames
+from .labels import with_identity
 from .ledger import Decisions, append, assertions_of, read_decisions, replay
 from .lifecycle import calibrated, engine_approvals, read_certifications, with_states
 from .mentions import find_mentions
@@ -51,7 +54,7 @@ from .seed import SCHEMA, create_sql, insert_sql, seed_accounts
 from .staged import staged_statements, to_sql
 from .standards import to_prov, to_shacl
 from .structure import broader_edges, build_structure, explain_review
-from .turtle import to_turtle
+from .turtle import KEY_BASE, to_turtle
 from .usage import attach, read_usage
 
 UI_FILES = ("ontology.json", "ontology.ttl")
@@ -85,6 +88,7 @@ def build(
     receipts: tuple[Path, ...] = (),
     pair_client: PairClient | None = None,
     documents: Path | None = None,
+    alias_tables: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     """The estate is read from a DuckDB mirror (``duckdb_path``) or from Unity Catalog
     (``catalog``; host, warehouse and credentials from the environment). ``receipts`` are what
@@ -95,7 +99,9 @@ def build(
     when what would be sent has changed, and only if its worst case stays under ``max_usd``.
     ``client`` stands in for the provider's client in tests, and ``pair_client`` for the client
     of the hosted model on the pairs the linker leaves undecided (ticket 48), which is asked only
-    where the estate file switches it on with an egress rule (``link.hosted_model``)."""
+    where the estate file switches it on with an egress rule (``link.hosted_model``).
+    ``alias_tables`` are a host's alias tables (ticket 57): an element one of them names by a
+    platform id carries the host's key (``match``)."""
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
     reader: Reader
     if catalog:
@@ -402,13 +408,32 @@ def build(
             "mentions": mentions,
             "meta": {**export["meta"], "mentions": mention_counts},
         }
+    base = cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")
+    # Persistent IRIs, the host's keys and labels per language (ticket 57).
+    iris = Iris(out)
+    renamed = iris.settle(element_ids(export), read_renames(out))
+    iris.save()
+    matches: dict[str, dict[str, Any]] = {}
+    crosswalk_note = None
+    if alias_tables:
+        matches, crosswalk_note = crosswalk(
+            export, reader.metric_views(), read_alias_tables(alias_tables)
+        )
+    export = with_identity(export, base, iris.of, matches, cfg.get("language", "en"))
+    export["meta"] = {
+        **export["meta"],
+        **({"renames": renamed} if renamed["carried"] or renamed["refused"] else {}),
+        **({"crosswalk": crosswalk_note} if crosswalk_note is not None else {}),
+    }
     (out / "ontology.json").write_text(
         json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    base = cfg.get("export", {}).get("base_iri", f"urn:estate:{cfg['name']}:")
-    (out / "ontology.ttl").write_text(to_turtle(export, base), encoding="utf-8")
-    (out / "ontology.shacl.ttl").write_text(to_shacl(export, base), encoding="utf-8")  # ticket 42
-    (out / "ontology.prov.ttl").write_text(to_prov(export, base), encoding="utf-8")
+    key_base = cfg.get("export", {}).get("key_iri", KEY_BASE)
+    (out / "ontology.ttl").write_text(to_turtle(export, base, iris.of, key_base), encoding="utf-8")
+    (out / "ontology.shacl.ttl").write_text(
+        to_shacl(export, base, iris.of), encoding="utf-8"
+    )  # ticket 42
+    (out / "ontology.prov.ttl").write_text(to_prov(export, base, iris.of), encoding="utf-8")
     return {
         "new_assertions": new,
         **export["meta"]["counts"],
@@ -431,6 +456,8 @@ def build(
         **({"drift": drifted} if drifted else {}),
         **({"erased": erased} if erased else {}),
         **({"mentions": mention_counts} if mention_counts is not None else {}),
+        **({"renames": renamed} if renamed["carried"] or renamed["refused"] else {}),
+        **({"crosswalk": crosswalk_note} if crosswalk_note is not None else {}),
         **(
             {"pair_model": (instances["meta"].get("resolution") or {}).get("pair_model")}
             if (instances["meta"].get("resolution") or {}).get("pair_model")
@@ -637,6 +664,14 @@ def main() -> None:
         ),
     )
     b.add_argument(
+        "--alias-table",
+        type=Path,
+        action="append",
+        default=[],
+        help="a host's alias table (its keys and the platform ids they were read from); an "
+        "element it names carries the host's key; repeat for more",
+    )
+    b.add_argument(
         "--receipt",
         type=Path,
         action="append",
@@ -721,6 +756,17 @@ def main() -> None:
         "--by", required=True, help="the data owner's id, as the estate file names them"
     )
     ce.add_argument("--at", required=True, help="the day of the certification (YYYY-MM-DD)")
+    rn = sub.add_parser(
+        "rename",
+        help="a person confirms that an element was renamed: the next build gives the new id "
+        "the old IRI (ticket 57)",
+    )
+    rn.add_argument("--out", type=Path, required=True, help="the build folder")
+    rn.add_argument("--from", dest="old", required=True, help="the element's old id")
+    rn.add_argument("--to", dest="new", required=True, help="the element's id now")
+    rn.add_argument("--by", required=True, help="who confirms it")
+    rn.add_argument("--at", required=True, help="the day (YYYY-MM-DD)")
+    rn.add_argument("--reason", default="", help="why, in a few words")
     a = ap.parse_args()
     if a.cmd == "seed":
         print(json.dumps(seed(a.config, a.duckdb, a.out_duckdb, a.out, a.seed), indent=1))
@@ -750,6 +796,9 @@ def main() -> None:
         print(json.dumps(stage(a.config, a.out, a.file), indent=1, ensure_ascii=False))
     elif a.cmd == "certify":
         print(json.dumps(certify(a.out, a.subject, a.by, a.at), indent=1, ensure_ascii=False))
+    elif a.cmd == "rename":
+        line = confirm(a.out, a.old, a.new, a.by, a.at, a.reason)
+        print(json.dumps(line, indent=1, ensure_ascii=False))
     elif a.cmd == "build":
         print(
             json.dumps(
@@ -767,6 +816,7 @@ def main() -> None:
                     catalog=a.catalog,
                     receipts=tuple(a.receipt),
                     documents=a.documents,
+                    alias_tables=tuple(a.alias_table),
                 ),
                 indent=1,
             )

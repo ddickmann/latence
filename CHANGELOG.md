@@ -26,6 +26,11 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   and the vehicle estate's export is the prototype's bytes. It depends on `latence-core`,
   `latence-proposal-writer`, PyYAML and DuckDB; the hosted model's voice is the `hosted-model`
   extra. It registers no Provider. 32 packages.
+- **Persistent IRIs, a host's concept keys and labels per language in `latence-ontology`.** Every
+  element's IRI is minted once and kept in the build folder's ledger; a rename keeps it only once
+  a person confirms it (`latence-ontology rename`). Given a host's alias table, an element the
+  table names by a platform id carries the host's key (`match`, `skos:exactMatch`), never one
+  derived from a name; labels are `skos:prefLabel` and `skos:altLabel` with their language.
 - **`latence-proposal-writer`, the optional adapter for a host's semantic layer
   ([ADR-0070](docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).**
   It writes the reviewable proposal file from a build's export and the decisions in force (two

@@ -89,6 +89,9 @@ class MetricView:
     dimensions: tuple[Field, ...] = ()
     measures: tuple[Field, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
+    # The schema the view is in, as the catalog names it (its prefix included); where the view
+    # was read from does not say, empty. A platform id names it (ticket 57).
+    schema: str = ""
 
 
 class Reader(Protocol):

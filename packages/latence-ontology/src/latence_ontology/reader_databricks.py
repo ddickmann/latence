@@ -405,7 +405,14 @@ class DatabricksReader:
                     item.setdefault("display_name", meta.get("display_name") or "")
                     item.setdefault("synonyms", meta.get("synonyms") or [])
             doc.setdefault("comment", t.get("comment") or "")
-            out.append(parse_view(t["name"], yaml.safe_dump(doc, sort_keys=False), self.prefix))
+            out.append(
+                parse_view(
+                    t["name"],
+                    yaml.safe_dump(doc, sort_keys=False),
+                    self.prefix,
+                    str(t.get("schema_name") or ""),
+                )
+            )
         return sorted(out, key=lambda v: v.name)
 
     def query(self, sql: str) -> list[tuple[Any, ...]]:

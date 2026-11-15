@@ -18,7 +18,14 @@ latence-ontology build --config estate.yaml --duckdb mirror.duckdb --metric-view
 latence-ontology propose --config estate.yaml --out out/estate      # the proposal file for a host
 latence-ontology stage --config estate.yaml --out out/estate        # staged statements for the catalog's owner
 latence-ontology certify --out out/estate --subject <id> --by <person> --at <day>
+latence-ontology rename --out out/estate --from <old id> --to <new id> --by <person> --at <day>
 ```
+
+Every element has a persistent IRI, minted once and kept in the build folder's ledger
+(`iris.jsonl`); a rename keeps it only once a person confirms it (`rename`). Given a host's
+alias table (`build --alias-table <file>`), an element the table names by a platform id carries
+the host's concept key (`match`, and `skos:exactMatch` in the Turtle file); a key is never
+derived from a name. Labels carry their language (`skos:prefLabel`, `skos:altLabel`).
 
 Its one seam to a host's semantic layer is the proposal file, written by
 `latence-proposal-writer` from approved decisions only (ADR-0070). It registers no Provider: the

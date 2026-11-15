@@ -22,6 +22,7 @@ export gives the same text.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Any
 
 from .turtle import _lit, _status, _Writer, _xsd
@@ -37,8 +38,8 @@ def _active(status: str) -> list[tuple[str, str]]:
     ]
 
 
-def to_shacl(export: dict[str, Any], base: str) -> str:
-    w = _Writer(base)
+def to_shacl(export: dict[str, Any], base: str, iris: Mapping[str, str] | None = None) -> str:
+    w = _Writer(base, iris)
     w.lines[0] += SH
     schemes = {c["id"] for c in export["concepts"] if c["kind"] == "reference"}
     relations: dict[str, list[dict[str, Any]]] = {}
@@ -85,8 +86,8 @@ def to_shacl(export: dict[str, Any], base: str) -> str:
     return "\n".join(w.lines)
 
 
-def to_prov(export: dict[str, Any], base: str) -> str:
-    w = _Writer(base)
+def to_prov(export: dict[str, Any], base: str, iris: Mapping[str, str] | None = None) -> str:
+    w = _Writer(base, iris)
     w.lines[0] += PROV
     meta = export["meta"]
     build, engine = "e:build", "e:engine"

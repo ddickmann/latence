@@ -1,6 +1,10 @@
-"""The move into this package changed no byte (ticket 56). The digests below were recorded from
-the estate prototype (`.scratch/semantic-sidecar/estate/estate/`) at the commit before the move:
-the toy estate of this package's tests, and the vehicle estate the host's tools write. The toy
+"""The move into this package changed no byte (ticket 56), and what changed since is only what
+was meant to. ``PROTOTYPE`` holds the digests recorded from the estate prototype
+(`.scratch/semantic-sidecar/estate/estate/`) at the commit before the move; ``TOY`` and
+``VEHICLES`` the digests of the files as they are now, re-recorded by the ticket that changed
+them: 57 added ``iri``, ``labels`` and ``match`` to the export and labels to the Turtle file, and
+nothing else (the export without those three fields is still the prototype's bytes, which the
+toy estate's test checks on every run). The toy
 estate is built here on every run. The vehicle estate needs the host's mirror, its metric views,
 its usage log and its verified joins, which this repository does not hold, so its test runs when
 ``LATENCE_ONTOLOGY_VEHICLE_INPUTS`` names a folder with ``vehicles.duckdb``,
@@ -10,8 +14,10 @@ the prototype folder's ``HANDOFF.md``) and is skipped with that reason otherwise
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -22,16 +28,24 @@ from latence_ontology.cli import build, seed
 # string as one, hence the allowlist mark on each.
 FILES = ("ontology.json", "ontology.ttl", "ontology.shacl.ttl", "ontology.prov.ttl")
 
+PROTOTYPE = {
+    "toy": "b284d1c462f5de81fdd237e853e2f487182747374b2ebb2fb963dc827ab45b57",  # pragma: allowlist secret
+    "vehicles": "05163c0730929426c3f0887315e8ced8eb2bd66fbd3035689b8dc758b2ca525f",  # pragma: allowlist secret
+}
+"""The export (``ontology.json``) of each estate as the prototype wrote it."""
+
+ADDED_SINCE = ("iri", "labels", "match")  # ticket 57
+
 TOY = {
-    "ontology.json": "b284d1c462f5de81fdd237e853e2f487182747374b2ebb2fb963dc827ab45b57",  # pragma: allowlist secret
-    "ontology.ttl": "31baa509e9683336a130193237a5c505378b401ce9010857cd01cb3e05c0f38a",  # pragma: allowlist secret
+    "ontology.json": "1aa92813e9bcda935caff33ebb83ca48a8a33605906c55789f3e1715338d2654",  # pragma: allowlist secret
+    "ontology.ttl": "31fa82f79d7864c4166fcc8f8eafb25eefafb277720fd8c270f85b9b25a5417b",  # pragma: allowlist secret
     "ontology.shacl.ttl": "45c9e8aeaa75c1032d3a0ea5362950257182daeb90a2fbde8182826e17ce59d9",  # pragma: allowlist secret
     "ontology.prov.ttl": "27eaf6b9ff8eff7809afa8709a76ad9b1338604ea53f2baa7c454c57798c6dd0",  # pragma: allowlist secret
 }
 
 VEHICLES = {
-    "ontology.json": "05163c0730929426c3f0887315e8ced8eb2bd66fbd3035689b8dc758b2ca525f",  # pragma: allowlist secret
-    "ontology.ttl": "c014e310bd9fc68f3b10eae44277dda140c7b6881695e74ed8759a668f43cb7e",  # pragma: allowlist secret
+    "ontology.json": "7908e24f1a183f315f05283bb76b238df2911f0f8001984e4b985148e0c7f536",  # pragma: allowlist secret
+    "ontology.ttl": "94da7765d4d71f9e745d0d7ad75f7247d3ed4c6ea4fed64fcfb6dc71c95bfd3f",  # pragma: allowlist secret
     "ontology.shacl.ttl": "cd661e923a370da7f7c44120be47618fb98a779e9ad1b269972e4a5a4f0b2afa",  # pragma: allowlist secret
     "ontology.prov.ttl": "3ffe9059465768154e6bcde294997b33d65bdc572c6560225a524bb40dc88038",  # pragma: allowlist secret
 }
@@ -43,7 +57,21 @@ def _digests(out: Path) -> dict[str, str]:
     return {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for name in FILES}
 
 
-def test_the_toy_estate_is_the_prototypes_bytes(tmp_path: Path, toy_path: Path) -> None:
+def _without_what_was_added(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_what_was_added(v) for k, v in node.items() if k not in ADDED_SINCE}
+    if isinstance(node, list):
+        return [_without_what_was_added(v) for v in node]
+    return node
+
+
+def _as_the_prototype_wrote_it(out: Path) -> str:
+    export = _without_what_was_added(json.loads((out / "ontology.json").read_text("utf-8")))
+    text = json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_the_toy_estate_is_the_recorded_bytes(tmp_path: Path, toy_path: Path) -> None:
     cfg = tmp_path / "toy.yaml"
     cfg.write_text(yaml.safe_dump({
         "name": "toy", "title": "Toy estate", "schema_prefix": "acme_", "schemas": ["shop", "marts"],
@@ -57,9 +85,10 @@ def test_the_toy_estate_is_the_prototypes_bytes(tmp_path: Path, toy_path: Path) 
     build(config=cfg, duckdb_path=toy_path, views=tmp_path / "views.txt",
           verified=tmp_path / "catalog.yaml", out=tmp_path / "out")
     assert _digests(tmp_path / "out") == TOY
+    assert _as_the_prototype_wrote_it(tmp_path / "out") == PROTOTYPE["toy"]
 
 
-def test_the_vehicle_estate_is_the_prototypes_bytes(tmp_path: Path) -> None:
+def test_the_vehicle_estate_is_the_recorded_bytes(tmp_path: Path) -> None:
     given = os.environ.get("LATENCE_ONTOLOGY_VEHICLE_INPUTS")
     if not given:
         pytest.skip("the vehicle estate's mirror is written by the host's tools and is not in this "
@@ -72,3 +101,4 @@ def test_the_vehicle_estate_is_the_prototypes_bytes(tmp_path: Path) -> None:
           class_answer=ESTATE / "vehicles.classes_answer.gpt-6-luna.json",
           usage=(inputs / "usage.jsonl",))
     assert _digests(out) == VEHICLES
+    assert _as_the_prototype_wrote_it(out) == PROTOTYPE["vehicles"]
