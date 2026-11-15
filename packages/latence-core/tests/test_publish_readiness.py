@@ -104,7 +104,7 @@ _LICENSE_TEXT = (
     "Material that carries its own licence (third-party code, data and model weights) stays\n"
     "under that licence; see NOTICE and THIRD-PARTY-LICENSES.md.\n"
 )
-_LICENSE_SHA256 = "cb81b9bcffdf8f8c824faa32b6da5dab538573907008663bbd0d0205c38f94f9"
+_LICENSE_SHA256 = "cb81b9bcffdf8f8c824faa32b6da5dab538573907008663bbd0d0205c38f94f9"  # pragma: allowlist secret
 
 # A file declares its own outbound grant with an SPDX identifier on a COMMENT line
 # in its header. Only source files are scanned: in Markdown a leading ``#`` is a
