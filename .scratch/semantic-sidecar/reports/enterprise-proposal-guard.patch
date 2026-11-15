@@ -1,0 +1,137 @@
+diff --git a/packages/latence-proposal-writer/pyproject.toml b/packages/latence-proposal-writer/pyproject.toml
+index 9bca45a..51fd323 100644
+--- a/packages/latence-proposal-writer/pyproject.toml
++++ b/packages/latence-proposal-writer/pyproject.toml
+@@ -30,6 +30,7 @@ classifiers = [
+ # a host's code (ADR-0070, "No shared code").
+ dependencies = [
+     "latence-core",
++    "jsonschema>=4.20,<5",
+ ]
+ 
+ [project.urls]
+diff --git a/packages/latence-proposal-writer/src/latence_proposal_writer/__init__.py b/packages/latence-proposal-writer/src/latence_proposal_writer/__init__.py
+index 7f35223..2a7134f 100644
+--- a/packages/latence-proposal-writer/src/latence_proposal_writer/__init__.py
++++ b/packages/latence-proposal-writer/src/latence_proposal_writer/__init__.py
+@@ -10,6 +10,7 @@ from typing import Any
+ from latence_core.errors import ConfigError
+ 
+ from .receipt import RECEIPT, in_layer, read_receipts
++from .writer import _SCHEMA_FILES as _SCHEMAS
+ from .writer import (
+     CLASS_KINDS,
+     COMMAND,
+@@ -25,8 +26,6 @@ from .writer import (
+ __all__ = ["CLASS_KINDS", "COMMAND", "RECEIPT", "SCHEMA_VERSION", "SOURCE", "STRUCTURE_KINDS",
+            "VERSIONS", "in_layer", "kept_values", "proposal", "read_receipts", "schema", "to_yaml"]
+ 
+-_SCHEMAS = {1: "proposal-file.schema.json", 2: "proposal-file-2.schema.json",
+-            3: "proposal-file-3.schema.json"}
+ 
+ 
+ def schema(version: int = 1) -> dict[str, Any]:
+diff --git a/packages/latence-proposal-writer/src/latence_proposal_writer/writer.py b/packages/latence-proposal-writer/src/latence_proposal_writer/writer.py
+index ed5c84b..734850c 100644
+--- a/packages/latence-proposal-writer/src/latence_proposal_writer/writer.py
++++ b/packages/latence-proposal-writer/src/latence_proposal_writer/writer.py
+@@ -76,9 +76,12 @@ import json
+ import re
+ from collections.abc import Mapping, Sequence
+ from datetime import date
++from functools import cache
++from importlib.resources import files
+ from typing import Any
+ 
+-from latence_core.errors import ConfigError
++import jsonschema
++from latence_core.errors import ConfigError, ContractError
+ 
+ SOURCE = "ontology"  # the kind of source the entries come from, as the host's layer records it
+ # The versions of the file. Version 1 states no ``format`` and holds spellings and names;
+@@ -155,9 +158,37 @@ def _lines(node: Mapping[str, Any] | list[Any], indent: int) -> list[str]:
+     return out
+ 
+ 
++_SCHEMA_FILES = {1: "proposal-file.schema.json", 2: "proposal-file-2.schema.json",
++                 3: "proposal-file-3.schema.json"}
++
++
++@cache
++def _validator(version: int) -> jsonschema.protocols.Validator:
++    text = files(__package__).joinpath("schema", _SCHEMA_FILES[version]).read_text("utf-8")
++    return jsonschema.Draft202012Validator(json.loads(text))
++
++
++def _checked(document: Mapping[str, Any]) -> None:
++    """Refuse a document that breaks the shipped schema of the version it states (no
++    ``format`` is version 1): the file is the one seam a host reads (ADR-0070)."""
++    stated = document.get("format")
++    version = {None: 1, FORMAT_2: 2, FORMAT_3: 3}.get(stated)
++    if version is None:
++        raise ContractError(f"the proposal file states format {stated!r}, which no shipped "
++                            f"schema describes ({FORMAT_2!r}, {FORMAT_3!r} or none)")
++    broken = sorted(
++        "/".join(str(p) for p in e.absolute_path) or "(the file)"
++        for e in _validator(version).iter_errors(json.loads(json.dumps(document)))
++    )
++    if broken:
++        raise ContractError(f"the proposal file breaks its schema (version {version}) at "
++                            f"{len(broken)} place(s), first {', '.join(broken[:5])}; not written")
++
++
+ def to_yaml(document: Mapping[str, Any], estate: str, command: str = COMMAND) -> str:
+     """The proposal file's text: a fixed header naming ``command`` as its writer, then the
+-    document."""
++    document, once it is checked against the schema of the version it states."""
++    _checked(document)
+     head = [f"# {line}" for line in (*_header(command), f"Estate: {_quoted(estate)}")]
+     return "\n".join([*head, *_lines(document, 0)]) + "\n"
+ 
+diff --git a/uv.lock b/uv.lock
+index bd326bd..005c47c 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -15,10 +15,10 @@ resolution-markers = [
+     "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
+     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'emscripten'",
+-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
++    "python_full_version < '3.11.5' and sys_platform == 'win32'",
++    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
+     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+ ]
+ 
+@@ -2584,11 +2584,15 @@ name = "latence-proposal-writer"
+ version = "0.1.0"
+ source = { editable = "packages/latence-proposal-writer" }
+ dependencies = [
++    { name = "jsonschema" },
+     { name = "latence-core" },
+ ]
+ 
+ [package.metadata]
+-requires-dist = [{ name = "latence-core", editable = "packages/latence-core" }]
++requires-dist = [
++    { name = "jsonschema", specifier = ">=4.20,<5" },
++    { name = "latence-core", editable = "packages/latence-core" },
++]
+ 
+ [[package]]
+ name = "latence-relation-gliner"
+@@ -5689,10 +5693,10 @@ version = "1.17.1"
+ source = { registry = "https://pypi.org/simple" }
+ resolution-markers = [
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'emscripten'",
+-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
+     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
++    "python_full_version < '3.11.5' and sys_platform == 'win32'",
++    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
+     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+ ]
+ dependencies = [

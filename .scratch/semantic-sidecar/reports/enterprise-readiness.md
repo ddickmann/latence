@@ -146,3 +146,55 @@ to the map's owner), the rest green.
   `scripts/vuln-accepted.toml`; the gate then fails until they are removed.
 - **L-2 (C8): the Airflow lane.** Put every `python -m pip install` in `ci-heavy.yml` under
   `--constraint "${CONSTRAINTS}"`, and run the `ci-heavy` workflow once.
+
+## Handoff (15 Nov, end of this workstream's context)
+
+Owner decisions relayed on 15 Nov: D-1 is settled by making the repository private (renamed
+later by a separate change). The licence becomes proprietary for the private line. Not done on
+this branch; the next session takes these in order.
+
+1. **The relicence to proprietary**, one commit, with a check that is red first.
+   - First, the red check: a test that every `packages/*/pyproject.toml` declares `license` and
+     `license-files`, and that they match the root `LICENSE`. Today
+     `test_every_shipped_package_license_matches_the_root_license` in `test_publish_readiness.py`
+     covers matching only. Make it refuse a missing field, and see it fail on a pyproject with
+     the field removed.
+   - A new ADR (`docs/adr/0076-…`) supersedes ADR-0063 for the private line. The 2026-11-11
+     public snapshot stays Apache-2.0, because a grant made cannot be withdrawn. It records the
+     alternatives that were considered.
+   - `LICENSE` becomes "Copyright (c) 2026 The Metis authors. All rights reserved." and a clause
+     that no licence is granted without written permission. The 32 `packages/*/LICENSE` copies
+     must match it byte for byte.
+   - In each pyproject, `license = "LicenseRef-Proprietary"`. Drop any OSI classifier.
+   - The 36 `SPDX-License-Identifier: Apache-2.0` headers change. Find them with
+     `git grep -l 'SPDX-License-Identifier: Apache-2.0'`. Five of them are tests this branch
+     added.
+   - `test_publish_readiness.py` pins Apache-2.0 throughout: `_SPDX_LICENSE` at :76, the
+     canonical-text digest at :82-95 and :258-290, and the NOTICE facts at :305-336. Each pin
+     moves to the new terms in the same commit as the ADR. That is the decision changing the
+     gate, not a gate being loosened.
+   - `NOTICE`:
+     - The copyright line follows the owner's wording.
+     - The provenance keeps this branch's history correction and adds the private-line change.
+     - The third-party section stays, schema.org included.
+   - `THIRD-PARTY-LICENSES.md`: its header changes; its third-party rows stay.
+   - The pages that say Apache-2.0 or "commercial use needs nothing": `README.md` (badge and
+     *Licence & security*), `COMMERCIAL.md`, `CONTRIBUTING.md`, `CLA.md`, `CITATION.cff`,
+     `docs/CONTINUITY.md` (pinned by `test_continuity_statement.py`) and `mkdocs.yml`. Then
+     `AGENTS.md` § 4.
+   - `test_front_door_truthfulness.py` and `test_continuity_statement.py` will name whatever is
+     missed.
+2. **The final gate run.** `bash scripts/verify-local.sh > log 2>&1; echo REAL_EXIT=$?` on the
+   branch head. It now includes the lock check and the advisory audit. The run started at
+   `e746607` is not usable past its pytest step: the script was edited while it ran, and the
+   heavy editables were removed briefly. That run showed one failure at 30%; find it and check
+   whether it reproduces on the head.
+3. **Coverage floor (M5).** Measure with
+   `uv run --with pytest-cov==7.1.0 pytest packages --cov=packages --cov-report=json`. Set
+   `--cov-fail-under` in `ci.yml` at the measured whole percent, rounded down.
+4. **The proposal guard (R5)**, after decision D-2: apply `enterprise-proposal-guard.patch` in
+   this folder (the writer's check and its test `tests/test_guard.py`). Then fix the share's
+   population; `test_ontology_hub` is the red test.
+5. **Docs build.** `uv sync --extra docs && uv run mkdocs build --strict`.
+   `docs/RELEASING.md` and `docs/getting-started/index.md` changed on this branch. Afterwards,
+   reinstall the heavy editables as `verify-local.sh` does.
