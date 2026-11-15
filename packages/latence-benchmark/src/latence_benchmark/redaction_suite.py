@@ -64,16 +64,20 @@ SYNTHETIC_PII = register_dataset(
         revision_kind="content-digest",
         homepage="https://github.com/ddickmann/latence",
         license=DatasetLicense(
-            dataset_license="Apache-2.0",
-            code_license="Apache-2.0",
+            dataset_license="LicenseRef-Proprietary",
+            code_license="LicenseRef-Proprietary",
+            # Whoever runs this corpus holds the repository under a written permission
+            # (ADR-0076), which covers the corpus as part of the repository; it carries no
+            # third-party term that would restrict a commercial use that permission allows.
             commercial_use=True,
             attribution_required=True,
-            verified_on="2026-07-18",
+            verified_on="2026-11-15",
             source_url="https://github.com/ddickmann/latence/blob/main/LICENSE",
             notes=(
-                "Corpus and generator are both original work in this repository and carry this "
-                "repository's own Apache-2.0 license — the one case where corpus and toolkit "
-                "licenses coincide, verified rather than assumed (ADR-0012). The corpus contains "
+                "Corpus and generator are both original synthetic work in this repository and "
+                "carry this repository's own terms (proprietary, ADR-0076; the 2026-11-11 public "
+                "snapshot stays Apache-2.0) — the one case where corpus and toolkit licenses "
+                "coincide, verified rather than assumed (ADR-0012). The corpus contains "
                 "NO real personal data: every value is a reserved or published example (RFC 2606 "
                 "example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone "
                 "numbers, the 4111... test card, AWS's AKIAIOSFODNN7EXAMPLE docs key, published "
@@ -81,7 +85,10 @@ SYNTHETIC_PII = register_dataset(
             ),
         ),
         manifest=(CORPUS_FILE,),
-        citation="Latence synthetic PII corpus (Apache-2.0) — part of the latence-framework repo.",
+        citation=(
+            "Latence synthetic PII corpus (LicenseRef-Proprietary) — part of the latence-framework "
+            "repo."
+        ),
     )
 )
 

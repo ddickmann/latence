@@ -189,7 +189,7 @@ metadata["component"] = {
     "name": "latence-framework",
     "version": os.environ["VERSION"],
     "description": "Latence Framework — messy enterprise data to AI-ready data.",
-    "licenses": [{"license": {"id": "Apache-2.0"}}],
+    "licenses": [{"expression": "LicenseRef-Proprietary"}],  # ADR-0076; a LicenseRef is not an SPDX-list id
 }
 properties = [p for p in metadata.get("properties", []) if p.get("name") != "latence:release:tag"]
 properties.append({"name": "latence:release:tag", "value": os.environ["TAG"]})

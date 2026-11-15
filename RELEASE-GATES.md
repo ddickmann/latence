@@ -80,10 +80,11 @@ and neither is claimed. Gate 6 holds the claims that replace them.
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [x] `CONTRIBUTING.md` states the CLA requirement
-- [ ] **The benchmark corpus's own licence flags are coherent.** Reopened by ADR-0076: the
-      synthetic PII corpus still declares `Apache-2.0` and `commercial_use=True`, which holds for
-      the 2026-11-11 snapshot and not for the proprietary line; changing the flags changes
-      recorded benchmark output, so it is its own change. It was met by ADR-0063, which dissolved
+- [x] **The benchmark corpus's own licence flags are coherent.** Re-met on 2026-11-15 for
+      ADR-0076: the synthetic PII corpus declares `dataset_license` and `code_license`
+      `LicenseRef-Proprietary` with `commercial_use=True` (whoever runs it holds the repository
+      under a written permission that covers the corpus), and the redaction suite was re-run to
+      record it; no score moved. It was first met by ADR-0063, which dissolved
       the contradiction rather than resolving it: `latence_benchmark/redaction_suite.py` declares the
       synthetic PII corpus `dataset_license="Apache-2.0", code_license="Apache-2.0",
       commercial_use=True`, and with the repository back on Apache-2.0 all three are true together.

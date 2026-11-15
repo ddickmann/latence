@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-07-19",
+  "generated_on": "2026-11-15",
   "measurements": [
     {
       "dataset": {
@@ -115,15 +115,15 @@
     },
     {
       "dataset": {
-        "citation": "Latence synthetic PII corpus (Apache-2.0) \u2014 part of the latence-framework repo.",
+        "citation": "Latence synthetic PII corpus (LicenseRef-Proprietary) \u2014 part of the latence-framework repo.",
         "homepage": "https://github.com/ddickmann/latence",
         "license": {
           "attribution_required": true,
-          "code_license": "Apache-2.0",
+          "code_license": "LicenseRef-Proprietary",
           "commercial_use": true,
-          "dataset_license": "Apache-2.0",
+          "dataset_license": "LicenseRef-Proprietary",
           "source_url": "https://github.com/ddickmann/latence/blob/main/LICENSE",
-          "verified_on": "2026-07-18"
+          "verified_on": "2026-11-15"
         },
         "name": "synthetic-pii",
         "repo_id": "latence-framework/latence_benchmark.corpora",
@@ -145,7 +145,7 @@
         "true_positives": 27
       },
       "headline_dimension": "language",
-      "measured_on": "2026-07-19",
+      "measured_on": "2026-11-15",
       "metrics": [
         {
           "dimension": "language",

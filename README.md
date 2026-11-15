@@ -210,8 +210,8 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down:
 
 ## Where this is going
 
-This section states decisions that are recorded and accepted. Part of them is built, in two
-packages outside the document pipeline described above:
+Nothing in this section is built except the two packages named here, outside the document
+pipeline described above; the rest states decisions that are recorded and accepted, not code:
 
 - **`latence-ontology`** reads an estate's catalog (a DuckDB mirror, or Unity Catalog through the
   Databricks REST API), induces the schema level of its ontology with the evidence for every
