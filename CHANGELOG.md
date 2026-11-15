@@ -24,7 +24,7 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   JSON Schema shipped as package data) with Turtle, SHACL and PROV-O beside it; its command is
   `latence-ontology`. The estate prototype's code moved into it under the repository's gates,
   and the vehicle estate's export is the prototype's bytes. It depends on `latence-core`,
-  `latence-proposal-writer`, PyYAML and DuckDB; the hosted model's voice is the `hosted-model`
+  `latence-proposal-writer`, PyYAML, DuckDB and jsonschema (it checks the export against its schema before writing it); the hosted model's voice is the `hosted-model`
   extra. It registers no Provider. 32 packages.
 - **Persistent IRIs, a host's concept keys and labels per language in `latence-ontology`.** Every
   element's IRI is minted once and kept in the build folder's ledger; a rename keeps it only once

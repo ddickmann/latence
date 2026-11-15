@@ -35,7 +35,7 @@ from .codes import TOP
 from .crosswalk import crosswalk, read_alias_tables
 from .drift import find_drift, prior_statements
 from .erasure import erase, turned_sensitive
-from .export import build_export
+from .export import build_export, guard
 from .hub import pull_certifications, push_reviews
 from .hub import submit as submit_to_hub
 from .hub import views as hub_views
@@ -444,6 +444,7 @@ def build(
         **({"renames": renamed} if renamed["carried"] or renamed["refused"] else {}),
         **({"crosswalk": crosswalk_note} if crosswalk_note is not None else {}),
     }
+    guard(export)  # before any of the four files is written
     (out / "ontology.json").write_text(
         json.dumps(export, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
     )

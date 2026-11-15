@@ -2304,6 +2304,7 @@ version = "0.1.0"
 source = { editable = "packages/latence-ontology" }
 dependencies = [
     { name = "duckdb" },
+    { name = "jsonschema" },
     { name = "latence-core" },
     { name = "latence-proposal-writer" },
     { name = "pyyaml" },
@@ -2317,6 +2318,7 @@ hosted-model = [
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.1,<3" },
+    { name = "jsonschema", specifier = ">=4.20,<5" },
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "latence-proposal-writer", editable = "packages/latence-proposal-writer" },
     { name = "openai", marker = "extra == 'hosted-model'", specifier = ">=1.40,<3" },

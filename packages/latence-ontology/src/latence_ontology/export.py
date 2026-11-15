@@ -17,12 +17,38 @@ Two rules of the contract (version 3):
 
 from __future__ import annotations
 
+import json
+from functools import cache
 from typing import Any
 
+import jsonschema
+
+from . import SCHEMAS
 from .codes import text
 from .ledger import claim_of
 
 SCHEMA = "graph-export/3"
+
+
+@cache
+def _validator() -> jsonschema.protocols.Validator:
+    schema = json.loads((SCHEMAS / "graph-export-3.schema.json").read_text(encoding="utf-8"))
+    return jsonschema.Draft202012Validator(schema)
+
+
+def guard(export: dict[str, Any]) -> dict[str, Any]:
+    """The export, refused with every place it breaks its shipped schema (``graph-export/3``):
+    a host reads the file by that schema, so one that breaks it is never written."""
+    broken = sorted(
+        "/".join(str(p) for p in e.absolute_path) or "(the file)"
+        for e in _validator().iter_errors(export)
+    )
+    if broken:
+        raise ValueError(
+            f"the export breaks its schema {SCHEMA} at {len(broken)} place(s), first "
+            f"{', '.join(broken[:5])}; nothing was written"
+        )
+    return export
 
 
 def _claimed(kind: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
