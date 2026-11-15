@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK
-Status: resolved (15 Nov): schema.org, the owner's choice, as a curated extract; open: the licence to be confirmed against the live terms page (a live step)
+Status: resolved (15 Nov): schema.org, the owner's choice, as a curated extract; the licence confirmed (CC BY-SA 3.0)
 Blocked by: nothing
 Emerges from: 42 (split out on 14 Nov: the third of its four parts)
 
@@ -94,9 +94,10 @@ chooses, the vehicle estate file names no vocabulary and builds as before.
 - **The licence: CC BY-SA 3.0.** Read from the source of schema.org's terms page in its own
   repository (`docs/terms.html` at the same commit): "The Sponsors' copyrights in the schema are
   licensed to website publishers and other third parties under the Creative Commons
-  Attribution-ShareAlike License (version 3.0)." **schema.org itself was refused by this
-  machine's network, so the live page is to be confirmed (a live step):** open
-  https://schema.org/docs/terms.html and check the same sentence. The file states the licence,
+  Attribution-ShareAlike License (version 3.0)." schema.org's own site is not
+  reachable from the build machines; the same sentence was read again on 15 Nov from the terms
+  page's source on the repository's main branch, the file the site serves, so the licence is
+  confirmed and no live step remains. The file states the licence,
   its source and the attribution; the extract is an adaptation, offered under the same licence.
 - **Allowed by the estate file only:** `classes.vocabulary.licences_allowed: [CC-BY-SA-3.0]` in
   `estates/vehicles.yaml`; the terms are recorded in `THIRD-PARTY-LICENSES.md` (a new section:
