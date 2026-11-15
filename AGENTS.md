@@ -133,7 +133,9 @@ PYTHONHASHSEED=0 uv run pytest packages/latence-core/tests/test_conformance.py -
 ```
 
 **The merge gate is `scripts/verify-local.sh`.** It mirrors CI's lint · type · test · build lane
-plus the secret scan, Provider conformance, eight end-to-end stack validations, the reproducible
+plus the secret scan, the lock-freshness check and the known-vulnerability audit
+(`scripts/vuln_audit.py`, whose accepted advisories each carry a reason in
+`scripts/vuln-accepted.toml`), Provider conformance, eight end-to-end stack validations, the reproducible
 environment specs, the compatibility matrix and seven bake-off matrices — same commands, same
 environment (`PYTHONHASHSEED=0 LATENCE_CUDA=0`), same order.
 

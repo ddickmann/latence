@@ -1,0 +1,33 @@
+# Known advisories in the locked dependency set that are accepted for now, each with its reason.
+# Read by scripts/vuln_audit.py: an advisory that is NOT listed here fails the gate, and so does
+# an entry here that the audit no longer reports (a stale acceptance is removed, not kept).
+#
+# An entry names the package, the advisory id pip-audit reports, why it cannot be fixed by a lock
+# refresh, and what lifts it. Only the GPU stack is here: torch and transformers are pulled by the
+# heavy, opt-in Provider packages only (scripts/heavy-packages.txt), never by latence-core or the
+# CPU-first dev environment, and upgrading them changes measured GPU results, so the upgrade is a
+# run on a GPU, not a lock edit.
+
+[[accepted]]
+package = "torch"
+ids = ["PYSEC-2025-194"]
+reason = """torch.load deserialisation advisory, fixed in 2.13. torch is pulled only by the heavy
+GPU Provider packages; the Blackwell/CUDA-13 compatibility matrix and the GPU validations were
+measured on 2.12, so the bump is re-measured on a GPU before it lands."""
+lifted_by = "torch>=2.13 in uv.lock after the GPU validation scripts/validate-*-on-gpu.md re-run"
+
+[[accepted]]
+package = "setuptools"
+ids = ["PYSEC-2026-3447", "GHSA-xmj3-9gf7-h52w"]
+reason = """Held at 81 by torch 2.12's own cap on setuptools (a constraint setuptools>=84.1 resolves
+only by moving torch). No Latence package imports setuptools at run time."""
+lifted_by = "the torch upgrade above"
+
+[[accepted]]
+package = "transformers"
+ids = ["PYSEC-2025-217", "PYSEC-2026-2288", "PYSEC-2026-2289", "PYSEC-2026-2290", "PYSEC-2026-3929", "PYSEC-2026-4174"]
+reason = """Model-loading advisories in transformers 4.x; the fixes are in 5.x, a major version
+latence-disambig-glinker caps below (transformers<5) because GLinker is built on the 4.x API.
+transformers is pulled only by the heavy GPU Provider packages, which load pinned, licence-checked
+checkpoints named in their profiles rather than arbitrary ones."""
+lifted_by = "transformers>=5.10 once latence-disambig-glinker is validated on it on a GPU"

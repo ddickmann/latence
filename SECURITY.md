@@ -50,6 +50,16 @@ A supported-versions table with real branches will replace this once a 1.0 line 
 Continuity, maintainership and what happens if the project stops being maintained are set
 out in [`docs/CONTINUITY.md`](docs/CONTINUITY.md).
 
+## Dependencies with known advisories
+
+Every committed lock file (`uv.lock`, and `packages/latence-gliner25/uv.lock`) is audited with
+`pip-audit` in CI and in `scripts/verify-local.sh` (`scripts/vuln_audit.py`). An advisory fails
+the gate unless [`scripts/vuln-accepted.toml`](scripts/vuln-accepted.toml) accepts it with a
+reason and the change that lifts it; an acceptance the audit no longer needs fails it too. The
+accepted ones are confined to the opt-in GPU stack (torch, transformers, and setuptools held by
+torch), whose upgrade is re-measured on a GPU before it lands. Dependabot opens the version
+updates weekly.
+
 ## Trust model and honest scope
 
 **Trusted:** the operator who authors and runs a Pipeline. Pipeline YAML, Provider

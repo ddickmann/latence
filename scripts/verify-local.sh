@@ -24,8 +24,17 @@ step "secret-scan gate (detect-secrets, volatile-field-immune)"
 uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
 ok "secret-scan"
 
+step "lock files are current (workspace + the excluded latence-gliner25, ADR-0064)"
+uv lock --check
+(cd packages/latence-gliner25 && uv lock --check)
+ok "locks current"
+
+step "known-vulnerability audit (pip-audit over every lock; accepted ones need a reason)"
+uv run --no-project --with pip-audit==2.10.1 python scripts/vuln_audit.py
+ok "vulnerability audit"
+
 step "sync workspace (dev env)"
-uv sync
+uv sync --locked
 # Heavy/endpoint provider SOURCES only (no heavy deps) — their tests monkeypatch the heavy
 # dep; keeps the CPU-first offline env intact (ADR-0007/0016). Mirrors the CI step exactly.
 #

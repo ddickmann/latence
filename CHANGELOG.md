@@ -15,6 +15,16 @@ history. It is large for that reason. When the first tag is cut (`docs/RELEASING
 becomes that release's section and the cadence starts from there; until then there is no cadence to
 report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
 
+### Security
+
+- **Databricks credentials go only over https, and never follow a redirect.** The reader checked
+  the host's scheme after the service principal's secret had already been exchanged, admitted
+  any host starting `http://127.0.0.1`, and followed redirects with the token attached.
+- **A known-vulnerability gate over every lock file** (`scripts/vuln_audit.py`, in CI and
+  `scripts/verify-local.sh`), with each accepted advisory's reason in
+  `scripts/vuln-accepted.toml`; the locks were refreshed for the advisories a refresh fixes
+  (Pillow 13, pypdf 6.21, urllib3 2.8 among them), and both are checked to be current.
+
 ### Added
 
 - **`latence-ontology`, the ontology build over a data estate.** It reads an estate's catalog (a

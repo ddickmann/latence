@@ -23,7 +23,7 @@ runs:
 
     - name: Sync workspace (dev env)
       shell: bash
-      run: uv sync --python ${{ inputs.python-version }}
+      run: uv sync --locked --python ${{ inputs.python-version }}
 
     # The heavy/endpoint Providers are workspace members but NOT in the dev env's deps
     # (torch/transformers, apache-airflow, the openai client, the Presidio/spaCy stack,
