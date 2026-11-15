@@ -4,7 +4,9 @@
 > [`LICENSE`](./LICENSE). It has moved twice: Apache-2.0 from the first commit,
 > PolyForm Noncommercial 1.0.0 from 2026-07-29 (ADR-0055), and back to Apache-2.0
 > on 2026-08-15 (ADR-0063, which supersedes it). It was **never published
-> publicly** under any of those states — private since creation, nothing on PyPI,
+> publicly** under either superseded state — the development repository was private
+> throughout, the public repository's history begins at an Apache-2.0 snapshot of
+> 2026-11-11, nothing on PyPI,
 > no release cut, no tag, sole copyright holder across every commit — so both
 > relicences are clean and nobody holds a grant under a superseded one. The
 > verified provenance record is in [`NOTICE`](./NOTICE).

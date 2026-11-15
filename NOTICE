@@ -14,7 +14,8 @@ Apache-2.0 LICENSE from its first commit until 2026-07-29, was relicensed to
 PolyForm Noncommercial 1.0.0 on that date (ADR-0055), and was relicensed back to
 Apache-2.0 on 2026-08-15 (ADR-0063, which supersedes ADR-0055). Neither change
 reached anyone, because the software was never published under either: the
-GitHub repository has been private since creation, no
+development repository was private throughout, the public repository's history
+begins at an Apache-2.0 snapshot committed on 2026-11-11, no
 distribution was ever published to PyPI, no release was ever cut, no version tag
 exists, every commit is authored by the sole copyright holder, and no contributor
 licence agreement has ever been signed. So no one holds a grant under either
@@ -80,6 +81,21 @@ OPT-IN, NON-DEFAULT model with license flow-down obligations:
 Standing rule: a GLiNER/HF checkpoint's license is per-weight and cannot be
 inferred from the library. Every new default Provider requires per-model
 weights-and-code license verification recorded before it ships (ADR-0012).
+
+================================================================================
+Third-party material in the source tree (not in any distribution)
+================================================================================
+
+  - schema.org vocabulary, release 30.1 — by the schema.org sponsors (Google,
+    Microsoft, Yahoo, Yandex), licensed under the Creative Commons
+    Attribution-ShareAlike License 3.0 (CC-BY-SA-3.0,
+    https://creativecommons.org/licenses/by-sa/3.0/). A curated extract (a
+    selection of 16 classes with added labels and a mapping to six top classes)
+    is in
+    .scratch/semantic-sidecar/estate/estates/vehicles.vocabulary.schemaorg.json
+    and, as an adaptation, is offered under the same licence. It is an estate
+    file of the semantic sidecar, not package data; the Apache-2.0 licence of the
+    framework's code does not apply to it. Details in THIRD-PARTY-LICENSES.md.
 
 ================================================================================
 Third-party Python runtime dependencies
