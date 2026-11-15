@@ -258,7 +258,7 @@ Download all the release assets into one directory, then:
 
 \`\`\`bash
 # 1. Verify the signature over SHA256SUMS (uvx = uv tool run; pipx run sigstore also works)
-uvx sigstore verify identity \\
+uvx sigstore==4.5.1 verify identity \\
   --bundle SHA256SUMS.sigstore.json \\
   --cert-identity '${CERT_IDENTITY}' \\
   --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\
@@ -320,7 +320,7 @@ if [ "$SIGN" = "yes" ]; then
   echo "==> Signing SHA256SUMS with keyless Sigstore"
   SIGN_ARGS=(sign --bundle "$OUT/SHA256SUMS.sigstore.json" --overwrite --no-default-files)
   [ -n "$IDENTITY_TOKEN" ] && SIGN_ARGS+=(--identity-token "$IDENTITY_TOKEN")
-  uv run --with sigstore --no-project -- sigstore "${SIGN_ARGS[@]}" "$OUT/SHA256SUMS"
+  uv run --with sigstore==4.5.1 --no-project -- sigstore "${SIGN_ARGS[@]}" "$OUT/SHA256SUMS"
   [ -s "$OUT/SHA256SUMS.sigstore.json" ] || die "sigstore produced no bundle"
   echo "    signed: $OUT/SHA256SUMS.sigstore.json"
 else

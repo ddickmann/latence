@@ -48,7 +48,7 @@ jobs:
       # tree is always green; only a genuinely new or newly-un-audited secret turns it red.
       # `uv run --with detect-secrets --no-project` puts the CLI on PATH without syncing.
       - name: detect-secrets (audited baseline gate)
-        run: uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
+        run: uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py
 
   # ---- Supply chain: every committed lock is current, and no dependency in it carries a
   # known advisory that scripts/vuln-accepted.toml does not accept with a stated reason.
@@ -150,7 +150,7 @@ jobs:
       # Installed like the heavy sources (uv pip install into the synced venv, then uv run)
       # so it never perturbs the locked dev env.
       - name: Install pytest-cov
-        run: uv pip install pytest-cov
+        run: uv pip install pytest-cov==7.1.0
 
       - name: Pytest (+ coverage)
         run: >-

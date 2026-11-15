@@ -116,7 +116,7 @@ jobs:
       - name: Sync workspace (+ s3fs)
         run: |
           uv sync
-          uv pip install s3fs
+          uv pip install s3fs==2026.6.0   # matches the locked fsspec
 
       # The Storage round-trip (5-byte) PLUS the real end-to-end pipeline on s3:// — the honest
       # ADR-0009 coverage (H-E1 Part 2). The e2e drives the SAME screening spine the local

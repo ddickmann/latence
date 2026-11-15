@@ -21,7 +21,7 @@ step() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }
 ok() { printf '\033[1;32m✓ %s\033[0m\n' "$1"; }
 
 step "secret-scan gate (detect-secrets, volatile-field-immune)"
-uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
+uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py
 ok "secret-scan"
 
 step "lock files are current (workspace + the excluded latence-gliner25, ADR-0064)"
