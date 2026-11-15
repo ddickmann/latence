@@ -147,13 +147,13 @@ Every open ticket, once, with its state (an override of the format's default tha
 - [Build: approved changes reach the catalog as staged proposals its owner applies](issues/52-approved-changes-reach-the-catalog-as-staged-proposals.md): resolved (14 Nov), from 16; applying a file is the owner's
 - [Build: drift becomes a new proposal, and the old entry is marked stale](issues/53-drift-becomes-a-new-proposal.md): resolved (14 Nov), from 16
 - [Build: a column that turns sensitive is erased from every export and the ledger](issues/54-erasure-when-a-column-turns-sensitive.md): resolved (14 Nov), from 16
-- [Build: classes from an outside vocabulary as a third voice](issues/55-classes-from-an-outside-vocabulary.md): the voice and its licence gate built (15 Nov); which vocabulary the vehicle estate reads is the owner's question
+- [Build: classes from an outside vocabulary as a third voice](issues/55-classes-from-an-outside-vocabulary.md): built (15 Nov); the owner chose schema.org: a curated extract of 16 classes, allowed by the estate file and recorded in the third-party licences; live: confirm the licence sentence on schema.org's terms page
 - [Build: the estate prototype's code moves into packages under the repository's gates](issues/56-the-prototype-folder-into-packages.md): resolved (15 Nov): one package, `latence-ontology` (the owner's layout), the vehicle estate's build the same bytes as the prototype's
 - [Build: a persistent IRI, the crosswalk to the host's concept keys, and labels per language](issues/57-a-persistent-iri-the-crosswalk-to-the-hosts-keys-and-labels-per-language.md): built (15 Nov), decided by the owner: an IRI carries over a rename only once a person confirms it; open: the host's command that writes its alias table
-- [Build: the proposal writer writes `match`, `broader` and `labels` entries](issues/58-the-writer-for-match-broader-and-labels-entries.md): built (15 Nov), round trip on the host's tool (3 placed, 0 refused); open: the vehicle estate names no domains
+- [Build: the proposal writer writes `match`, `broader` and `labels` entries](issues/58-the-writer-for-match-broader-and-labels-entries.md): built (15 Nov), round trip on the host's tool (3 placed, 0 refused); the vehicle estate's domains proposed (product safety, after-sales, partner channel), the owner confirms; a vehicle build writes a `match`
 - [Build: the hub's builder side: approved entries as a merge request through a git port](issues/59-the-hubs-builder-side-merge-requests-on-a-git-port.md): built against a local bare repository (15 Nov); live: a real Forgejo remote, the host's route and page
-- [Task: retire the string cascade's fuzzy rungs from the text path's default](issues/60-retire-the-string-cascade-from-the-text-path.md): open, from 50's measurement
-- [Task: the embedding Disambiguator on its hashing default is retired; its learned run decides the rest](issues/61-the-embedding-disambiguator-on-the-hashing-embedder.md): open, from 50's measurement; the learned run is a live request
+- [Task: retire the string cascade's fuzzy rungs from the text path's default](issues/60-retire-the-string-cascade-from-the-text-path.md): resolved (15 Nov): retired from the shipped stacks (ADR-0075)
+- [Task: the embedding Disambiguator on its hashing default is retired; its learned run decides the rest](issues/61-the-embedding-disambiguator-on-the-hashing-embedder.md): the hashing default retired (15 Nov, ADR-0075); the learned run on a GPU is a live request
 
 ## The owner's decisions (12 Nov)
 
