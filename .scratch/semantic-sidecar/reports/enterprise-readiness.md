@@ -219,3 +219,41 @@ this branch; the next session takes these in order.
    Pillow 13. Its lock still pins Pillow 12.3.0: valid against `<14`, but carrying the advisories
    that 13.0 fixes. `scripts/vuln_audit.py` audits the uv locks only, so an environment lock
    under `deploy/env/` is outside it. Extending the audit to them is the follow-up.
+
+## Outcome of the licence-and-share workstream (15 Nov, branch `…-ws29b-licence-share`)
+
+Steps 1 to 5 of the handoff above are done on this branch.
+
+- **R5 / D-2 (a)** (`0e396b9`). Each `broader` edge records `member_rows`, the member's rows
+  within the step's own objects, and `support.share = rows / member_rows`, which is at most 1.
+  The export is `graph-export/4`. The proposal-file schema guard landed red first on
+  `test_ontology_hub`, which wrote 1.0769. It sits in `latence_ontology.proposal`, not in the
+  writer, because the writer imports only the standard library and the core (ADR-0070), and
+  the saved patch would have broken that gate. The toy `same_bytes` digest is re-recorded.
+  The vehicles digest is still the `/3` one and the host re-records it.
+  - The host must accept: `schema: "graph-export/4"`, and an integer `member_rows` (≥ 1, ≥
+    `rows`) on every `kind: broader` edge. Proposal formats are unchanged; the share values
+    are now ≤ 1.
+- **Relicence** (`f082d2e`, `d50c679`, `1d61174`). ADR-0076 makes the private line
+  `LicenseRef-Proprietary` and keeps the 2026-11-11 snapshot on Apache-2.0. The gates moved
+  first: 9 went red on the Apache tree. None was deleted.
+  - `REPO_LICENSE_CODE` moved too, and the C5 fixture was re-recorded (14 licence strings).
+  - Own-code Providers now pass C3 as "restricted opt-in (verified)". That wording should be
+    reviewed.
+- **Consistency** (`5a16fcc`).
+  - README *Where this is going* again opens with "Nothing in this section is built". Its gate
+    was red at `2275be3`.
+  - The synthetic PII corpus declares `LicenseRef-Proprietary`. The redaction suite was re-run
+    and no score moved.
+  - The SBOM component licence is the expression `LicenseRef-Proprietary`.
+- **Gates at `5a16fcc`**.
+  - `bash scripts/verify-local.sh`: `REAL_EXIT=0`.
+  - Coverage, run on its own: 91.10% (branches on; 4,740 passed, 20 skipped). The floor is
+    `--cov-fail-under=91` in `ci.yml` (`1c492b4`).
+  - `mkdocs build --strict` is blocked here: its one warning is the mermaid plugin failing to
+    reach unpkg.com, which this network refuses. No content warning.
+  - Not covered here: the MinIO s3 e2e, the Airflow DAG lane, real GPU runs, and the
+    `deploy/env/*` gates 2+.
+- **Still live:** L-1 (the GPU stack upgrade), L-2 (the Airflow lane constraints), and
+  relocking `served-ocr-client` (download.pytorch.org is blocked here). See *Live requests*
+  and handoff step 6.
