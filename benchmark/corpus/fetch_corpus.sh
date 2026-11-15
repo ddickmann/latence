@@ -102,7 +102,7 @@ fi
 if [ "$VPRR_PDFS" -gt 0 ] && [ -z "${SEC_UA:-}" ]; then
   die "SEC_UA is not set. The SEC returns HTTP 403 to any client without a declared User-Agent.
     Set a REAL, reachable contact, e.g.
-      export SEC_UA='Acme Research contact@acme.com'
+      export SEC_UA='Example Research contact@example.org'   # your own name and address
     Or skip the scanned axis with VPRR_PDFS=0."
 fi
 

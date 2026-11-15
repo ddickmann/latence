@@ -466,7 +466,7 @@ def test_a_pii_type_with_no_matching_cue_in_the_chunk_is_still_screened() -> Non
     redactor = Gliner2PIIRedactor({"pii_labels": floor, "guardrails": False})
     chunk = _chunk(
         "Shipping logistics update. Route 9 container manifest reconciled. "
-        "Questions to ops@example.gov. Card on file 4111 1111 1111 1111.",
+        "Questions to ops@example.org. Card on file 4111 1111 1111 1111.",
         induced=InducedLabels(
             entity_types=[], relation_types=[], pii_types=["email address"], model_id="lexicon"
         ),

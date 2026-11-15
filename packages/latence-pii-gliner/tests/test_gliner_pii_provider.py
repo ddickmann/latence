@@ -195,7 +195,7 @@ def _config() -> dict[str, Any]:
     return {"pii_labels": ["person", "email"]}
 
 
-_TEXT = "Reach Alice at alice@acme.com."
+_TEXT = "Reach Alice at alice@acme.example."
 
 
 def test_requires_pii_labels() -> None:
@@ -223,10 +223,10 @@ def test_pii_model_window_config_override(fake_gliner: type[_FakeGLiNER]) -> Non
 
 def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:
     a_start = _TEXT.index("Alice")
-    e_start = _TEXT.index("alice@acme.com")
+    e_start = _TEXT.index("alice@acme.example")
     fake_gliner.entities = [
         {"start": a_start, "end": a_start + 5, "label": "person", "score": 0.95},
-        {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9},
+        {"start": e_start, "end": e_start + 18, "label": "email", "score": 0.9},
     ]
     rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
     assert isinstance(rec, ChunkRecord)
@@ -234,7 +234,7 @@ def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:
     assert rec.content == _TEXT
     assert rec.masked_content is not None
     assert "Alice" not in rec.masked_content
-    assert "alice@acme.com" not in rec.masked_content
+    assert "alice@acme.example" not in rec.masked_content
     assert "[PERSON]" in rec.masked_content
     assert "[EMAIL]" in rec.masked_content
     assert {s.pii_type for s in rec.pii_spans} == {"person", "email"}
@@ -261,14 +261,14 @@ def test_span_offsets_are_chunk_local(fake_gliner: type[_FakeGLiNER]) -> None:
     # The Provider runs the model over the chunk's ``content``, so the model's offsets ARE
     # chunk-local offsets: the stamped span offset matches, and the slice round-trips to the raw
     # value (the coordinate system the spans use).
-    doc_e_start = _TEXT.index("alice@acme.com")
+    doc_e_start = _TEXT.index("alice@acme.example")
     fake_gliner.entities = [
-        {"start": doc_e_start, "end": doc_e_start + 14, "label": "email", "score": 0.9}
+        {"start": doc_e_start, "end": doc_e_start + 18, "label": "email", "score": 0.9}
     ]
     rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
     span = rec.pii_spans[0]
     assert span.char_start == doc_e_start
-    assert _TEXT[span.char_start : span.char_end] == "alice@acme.com"
+    assert _TEXT[span.char_start : span.char_end] == "alice@acme.example"
 
 
 def test_threshold_drops_low_scoring_spans(fake_gliner: type[_FakeGLiNER]) -> None:
@@ -297,11 +297,11 @@ def test_policy_keys_off_sensitivity(fake_gliner: type[_FakeGLiNER]) -> None:
 
 
 def test_span_page_resolves_through_page_map(fake_gliner: type[_FakeGLiNER]) -> None:
-    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@acme.com."])
+    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@acme.example."])
     text = assembly.text
-    e_start = text.index("alice@acme.com")
+    e_start = text.index("alice@acme.example")
     fake_gliner.entities = [
-        {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
+        {"start": e_start, "end": e_start + 18, "label": "email", "score": 0.9}
     ]
     rec = list(GlinerPIIRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)]))[0]
     assert rec.pii_spans[0].page_start == 2
@@ -319,14 +319,14 @@ def test_span_page_resolves_on_a_later_chunk_handed_over_first(
     ``redact`` call AND chunk 0 arrived first. Since v19 the chunk carries its own page
     spans, so the later chunk is handed over FIRST here and the answer is still exact.
     """
-    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@acme.com."])
+    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@acme.example."])
     text = assembly.text
     boundary = assembly.page_map.pages[1].char_start  # doc offset where page 2 starts
     head, tail = text[:boundary], text[boundary:]
-    e_local = tail.index("alice@acme.com")
+    e_local = tail.index("alice@acme.example")
     fake_gliner.per_text = {
         head: [],
-        tail: [{"start": e_local, "end": e_local + 14, "label": "email", "score": 0.9}],
+        tail: [{"start": e_local, "end": e_local + 18, "label": "email", "score": 0.9}],
     }
     chunks = [
         # v19 carriage: every chunk carries its own slice, so stream order is irrelevant —
@@ -349,12 +349,12 @@ def test_span_page_resolves_on_a_later_chunk_handed_over_first(
 
 
 def test_raw_pii_never_stored(fake_gliner: type[_FakeGLiNER]) -> None:
-    e_start = _TEXT.index("alice@acme.com")
+    e_start = _TEXT.index("alice@acme.example")
     fake_gliner.entities = [
-        {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
+        {"start": e_start, "end": e_start + 18, "label": "email", "score": 0.9}
     ]
     rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
-    assert "alice@acme.com" not in rec.pii_spans[0].model_dump_json()
+    assert "alice@acme.example" not in rec.pii_spans[0].model_dump_json()
 
 
 def test_empty_chunk_skipped_without_model_call(fake_gliner: type[_FakeGLiNER]) -> None:
@@ -487,9 +487,9 @@ def test_redaction_spans_are_identical_across_devices(
     fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The output contract does not move with the device — only throughput does (#191 AC 3)."""
-    e_start = _TEXT.index("alice@acme.com")
+    e_start = _TEXT.index("alice@acme.example")
     fake_gliner.entities = [
-        {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
+        {"start": e_start, "end": e_start + 18, "label": "email", "score": 0.9}
     ]
 
     def _run(device: str) -> list[tuple[Any, ...]]:

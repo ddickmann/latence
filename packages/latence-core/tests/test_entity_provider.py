@@ -453,7 +453,7 @@ def test_safe_config_patterns_still_compile_and_match() -> None:
             "WORD": {"patterns": [r"cat|dog|bird"]},
         }
     }
-    chunk = _chunk("Mail a@b.com id AB-12345 phone +1 555 123 4567 about a dog.")
+    chunk = _chunk("Mail a@b.example id AB-12345 phone +1 555 123 4567 about a dog.")
     mentions = list(GazetteerEntityExtractor(config).extract([chunk]))
     labels = {m.label for m in mentions}
     assert {"EMAIL", "ID", "PHONE", "WORD"} <= labels

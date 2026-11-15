@@ -954,13 +954,13 @@ def test_native_fault_becomes_typed_error_no_pii_leak(fake_gliner2: type[_FakeGL
 
     fake_gliner2.raise_on_extract = True
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
-    text = "Reach Alice at alice@acme.com."
+    text = "Reach Alice at alice@acme.example."
     with pytest.raises(ProviderError) as excinfo:
         Gliner2FusedExtractor(_config()).extract_fused([_chunk(text)])
     message = str(excinfo.value)
     assert "fused_entity_relation.gliner2" in message
     assert "extract_entities" in message
-    assert "alice@acme.com" not in message
+    assert "alice@acme.example" not in message
     assert "Alice" not in message
 
 

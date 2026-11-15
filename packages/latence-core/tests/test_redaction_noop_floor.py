@@ -218,7 +218,7 @@ def test_disabled_control_is_loud_in_quality_report_end_to_end(tmp_path: Path) -
         "Committed key ghp_ABCdef1234567890ABCdef1234567890abcd to the repo.\n",
         encoding="utf-8",
     )
-    (docs / "memo.txt").write_text("Please email alice@acme.com for access.\n", encoding="utf-8")
+    (docs / "memo.txt").write_text("Please email alice@acme.example for access.\n", encoding="utf-8")
     store = f"file://{tmp_path}/store"
 
     report = LocalRunner().run(_pipeline(store, docs), run_id="floor")

@@ -77,7 +77,7 @@ def _chunk(
     )
 
 
-_TEXT = "Contact alice@acme.com or call 555-123-4567 today."
+_TEXT = "Contact alice@acme.example or call 555-123-4567 today."
 
 
 # -- happy path ---------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_detects_and_masks_builtin_pii() -> None:
     assert rec.content == _TEXT
     # Both the email and the phone are masked in masked_content.
     assert rec.masked_content is not None
-    assert "alice@acme.com" not in rec.masked_content
+    assert "alice@acme.example" not in rec.masked_content
     assert "555-123-4567" not in rec.masked_content
     assert "[EMAIL]" in rec.masked_content
     assert "[PHONE]" in rec.masked_content
@@ -101,7 +101,7 @@ def test_detects_and_masks_builtin_pii() -> None:
     assert email.detector == "regex:email"
     assert email.action is RedactionAction.MASK
     assert email.placeholder == "[EMAIL]"
-    assert _TEXT[email.char_start : email.char_end] == "alice@acme.com"
+    assert _TEXT[email.char_start : email.char_end] == "alice@acme.example"
 
 
 def test_span_offsets_are_chunk_content_coordinates() -> None:
@@ -111,8 +111,8 @@ def test_span_offsets_are_chunk_content_coordinates() -> None:
     chunk = _chunk(prefix + _TEXT)
     rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     email = rec.pii_spans[0]
-    assert email.char_start == len(prefix) + _TEXT.index("alice@acme.com")
-    assert (prefix + _TEXT)[email.char_start : email.char_end] == "alice@acme.com"
+    assert email.char_start == len(prefix) + _TEXT.index("alice@acme.example")
+    assert (prefix + _TEXT)[email.char_start : email.char_end] == "alice@acme.example"
 
 
 def test_clean_chunk_yields_empty_spans_and_identical_text() -> None:
@@ -141,7 +141,7 @@ def test_replace_action_pseudonymises_deterministically() -> None:
     assert span.action is RedactionAction.REPLACE
     assert span.placeholder.startswith("EMAIL_")
     assert rec.masked_content is not None
-    assert "alice@acme.com" not in rec.masked_content
+    assert "alice@acme.example" not in rec.masked_content
     assert span.placeholder in rec.masked_content
 
 
@@ -237,7 +237,7 @@ def test_gazetteer_and_custom_patterns() -> None:
 def test_span_page_resolves_through_page_map() -> None:
     # Two-page document; the PII sits on page 2. Chunk the whole document so the chunk carries the
     # real offset_map + page_map; the chunk-local span must still resolve to page 2.
-    assembly = PageMap.from_page_texts(["First page has nothing.", "Reach alice@acme.com here."])
+    assembly = PageMap.from_page_texts(["First page has nothing.", "Reach alice@acme.example here."])
     chunk = _chunk(assembly.text, page_map=assembly.page_map)
     rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     span = rec.pii_spans[0]
@@ -253,7 +253,7 @@ def test_markup_stripped_chunk_offsets_and_page_are_faithful() -> None:
     from latence_core.contracts import DocumentRecord
 
     page1 = "# Confidential Report Heading\n\n**Overview** of the [system](http://ex.com)."
-    page2 = "Reach the admin at bob@corp.com immediately."
+    page2 = "Reach the admin at bob@corp.example immediately."
     assembly = PageMap.from_page_texts([page1, page2])
     doc = DocumentRecord(
         record_id="d1",
@@ -276,12 +276,12 @@ def test_markup_stripped_chunk_offsets_and_page_are_faithful() -> None:
     assert len(spans) == 1
     chunk, span = spans[0]
     # The offset is chunk-local into the (markup-stripped) content and round-trips to the value.
-    assert chunk.content[span.char_start : span.char_end] == "bob@corp.com"
+    assert chunk.content[span.char_start : span.char_end] == "bob@corp.example"
     # The email lives on page 2 — it must resolve there, not to page 1.
     assert span.page_start == 2
     assert span.page_end == 2
     # The masked variant is the faithful chunk content with only the email replaced.
-    assert chunk.masked_content == chunk.content.replace("bob@corp.com", "[EMAIL]")
+    assert chunk.masked_content == chunk.content.replace("bob@corp.example", "[EMAIL]")
 
 
 # -- determinism --------------------------------------------------------------
@@ -299,20 +299,20 @@ def test_raw_pii_never_stored_on_span() -> None:
     chunk = _chunk(_TEXT)
     rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     dumped = rec.pii_spans[0].model_dump_json()
-    assert "alice@acme.com" not in dumped
+    assert "alice@acme.example" not in dumped
 
 
 # -- multi-chunk ordering -----------------------------------------------------
 
 
 def test_chunks_threaded_one_to_one_in_first_seen_order() -> None:
-    c1 = _chunk("mail a@b.com", record_id="d1#chunk:0", document_record_id="d1", index=0)
-    c2 = _chunk("mail c@d.com", record_id="d2#chunk:0", document_record_id="d2", index=0)
+    c1 = _chunk("mail a@b.example", record_id="d1#chunk:0", document_record_id="d1", index=0)
+    c2 = _chunk("mail c@d.example", record_id="d2#chunk:0", document_record_id="d2", index=0)
     recs = list(HybridPIIRedactor({"detectors": ["email"]}).redact([c1, c2]))
     assert [r.record_id for r in recs] == ["d1#chunk:0", "d2#chunk:0"]
     assert all(len(r.pii_spans) == 1 for r in recs)
     # Content is unchanged; only masked_content carries the redaction.
-    assert [r.content for r in recs] == ["mail a@b.com", "mail c@d.com"]
+    assert [r.content for r in recs] == ["mail a@b.example", "mail c@d.example"]
 
 
 # -- config validation --------------------------------------------------------

@@ -92,7 +92,7 @@ def _docs(tmp_path: Path) -> Path:
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "memo.txt").write_text(
-        "Please email alice@acme.com or call 555-123-4567 for access.\n", encoding="utf-8"
+        "Please email alice@acme.example or call 555-123-4567 for access.\n", encoding="utf-8"
     )
     # A document with no PII: handled without error (clean masked variant).
     (docs / "clean.txt").write_text(
@@ -120,7 +120,7 @@ def test_redaction_slice_end_to_end(tmp_path: Path) -> None:
 
     # 2. PII is removed from the masked variant; the raw values are gone.
     assert memo.masked_content is not None
-    assert "alice@acme.com" not in memo.masked_content
+    assert "alice@acme.example" not in memo.masked_content
     assert "555-123-4567" not in memo.masked_content
     assert "[EMAIL]" in memo.masked_content
     assert "[PHONE]" in memo.masked_content
@@ -129,7 +129,7 @@ def test_redaction_slice_end_to_end(tmp_path: Path) -> None:
 
     # 3. The exported corpus TEXT is the masked variant (the Export materializes masked_content as
     #    the `content` column + JSONL), so a RAG consumer never reads raw PII.
-    assert memo.content is not None and "alice@acme.com" not in memo.content  # export-substituted
+    assert memo.content is not None and "alice@acme.example" not in memo.content  # export-substituted
 
     # 4. The round-trip: each chunk-local PII span resolves to the correct source page.
     for span in memo.pii_spans:
@@ -143,9 +143,9 @@ def test_redaction_slice_end_to_end(tmp_path: Path) -> None:
         for line in s.read_text(redact_ckpt).splitlines()
         if line.strip()
     ]
-    memo_stage = next(c for c in stage_chunks if "alice@acme.com" in c.content)
+    memo_stage = next(c for c in stage_chunks if "alice@acme.example" in c.content)
     assert memo_stage.masked_content is not None and "[EMAIL]" in memo_stage.masked_content
-    assert "alice@acme.com" not in memo_stage.masked_content
+    assert "alice@acme.example" not in memo_stage.masked_content
 
     # 6. A clean document yields chunks with no spans and untouched text.
     clean = next(
@@ -171,7 +171,7 @@ def test_redaction_slice_end_to_end(tmp_path: Path) -> None:
             if uri.endswith((".jsonl", ".json"))
             else " ".join(_parquet_cells(s, uri))
         )
-        assert "alice@acme.com" not in blob
+        assert "alice@acme.example" not in blob
         assert "555-123-4567" not in blob
 
 
@@ -234,7 +234,7 @@ stages:
         if line.strip()
     ]
     # No Redaction Stage ⇒ masked_content None ⇒ the corpus text is the un-redacted content.
-    memo = next(r for r in rows if "alice@acme.com" in (r.get("content") or ""))
+    memo = next(r for r in rows if "alice@acme.example" in (r.get("content") or ""))
     assert memo["masked_content"] is None
     assert memo["pii_spans"] == []
 

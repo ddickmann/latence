@@ -55,9 +55,9 @@ _EXPORT_LOGGER = "latence_core.stages.export"
 
 #: One redacted chunk's two text variants: the raw content the Redactor saw, and the PII-handled
 #: variant it produced. The email surface is the thing that must never reach a default export.
-_RAW_TEXT = "Contact alice@acme.com about the Q3 audit."
+_RAW_TEXT = "Contact alice@acme.example about the Q3 audit."
 _MASKED_TEXT = "Contact [EMAIL] about the Q3 audit."
-_PII_SURFACE = "alice@acme.com"
+_PII_SURFACE = "alice@acme.example"
 
 
 def _chunk(text: str, record_id: str = "c1", index: int = 0) -> ChunkRecord:

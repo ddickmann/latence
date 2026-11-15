@@ -23,7 +23,7 @@ from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
 # A chunk with a PII email (masked by redaction.hybrid_rule) and a non-PII ORG (kept).
-_EMAIL = "alice@secret.com"
+_EMAIL = "alice@secret.example"
 _DOC = f"Contact {_EMAIL} at Acme headquarters for the Acme roadmap."
 
 
