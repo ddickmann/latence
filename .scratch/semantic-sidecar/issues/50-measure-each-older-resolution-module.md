@@ -2,7 +2,7 @@
 
 Type: task
 Mode: AFK for what runs on a CPU; HITL for the linker path (its model)
-Status: open
+Status: measured on CPU (15 Nov): cascade retire, embedding (hashing) retire, Type Consolidation keep; open: the GPU runs (GLinker, learned embedder) as a live request
 Blocked by: nothing
 Emerges from: 13 (decided by the owner, 14 Nov: "an older module (the disambiguation cascade,
 embedding and linker paths, type consolidation) is kept only where a measurement shows it adds
@@ -42,3 +42,38 @@ at no loss of precision, retired otherwise.
   hashing embedder; the learned embedder needs a GPU) and Type Consolidation. **Live request:**
   `disambiguation.glinker` needs its model on a GPU (`LATENCE_CUDA=1 latence bake-off
   matrix/disambiguation.yaml` on the owner's machine once the gold set is declared on the stack).
+
+## Result (15 Nov)
+
+The decision rule, fixed in the harness before the run: **kept when pairwise F1 rises by at
+least 0.02 over the same run without the module and precision does not fall; retired
+otherwise.** Harness, gold sets and recorded result: `benchmark/resolution-modules/`
+(`measure.py`, `gold-mentions.json`, `gold-types.json`, `results.json`). Command:
+`PYTHONHASHSEED=0 uv run python benchmark/resolution-modules/measure.py`; a second run gives the
+same scores.
+
+- **The gold sets.** Mentions: 684 mentions of 179 organisations in 500 synthetic documents
+  (the spike's `generate_text.py`, seed 7, 150 entities: noisy surfaces and homonyms that differ
+  by city or industry). Type labels: 65 labels of 16 types, as free-form extractors write them,
+  with two pairs that must stay apart.
+- **Without a module**: for mentions, the cascade restricted to exact normalised surfaces
+  (P 0.946, R 0.265, F1 0.414); for type labels, labels equal once lower-cased (P 1.000, R 0.242,
+  F1 0.390).
+
+| Module | P / R / F1 with it | F1 gain | Precision change | Verdict |
+|---|---|---|---|---|
+| string cascade (`disambiguation.cascade`) | 0.754 / 0.304 / 0.433 | +0.019 | −0.192 | **retire** (ticket 60) |
+| embedding Disambiguator, hashing embedder | 0.616 / 0.265 / 0.371 | −0.043 | −0.330 | **retire** on this embedder (ticket 61) |
+| Type Consolidation, lexical rungs | 1.000 / 0.879 / 0.936 | +0.546 | 0.000 | **keep** |
+| GLinker linker (`disambiguation.glinker`) | not run: needs its model on a GPU | | | live request (61) |
+
+What this does not show: the gold set is template prose, easier than real text; the cascade's
+fuzzy rungs fire on the homonyms the generator plants, which is where its precision goes; the
+learned embedder may behave otherwise (ticket 61's live run decides it). Type Consolidation
+missed the synonyms no lexical rule can see (people, place) and never merged a pair that must
+stay apart.
+
+### Live request
+
+On the owner's machine (GPU): the GLinker linker and the embedding Disambiguator on the learned
+embedder over the same gold set, as ticket 61 states.

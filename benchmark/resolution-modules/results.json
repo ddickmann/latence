@@ -1,0 +1,74 @@
+{
+ "gold": {
+  "mentions": {
+   "documents": 500,
+   "entities": 179,
+   "file": "gold-mentions.json",
+   "generator": ".scratch/semantic-sidecar/spike/generate_text.py: generate(n_entities=150, seed=7, n_docs=500)",
+   "mentions": 684
+  },
+  "types": {
+   "file": "gold-types.json",
+   "labels": 65,
+   "types": 16
+  }
+ },
+ "modules": {
+  "disambiguation.cascade": {
+   "f1": 0.433,
+   "f1_gain": 0.0191,
+   "pairs_said": 508,
+   "pairs_true": 1261,
+   "precision": 0.7539,
+   "precision_change": -0.1923,
+   "recall": 0.3037,
+   "seconds": 0.678,
+   "verdict": "retire"
+  },
+  "disambiguation.embedding (hashing embedder)": {
+   "f1": 0.3705,
+   "f1_gain": -0.0434,
+   "pairs_said": 542,
+   "pairs_true": 1261,
+   "precision": 0.6162,
+   "precision_change": -0.33,
+   "recall": 0.2649,
+   "seconds": 0.965,
+   "verdict": "retire"
+  },
+  "type_consolidation": {
+   "f1": 0.9356,
+   "f1_gain": 0.546,
+   "pairs_said": 109,
+   "pairs_true": 124,
+   "precision": 1.0,
+   "precision_change": 0.0,
+   "recall": 0.879,
+   "seconds": 0.003,
+   "verdict": "keep"
+  }
+ },
+ "not_run": {
+  "disambiguation.embedding (learned embedder)": "needs a GPU (a live request)",
+  "disambiguation.glinker": "needs its model on a GPU (a live request)"
+ },
+ "rule": "kept when pairwise F1 rises by at least 0.02 over the run without the module and precision does not fall; retired otherwise",
+ "without": {
+  "mentions (exact surfaces)": {
+   "f1": 0.4139,
+   "pairs_said": 353,
+   "pairs_true": 1261,
+   "precision": 0.9462,
+   "recall": 0.2649,
+   "seconds": 0.005
+  },
+  "types (lower-cased labels)": {
+   "f1": 0.3896,
+   "pairs_said": 30,
+   "pairs_true": 124,
+   "precision": 1.0,
+   "recall": 0.2419,
+   "seconds": 0.0
+  }
+ }
+}

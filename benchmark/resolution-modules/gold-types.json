@@ -1,0 +1,330 @@
+{
+ "about": "Synthetic entity-type labels as free-form extractors write them: case, plural, British spelling, abbreviations, acronyms, punctuation, one synonym per type that no lexical rule can see (people, place), and pairs that must stay apart (product/production, part/party). `type` is the gold.",
+ "labels": [
+  {
+   "label": "organization",
+   "type": "organization",
+   "count": 10
+  },
+  {
+   "label": "Organization",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "ORGANIZATION",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "organizations",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "organisation",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "Organisations",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "org",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "Org.",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "ORG",
+   "type": "organization",
+   "count": 3
+  },
+  {
+   "label": "person",
+   "type": "person",
+   "count": 10
+  },
+  {
+   "label": "Person",
+   "type": "person",
+   "count": 3
+  },
+  {
+   "label": "PERSON",
+   "type": "person",
+   "count": 3
+  },
+  {
+   "label": "persons",
+   "type": "person",
+   "count": 3
+  },
+  {
+   "label": "PER",
+   "type": "person",
+   "count": 3
+  },
+  {
+   "label": "people",
+   "type": "person",
+   "count": 3
+  },
+  {
+   "label": "location",
+   "type": "location",
+   "count": 10
+  },
+  {
+   "label": "Location",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "LOCATION",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "locations",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "loc",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "LOC",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "place",
+   "type": "location",
+   "count": 3
+  },
+  {
+   "label": "product",
+   "type": "product",
+   "count": 10
+  },
+  {
+   "label": "Product",
+   "type": "product",
+   "count": 3
+  },
+  {
+   "label": "PRODUCT",
+   "type": "product",
+   "count": 3
+  },
+  {
+   "label": "products",
+   "type": "product",
+   "count": 3
+  },
+  {
+   "label": "production",
+   "type": "production",
+   "count": 10
+  },
+  {
+   "label": "Production",
+   "type": "production",
+   "count": 3
+  },
+  {
+   "label": "event",
+   "type": "event",
+   "count": 10
+  },
+  {
+   "label": "Event",
+   "type": "event",
+   "count": 3
+  },
+  {
+   "label": "EVENT",
+   "type": "event",
+   "count": 3
+  },
+  {
+   "label": "events",
+   "type": "event",
+   "count": 3
+  },
+  {
+   "label": "date",
+   "type": "date",
+   "count": 10
+  },
+  {
+   "label": "Date",
+   "type": "date",
+   "count": 3
+  },
+  {
+   "label": "DATE",
+   "type": "date",
+   "count": 3
+  },
+  {
+   "label": "dates",
+   "type": "date",
+   "count": 3
+  },
+  {
+   "label": "facility",
+   "type": "facility",
+   "count": 10
+  },
+  {
+   "label": "Facility",
+   "type": "facility",
+   "count": 3
+  },
+  {
+   "label": "facilities",
+   "type": "facility",
+   "count": 3
+  },
+  {
+   "label": "FAC",
+   "type": "facility",
+   "count": 3
+  },
+  {
+   "label": "vehicle",
+   "type": "vehicle",
+   "count": 10
+  },
+  {
+   "label": "Vehicle",
+   "type": "vehicle",
+   "count": 3
+  },
+  {
+   "label": "vehicles",
+   "type": "vehicle",
+   "count": 3
+  },
+  {
+   "label": "component",
+   "type": "component",
+   "count": 10
+  },
+  {
+   "label": "Component",
+   "type": "component",
+   "count": 3
+  },
+  {
+   "label": "components",
+   "type": "component",
+   "count": 3
+  },
+  {
+   "label": "geopolitical entity",
+   "type": "geopolitical entity",
+   "count": 10
+  },
+  {
+   "label": "Geopolitical Entity",
+   "type": "geopolitical entity",
+   "count": 3
+  },
+  {
+   "label": "GPE",
+   "type": "geopolitical entity",
+   "count": 3
+  },
+  {
+   "label": "work of art",
+   "type": "work of art",
+   "count": 10
+  },
+  {
+   "label": "Work of Art",
+   "type": "work of art",
+   "count": 3
+  },
+  {
+   "label": "WORK_OF_ART",
+   "type": "work of art",
+   "count": 3
+  },
+  {
+   "label": "language",
+   "type": "language",
+   "count": 10
+  },
+  {
+   "label": "Language",
+   "type": "language",
+   "count": 3
+  },
+  {
+   "label": "languages",
+   "type": "language",
+   "count": 3
+  },
+  {
+   "label": "lang",
+   "type": "language",
+   "count": 3
+  },
+  {
+   "label": "part",
+   "type": "part",
+   "count": 10
+  },
+  {
+   "label": "Part",
+   "type": "part",
+   "count": 3
+  },
+  {
+   "label": "parts",
+   "type": "part",
+   "count": 3
+  },
+  {
+   "label": "party",
+   "type": "party",
+   "count": 10
+  },
+  {
+   "label": "Party",
+   "type": "party",
+   "count": 3
+  },
+  {
+   "label": "parties",
+   "type": "party",
+   "count": 3
+  },
+  {
+   "label": "law",
+   "type": "law",
+   "count": 10
+  },
+  {
+   "label": "Law",
+   "type": "law",
+   "count": 3
+  },
+  {
+   "label": "laws",
+   "type": "law",
+   "count": 3
+  }
+ ]
+}
