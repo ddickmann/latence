@@ -8,6 +8,9 @@ nothing. Regenerate with::
     PYTHONHASHSEED=0 uv run python packages/latence-core/tests/_c5_broad_stack.py
 
 Only do that deliberately: the fixture's whole job is to fail when the report's bytes move.
+Re-recorded on 2026-11-15 for ADR-0076 only: the 14 Provider profiles that state the
+framework's own licence (``REPO_LICENSE_CODE``) now read ``LicenseRef-Proprietary`` instead of
+``Apache-2.0``; no other byte moved.
 """
 
 from __future__ import annotations
