@@ -258,7 +258,7 @@ Download all the release assets into one directory, then:
 
 \`\`\`bash
 # 1. Verify the signature over SHA256SUMS (uvx = uv tool run; pipx run sigstore also works)
-uvx sigstore==4.5.1 verify identity \\
+uvx --from sigstore==4.5.1 sigstore verify identity \\
   --bundle SHA256SUMS.sigstore.json \\
   --cert-identity '${CERT_IDENTITY}' \\
   --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\

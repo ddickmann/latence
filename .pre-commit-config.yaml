@@ -36,7 +36,7 @@ repos:
       # history, so commit time is the only useful place to catch it.
       - id: detect-secrets-gate
         name: detect-secrets (audited baseline gate)
-        entry: uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py
+        entry: uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py  # pragma: allowlist secret
         language: system
         pass_filenames: false
         always_run: true

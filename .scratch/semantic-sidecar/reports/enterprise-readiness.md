@@ -184,11 +184,12 @@ this branch; the next session takes these in order.
      `AGENTS.md` § 4.
    - `test_front_door_truthfulness.py` and `test_continuity_statement.py` will name whatever is
      missed.
-2. **The final gate run.** `bash scripts/verify-local.sh > log 2>&1; echo REAL_EXIT=$?` on the
-   branch head. It now includes the lock check and the advisory audit. The run started at
-   `e746607` is not usable past its pytest step: the script was edited while it ran, and the
-   heavy editables were removed briefly. That run showed one failure at 30%; find it and check
-   whether it reproduces on the head.
+2. **The final gate run.** Run `bash scripts/verify-local.sh > log 2>&1; echo REAL_EXIT=$?` on
+   the branch head. It now includes the lock check and the advisory audit. The run started at
+   `e746607` failed three tests (`test_envspec[served-ocr-client]` and two in
+   `test_release_integrity`). All three came from this branch's edits during the run (the Pillow
+   cap, the sigstore pin) and pass at `HEAD` (`d2` commit below). Its later lanes are not usable:
+   the script was edited while it ran.
 3. **Coverage floor (M5).** Measure with
    `uv run --with pytest-cov==7.1.0 pytest packages --cov=packages --cov-report=json`. Set
    `--cov-fail-under` in `ci.yml` at the measured whole percent, rounded down.
@@ -198,3 +199,9 @@ this branch; the next session takes these in order.
 5. **Docs build.** `uv sync --extra docs && uv run mkdocs build --strict`.
    `docs/RELEASING.md` and `docs/getting-started/index.md` changed on this branch. Afterwards,
    reinstall the heavy editables as `verify-local.sh` does.
+6. **Live request: re-solve `deploy/env/served-ocr-client/requirements.lock`.** Run
+   `bash deploy/env/served-ocr-client/install.sh --relock` on a host that can reach
+   download.pytorch.org, which this machine's network refuses. Its `requirements.in` now allows
+   Pillow 13. Its lock still pins Pillow 12.3.0: valid against `<14`, but carrying the advisories
+   that 13.0 fixes. `scripts/vuln_audit.py` audits the uv locks only, so an environment lock
+   under `deploy/env/` is outside it. Extending the audit to them is the follow-up.

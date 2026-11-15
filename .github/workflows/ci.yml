@@ -48,7 +48,7 @@ jobs:
       # tree is always green; only a genuinely new or newly-un-audited secret turns it red.
       # `uv run --with detect-secrets --no-project` puts the CLI on PATH without syncing.
       - name: detect-secrets (audited baseline gate)
-        run: uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py
+        run: uv run --with detect-secrets==1.5.0 --no-project python scripts/secret_scan_gate.py  # pragma: allowlist secret
 
   # ---- Supply chain: every committed lock is current, and no dependency in it carries a
   # known advisory that scripts/vuln-accepted.toml does not accept with a stated reason.

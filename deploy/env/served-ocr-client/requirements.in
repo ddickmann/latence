@@ -13,7 +13,7 @@ fsspec>=2024.2
     # via latence-core
 openai>=1.0,<3
     # via latence-parser-lighton-vllm
-pillow>=10.0,<13
+pillow>=10.0,<14
     # via latence-parser-lighton, latence-parser-lighton-vllm
 pyarrow>=15.0
     # via latence-core
