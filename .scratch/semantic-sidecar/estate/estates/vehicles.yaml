@@ -35,7 +35,7 @@ personal_objects: [internal.owners, internal.vehicles, internal.warranty_contrac
 without_personal_columns: [internal.dealers]
 # Value sets whose values are names of organisations: spellings that may be the same are listed for review.
 resolve: [manufacturer]
-# The seeded second source (`python -m estate seed`): accounts of a partner portal, generated
+# The seeded second source (`latence-ontology seed`): accounts of a partner portal, generated
 # from the dealers below into the schema `partner` of a copy of the mirror. Generated data,
 # marked as such in the catalog, in the export and on the screen.
 seeded:
@@ -71,7 +71,7 @@ classes:
   # to have cost. Read on 2026-11-11 from third-party price listings; the provider's own price
   # page could not be opened from where this was written. Reasoning tokens are output tokens.
   prices: {input_per_1m: 0.10, output_per_1m: 0.50, read_on: "2026-11-11", source: third-party listings}
-# What a host's semantic layer may be handed in a proposal file (`python -m estate propose`),
+# What a host's semantic layer may be handed in a proposal file (`latence-ontology propose`),
 # from approved decisions only and never from the seeded source.
 # `names`: the master lists whose rows carry a name a question may use. A list that is not
 # named here gives no names, whatever a reviewer approved.

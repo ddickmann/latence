@@ -17,6 +17,15 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Added
 
+- **`latence-ontology`, the ontology build over a data estate.** It reads an estate's catalog (a
+  DuckDB mirror, or Unity Catalog through the Databricks REST API over the standard library),
+  induces the schema level of its ontology with the evidence for every element, keeps assertions
+  and a person's decisions in an append-only ledger, and writes the `graph-export/3` file (its
+  JSON Schema shipped as package data) with Turtle, SHACL and PROV-O beside it; its command is
+  `latence-ontology`. The estate prototype's code moved into it under the repository's gates,
+  and the vehicle estate's export is the prototype's bytes. It depends on `latence-core`,
+  `latence-proposal-writer`, PyYAML and DuckDB; the hosted model's voice is the `hosted-model`
+  extra. It registers no Provider. 32 packages.
 - **`latence-proposal-writer`, the optional adapter for a host's semantic layer
   ([ADR-0070](docs/adr/0070-metis-consumes-the-engine-through-one-proposal-file-and-otherwise-through-unity-catalog.md)).**
   It writes the reviewable proposal file from a build's export and the decisions in force (two

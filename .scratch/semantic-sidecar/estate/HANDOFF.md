@@ -37,25 +37,32 @@ uv run metis-dev usage export \
 
 **3. The two environments and their tests**
 
+The build is the workspace package `latence-ontology` (ticket 56); `uv sync` installs it with
+the repository's dev environment, and its command is `latence-ontology`.
+
 ```bash
+cd $LATENCE && uv sync
+PYTHONHASHSEED=0 uv run pytest packages/latence-ontology -o addopts=""   # the build's tests
 cd $LATENCE/.scratch/semantic-sidecar/estate
-python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
 python3.12 -m venv ../spike/.venv && ../spike/.venv/bin/pip install -q -r ../spike/requirements-link.txt
-PYTHONHASHSEED=0 .venv/bin/python -m pytest -q tests                      # 119 pass
 ```
+
+With the inputs of block 2 in one folder (`vehicles.duckdb`, `metric_views.txt`, `usage.jsonl`
+and the host's `catalog.yaml`), `LATENCE_ONTOLOGY_VEHICLE_INPUTS=<folder>` makes the package's
+test hold the vehicle estate's export to the bytes the prototype wrote.
 
 **4. The seeded second source, the build, the export**
 
 ```bash
 cd $LATENCE/.scratch/semantic-sidecar/estate
-.venv/bin/python -m estate seed --config estates/vehicles.yaml --duckdb /tmp/vehicles.duckdb \
+uv run latence-ontology seed --config estates/vehicles.yaml --duckdb /tmp/vehicles.duckdb \
     --out-duckdb /tmp/vehicles_seeded.duckdb --out out/vehicles
-PYTHONHASHSEED=0 .venv/bin/python -m estate build --config estates/vehicles.yaml \
+PYTHONHASHSEED=0 uv run latence-ontology build --config estates/vehicles.yaml \
     --duckdb /tmp/vehicles_seeded.duckdb --metric-views /tmp/metric_views.txt \
     --verified $METIS/tools/synth/estates/catalog.yaml --resolver ../spike \
     --class-answer estates/vehicles.classes_answer.gpt-6-luna.json \
     --usage /tmp/usage.jsonl --out out/vehicles
-.venv/bin/python -m estate export --out out/vehicles --ui-dir $METIS/reference-ui/public/data/ontology
+uv run latence-ontology export --out out/vehicles --ui-dir $METIS/reference-ui/public/data/ontology
 ```
 
 The build takes about a minute, most of it the record linker. Expected on the vehicle estate:
@@ -80,7 +87,7 @@ Open `estates/vehicles.gold.yaml`, correct what is wrong, decide the three entri
 
 ```bash
 cd $LATENCE/.scratch/semantic-sidecar/estate
-.venv/bin/python -m estate score --out out/vehicles --gold estates/vehicles.gold.yaml
+uv run latence-ontology score --out out/vehicles --gold estates/vehicles.gold.yaml
 git add estates/vehicles.gold.yaml && git commit -m "estate: the hand-checked list for the vehicle estate, corrected"
 git pull --rebase origin claude/blissful-maxwell-bpln7a && git push origin claude/blissful-maxwell-bpln7a
 ```
@@ -92,10 +99,10 @@ cd $LATENCE/.scratch/semantic-sidecar/estate
 export DATABRICKS_HOST=https://<workspace>        # in the shell, never in a file
 export DATABRICKS_WAREHOUSE_ID=<id>
 export DATABRICKS_TOKEN=<token>                    # or DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET
-.venv/bin/python -m estate build --config estates/vehicles.yaml --catalog <catalog> \
+uv run latence-ontology build --config estates/vehicles.yaml --catalog <catalog> \
     --verified $METIS/tools/synth/estates/catalog.yaml \
     --class-answer estates/vehicles.classes_answer.gpt-6-luna.json --out out/vehicles-uc
-.venv/bin/python -m estate compare --a out/vehicles --b out/vehicles-uc
+uv run latence-ontology compare --a out/vehicles --b out/vehicles-uc
 ```
 
 Report back the output of `compare`, or the first error with the statement id it names. The
@@ -106,7 +113,7 @@ loaded, so the catalog's build links no records; that difference is expected.
 
 ```bash
 cd $LATENCE/.scratch/semantic-sidecar/estate
-.venv/bin/python -m estate propose --config estates/vehicles.yaml --out out/vehicles \
+uv run latence-ontology propose --config estates/vehicles.yaml --out out/vehicles \
     --decided-on <YYYY-MM-DD>                # only for lines without a day (a page before the host's ticket 282)
 cd $METIS
 uv run metis-dev propose estate-semantics --apply --release <version> --receipt /tmp/receipt.json \
@@ -160,8 +167,8 @@ placements, pairs of names), press *Download decisions*, and put the file at
 ## The proposal file for the host's semantic layer
 
 The one way anything a review approved reaches the host's semantic layer (ADR-0070).
-`estate propose` writes `out/vehicles/proposal.yaml` through the repository's package
-`latence-proposal-writer` (installed by `requirements.txt` from this checkout); the file's
+`latence-ontology propose` writes `out/vehicles/proposal.yaml` through the repository's package
+`latence-proposal-writer` (installed with the workspace); the file's
 shape is that package's `schema/proposal-file.schema.json`, written from the host's description
 of what its tool reads.
 
@@ -176,7 +183,7 @@ of what its tool reads.
   concept, append to `out/vehicles/decisions.jsonl` by hand:
   `{"subject": "concept:internal.dealers", "verdict": "approved", "by": "<person id>", "claim": "<claim>", "at": "<YYYY-MM-DD>"}`,
   with the claim the export states for it:
-  `.venv/bin/python -c "import json; print(next(c['claim'] for c in json.load(open('out/vehicles/ontology.json'))['concepts'] if c['id'] == 'concept:internal.dealers'))"`.
+  `uv run python -c "import json; print(next(c['claim'] for c in json.load(open('out/vehicles/ontology.json'))['concepts'] if c['id'] == 'concept:internal.dealers'))"`.
 - **The day.** A line the page downloads carries its time (`at`, UTC) since the host's
   ticket 282, and the command takes the day from it. A line without one (an older page, a line
   by hand) needs `"at"` added, or `--decided-on` for all the lines without one; the option
@@ -197,7 +204,7 @@ of what its tool reads.
   `--receipt` writes what was placed, what was already there and what was refused. The host
   refuses on its own what is marked seeded or rests on simulated labels; this side never
   writes such an entry.
-- **The receipt.** `estate build --receipt <file>` (repeat for more, oldest first) puts
+- **The receipt.** `latence-ontology build --receipt <file>` (repeat for more, oldest first) puts
   `in_layer` (the library and its version) on an approved element the receipt lists as
   *placed*, if the element still states what was placed. An element a receipt lists as
   already there gets nothing from that receipt: it does not say since when. The host's
@@ -240,7 +247,7 @@ voice. For the language-model voice add one of:
 ## Reading Unity Catalog instead of the mirror
 
 `--catalog <name>` in place of `--duckdb` reads the estate from Unity Catalog and runs the
-counting statements on a SQL warehouse (`estate/reader_databricks.py`). Host, warehouse and
+counting statements on a SQL warehouse (`packages/latence-ontology/src/latence_ontology/reader_databricks.py`). Host, warehouse and
 credentials come from the environment (block 7). **Proven against a stand-in server only; not
 yet run against a workspace.** The stand-in proves the protocol (pages, pending statements,
 results in parts, a refused token, a failed statement); it does not prove the warehouse's SQL.

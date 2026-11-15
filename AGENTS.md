@@ -37,7 +37,7 @@ Evidence, Quarantine) and avoid the synonyms it bans.
 ## Repository shape
 
 A [uv](https://docs.astral.sh/uv/) workspace. `[tool.uv.workspace] members = ["packages/*"]` in the
-root `pyproject.toml`; **31 packages** under `packages/`, each an independently publishable
+root `pyproject.toml`; **32 packages** under `packages/`, each an independently publishable
 distribution.
 
 **One of them is deliberately NOT a workspace member.** `packages/latence-gliner25` pins a
@@ -50,7 +50,7 @@ three things had to be taught about it, and all three are gated: the release bui
 and `scripts/generate-sbom.sh` folds that lock into the SBOM union.
 
 ```
-packages/latence-<family>-<name>/     30 of these
+packages/latence-<family>-<name>/     31 of these
 ├── pyproject.toml                    deps, classifiers, the entry-point registration
 ├── LICENSE                           must match the root LICENSE
 ├── README.md                         this distribution's PyPI long_description

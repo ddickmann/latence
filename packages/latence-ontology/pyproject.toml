@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-ontology"
+version = "0.1.0"
+description = "The ontology build over a data estate: reads a catalog (a DuckDB mirror or Unity Catalog), induces the schema level of its ontology with the evidence for every element, keeps assertions and a person's decisions in an append-only ledger, and writes the graph-export/3 file with its Turtle, SHACL and PROV-O companions."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "ontology", "semantic-layer", "data-catalog", "unity-catalog", "review"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+# The core for its typed errors, the proposal writer (ticket 43) for the one file a host reads,
+# PyYAML for the estate file, and DuckDB: the local mirror is read through it, and the records
+# file for the record linker and the seeded second source are written through it whichever reader
+# supplied the catalog, so it is not optional.
+# The Unity Catalog reader speaks the Databricks REST API over the standard library and needs no
+# client; the hosted model's voice needs the OpenAI client and is the one extra.
+dependencies = [
+    "latence-core",
+    "latence-proposal-writer",
+    "pyyaml>=6.0",
+    "duckdb>=1.1",
+]
+
+[project.optional-dependencies]
+hosted-model = ["openai>=1.40"]
+
+[project.scripts]
+latence-ontology = "latence_ontology.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence"
+Repository = "https://github.com/ddickmann/latence"
+Documentation = "https://ddickmann.github.io/latence/"
+Issues = "https://github.com/ddickmann/latence/issues"
+Changelog = "https://github.com/ddickmann/latence/blob/main/CHANGELOG.md"
+
+# Registers NOTHING under `latence.providers`: the build is not a Stage. It reads a catalog and
+# writes files a host reads; its one seam to a host is the proposal file (ADR-0070).
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_ontology"]

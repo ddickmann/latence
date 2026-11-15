@@ -60,6 +60,7 @@ latence-benchmark = { workspace = true }
 latence-console = { workspace = true }
 latence-demo = { workspace = true }
 latence-proposal-writer = { workspace = true }
+latence-ontology = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -140,6 +141,14 @@ dependencies = [
     # back. ZERO new deps beyond latence-core, no model, no network, and it registers no Provider,
     # so like latence-console it installs into the default dev env and its tests run offline.
     "latence-proposal-writer",
+
+    # The ontology build over a data estate (ticket 56): it reads a catalog (a DuckDB mirror or
+    # Unity Catalog over the standard library's HTTP client) and writes the export, its Turtle,
+    # SHACL and PROV-O files and, through latence-proposal-writer, the proposal file. Its one new
+    # dependency is DuckDB (an in-process database, no network, no model); it registers no
+    # Provider, so it installs into the default dev env and its tests run offline. Its hosted
+    # model's voice is the `hosted-model` extra and is NOT installed here (tests use a stand-in).
+    "latence-ontology",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
@@ -189,6 +198,10 @@ dev = [
     # never a runtime dependency of any package; the stubs keep its tests under strict mypy.
     "jsonschema>=4.20",
     "types-jsonschema>=4.20",
+    # latence-ontology's Turtle, SHACL and PROV-O files are parsed back with rdflib and the SHACL
+    # shapes validated with pySHACL, in its tests only. DEV-only, never a runtime dependency.
+    "rdflib>=7.0",
+    "pyshacl>=0.26",
 ]
 
 [tool.ruff]

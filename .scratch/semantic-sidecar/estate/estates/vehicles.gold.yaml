@@ -2,7 +2,7 @@
 #
 # DRAFT. Written from the catalog and the data, not from what the engine proposed. Until a
 # person has corrected it and put a name under checked_by, the score against it does not count:
-# `python -m estate score` prints the numbers and marks them as not measured.
+# `latence-ontology score` prints the numbers and marks them as not measured.
 #
 # How to correct it: change a class, add or remove a step, move an entry out of `unsure` once
 # you have decided it, or into it if you would not decide it either. Then set checked_by.
