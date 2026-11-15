@@ -49,7 +49,7 @@ to the map's owner), the rest green.
 
 | # | Requirement | Verdict | Evidence | Gap | Smallest fix | Size | Fix |
 |---|---|---|---|---|---|---|---|
-| D1 | Synthetic data carries no real person's or company's address | **amber** | 57 addresses at registrable domains in tests and a script: `alice@acme.com` ×50, `bob@corp.com`, `a@b.com`, `c@d.com`, `alice@secret.com`, `ops@example.gov` | Real domains in records called synthetic | Reserved names (RFC 2606/6761) and a gate over the tracked tree | S | `79600fc` |
+| D1 | Synthetic data carries no real person's or company's address | **amber** | 57 addresses at registrable domains in tests and a script, at `acme.com` (50), `corp.com`, `b.com`, `d.com`, `secret.com` and `example.gov` | Real domains in records called synthetic | Reserved names (RFC 2606/6761) and a gate over the tracked tree | S | `79600fc` |
 | D2 | No value of a sensitive column leaves the warehouse | green | `instances.py:19,86,221`; `test_a_column_tagged_sensitive_is_in_no_statement` | — | — | — | — |
 | D3 | Erasure when a column turns sensitive | green | `erasure.py`, `cli.py:176-193` | — | — | — | — |
 | D4 | PII floor beneath every redaction Provider | green | `redaction_policy.py` (`finalize_redacted_chunk`), its tests | — | — | — | — |
