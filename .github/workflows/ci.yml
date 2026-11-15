@@ -145,8 +145,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Coverage is SURFACED, never hard-gated (a % threshold flakes; see the job summary
-      # + the uploaded artifact + the `coverage:` line below for the badge-ready number).
+      # Coverage is surfaced (the job summary, the uploaded artifact and the `coverage:` line
+      # below) and has a floor: 91, the whole percent below the 91.10% measured over
+      # `packages` on 2026-11-15 (enterprise-readiness M5), so a change that drops tested
+      # code fails here rather than going unnoticed. Raise it as coverage rises; never lower
+      # it to pass.
       # Installed like the heavy sources (uv pip install into the synced venv, then uv run)
       # so it never perturbs the locked dev env.
       - name: Install pytest-cov
@@ -159,6 +162,7 @@ jobs:
           --cov-report=term-missing:skip-covered
           --cov-report=xml:coverage.xml
           --cov-report=json:coverage.json
+          --cov-fail-under=91
 
       # The test files outside packages/ (pytest's testpaths), named one by one; the same list as
       # scripts/verify-local.sh, held to every tracked test file by test_every_test_file_has_a_gate.py.
